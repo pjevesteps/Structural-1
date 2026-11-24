@@ -66,3 +66,12 @@
 .pdf-transfer-btn{width:100%;padding:11px 14px;font-size:12px}
 @media(max-width:980px){.pdf-workspace{grid-template-columns:1fr}.pdf-controls-strip{grid-template-columns:1fr}.pdf-review-col{max-height:none}}
 @media(max-width:560px){.pdf-topbar-actions{width:100%}.pdf-select{width:100%}}
+
+/* Collapsible Detection Settings bar */
+.pdf-detect-settings{background:#111d2e;border:1px solid #26364d;border-radius:10px;overflow:hidden}
+.pdf-settings-toggle{width:100%;display:flex;justify-content:space-between;align-items:center;gap:10px;background:transparent;color:#d8e3f0;padding:9px 12px;font-size:11px;font-weight:700;text-align:left;border-radius:0}
+.pdf-settings-toggle small{color:#8999ae;font-weight:500;font-size:10px}
+.pdf-settings-fields{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 12px;border-top:1px solid #223147;background:#0e1828}
+.pdf-field-chip{display:inline-flex;align-items:center;gap:6px;font-size:10px;color:#9baabe;font-weight:600;letter-spacing:.3px;text-transform:none}
+.pdf-field-chip input{width:64px;background:#111d2e;color:#eaf0f6;border:1px solid #304560;border-radius:6px;padding:5px 7px;font-size:11px}
+.pdf-check-chip{display:inline-flex;align-items:center;gap:5px;font-size:10px;color:#c7d5e5;font-weight:600;letter-spacing:.2px;cursor:pointer}

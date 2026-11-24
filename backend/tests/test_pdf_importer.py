@@ -379,3 +379,159 @@ def test_pdf_importer_end_to_end(isolated_env):
     assert vlm_body["grids_detected"] == 0
     assert vlm_body["columns_detected"] == 0
     assert "placeholder" in vlm_body["notice"].lower()
+
+
+def _build_dashed_and_bordered_pdf() -> bytes:
+    """
+    Create a 2-page synthetic PDF to test border exclusion, dashed grid merging, and label matching:
+      - Page 1 (vector):
+          * Outer sheet border drawn as 4 lines inside the outer 4% margin (must be ignored)
+          * Dashed vertical grids ("1" at x=160 pt, "2" at x=420 pt) drawn as short colinear segments
+          * Dashed horizontal grids ("A" at y=320 pt, "B" at y=150 pt) drawn as short colinear segments
+          * Text labels ("1", "2", "A", "B") placed near grid endpoints
+      - Page 2 (scanned raster):
+          * Outer border rectangle inside outer 4% margin (must be ignored)
+          * Dashed vertical and horizontal grid lines (must be merged via HoughLinesP + clustering)
+    """
+    doc = pymupdf.open()
+
+    # --- Page 1: Vector with outer border + dashed grids + endpoint labels ---
+    p1 = doc.new_page(width=600, height=450)
+    shape = p1.new_shape()
+
+    # Outer sheet border lines within outer 4% margin (x=12, 588; y=10, 440) -> MUST be ignored
+    shape.draw_line(pymupdf.Point(12.0, 10.0), pymupdf.Point(588.0, 10.0))
+    shape.finish(color=(0, 0, 0), width=1.2)
+    shape.draw_line(pymupdf.Point(12.0, 440.0), pymupdf.Point(588.0, 440.0))
+    shape.finish(color=(0, 0, 0), width=1.2)
+    shape.draw_line(pymupdf.Point(12.0, 10.0), pymupdf.Point(12.0, 440.0))
+    shape.finish(color=(0, 0, 0), width=1.2)
+    shape.draw_line(pymupdf.Point(588.0, 10.0), pymupdf.Point(588.0, 440.0))
+    shape.finish(color=(0, 0, 0), width=1.2)
+
+    # Dashed vertical grid lines (short 14pt dashes with 10pt gaps) spanning y=80..380
+    for label, x in [("1", 160.0), ("2", 420.0)]:
+        y = 80.0
+        while y < 380.0:
+            y_end = min(y + 14.0, 380.0)
+            shape.draw_line(pymupdf.Point(x, y), pymupdf.Point(x, y_end))
+            shape.finish(color=(0.2, 0.2, 0.2), width=0.8)
+            y += 24.0
+        p1.insert_text(pymupdf.Point(x - 3.5, 68.0), label, fontsize=11)
+
+    # Dashed horizontal grid lines (short 14pt dashes with 10pt gaps) spanning x=90..510
+    for label, y in [("A", 320.0), ("B", 150.0)]:
+        x = 90.0
+        while x < 510.0:
+            x_end = min(x + 14.0, 510.0)
+            shape.draw_line(pymupdf.Point(x, y), pymupdf.Point(x_end, y))
+            shape.finish(color=(0.2, 0.2, 0.2), width=0.8)
+            x += 24.0
+        p1.insert_text(pymupdf.Point(72.0, y + 4.0), label, fontsize=11)
+
+    shape.commit()
+
+    # --- Page 2: Scanned raster with outer border + dashed grid lines ---
+    raster = np.full((600, 800, 3), 255, dtype=np.uint8)
+    # Outer sheet border within outer 4% margin (x=15..785, y=12..588) -> MUST be ignored
+    cv2.rectangle(raster, (15, 12), (785, 588), (0, 0, 0), 2)
+    # Dashed vertical grids at x=220 and x=580
+    for gx in (220, 580):
+        for y in range(90, 510, 36):
+            cv2.line(raster, (gx, y), (gx, min(y + 22, 510)), (20, 20, 20), 2)
+    # Dashed horizontal grids at y=180 and y=430
+    for gy in (180, 430):
+        for x in range(110, 690, 36):
+            cv2.line(raster, (x, gy), (min(x + 22, 690), gy), (20, 20, 20), 2)
+
+    ok, png_buf = cv2.imencode(".png", raster)
+    assert ok
+    p2 = doc.new_page(width=600, height=450)
+    p2.insert_image(p2.rect, stream=png_buf.tobytes())
+
+    pdf_bytes = doc.tobytes()
+    doc.close()
+    return pdf_bytes
+
+
+def test_dashed_grids_labels_and_border_exclusion(isolated_env):
+    client, _ = isolated_env
+    pid = "GRID-TUNE"
+    assert client.post("/api/projects", json=_make_sample_project(pid)).status_code == 200
+
+    pdf_bytes = _build_dashed_and_bordered_pdf()
+    up = client.post(
+        f"/api/projects/{pid}/pdf-imports",
+        files={"file": ("dashed_grids.pdf", pdf_bytes, "application/pdf")},
+    )
+    assert up.status_code == 200, up.text
+    doc_id = up.json()["doc_id"]
+
+    # 1. Default ExtractionOptions on vector Page 1: border ignored, dashed grids merged & labeled
+    ext1 = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/pages/1/extract",
+        json={
+            "method": "vector",
+            "options": {
+                "border_margin_ratio": 0.04,
+                "min_span_ratio": 0.28,
+                "cluster_tolerance_px": 8.0,
+                "merge_dashed_segments": True,
+                "detect_grid_labels": True,
+            },
+        },
+    )
+    assert ext1.status_code == 200, ext1.text
+    body1 = ext1.json()
+    assert body1["grids_detected"] == 4
+
+    p1_grids = [g for g in body1["document"]["grid_candidates"] if g["page_number"] == 1]
+    x_grids = [g for g in p1_grids if g["axis"] == "x"]
+    y_grids = [g for g in p1_grids if g["axis"] == "y"]
+    assert sorted(g["label"] for g in x_grids) == ["1", "2"]
+    assert sorted(g["label"] for g in y_grids) == ["A", "B"]
+
+    # Confirm no outer border lines leaked in (all coords strictly inside 4% margin)
+    p1_info = body1["document"]["pages"][0]
+    for g in x_grids:
+        assert p1_info["width_px"] * 0.04 < g["coord_px"] < p1_info["width_px"] * 0.96
+    for g in y_grids:
+        assert p1_info["height_px"] * 0.04 < g["coord_px"] < p1_info["height_px"] * 0.96
+
+    # 2. Disabling merge_dashed_segments excludes dashed lines
+    ext_no_dash = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/pages/1/extract",
+        json={
+            "method": "vector",
+            "options": {"merge_dashed_segments": False},
+        },
+    )
+    assert ext_no_dash.status_code == 200
+    assert ext_no_dash.json()["grids_detected"] == 0
+
+    # 3. Scanned Page 2 via raster detection: outer border ignored, dashed grids merged
+    ext2 = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/pages/2/extract",
+        json={
+            "method": "raster",
+            "options": {
+                "border_margin_ratio": 0.04,
+                "min_span_ratio": 0.28,
+                "cluster_tolerance_px": 8.0,
+                "merge_dashed_segments": True,
+            },
+        },
+    )
+    assert ext2.status_code == 200, ext2.text
+    body2 = ext2.json()
+    p2_grids = [g for g in body2["document"]["grid_candidates"] if g["page_number"] == 2]
+    p2_x = [g for g in p2_grids if g["axis"] == "x"]
+    p2_y = [g for g in p2_grids if g["axis"] == "y"]
+    assert len(p2_x) == 2
+    assert len(p2_y) == 2
+
+    p2_info = body2["document"]["pages"][1]
+    for g in p2_x:
+        assert p2_info["width_px"] * 0.04 < g["coord_px"] < p2_info["width_px"] * 0.96
+    for g in p2_y:
+        assert p2_info["height_px"] * 0.04 < g["coord_px"] < p2_info["height_px"] * 0.96

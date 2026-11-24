@@ -108,10 +108,39 @@ class ColumnCandidate(BaseModel):
     notes: str = ""
 
 
+class ExtractionOptions(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    border_margin_ratio: float = Field(default=0.04, ge=0.0, lt=0.45)
+    min_span_ratio: float = Field(default=0.28, gt=0.0, le=1.0)
+    cluster_tolerance_px: float = Field(default=8.0, gt=0.0, le=100.0)
+    merge_dashed_segments: bool = True
+    detect_grid_labels: bool = True
+
+
 class ExtractRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     method: DetectionMethod = "auto"
     replace_unreviewed: bool = True
+    options: ExtractionOptions | None = None
+    border_margin_ratio: float | None = Field(default=None, ge=0.0, lt=0.45)
+    min_span_ratio: float | None = Field(default=None, gt=0.0, le=1.0)
+    cluster_tolerance_px: float | None = Field(default=None, gt=0.0, le=100.0)
+    merge_dashed_segments: bool | None = None
+    detect_grid_labels: bool | None = None
+
+    def resolved_options(self) -> ExtractionOptions:
+        base = self.options.model_dump() if self.options is not None else ExtractionOptions().model_dump()
+        for field_name in (
+            "border_margin_ratio",
+            "min_span_ratio",
+            "cluster_tolerance_px",
+            "merge_dashed_segments",
+            "detect_grid_labels",
+        ):
+            val = getattr(self, field_name)
+            if val is not None:
+                base[field_name] = val
+        return ExtractionOptions.model_validate(base)
 
 
 class ManualColumnRequest(BaseModel):

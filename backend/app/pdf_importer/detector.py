@@ -12,12 +12,13 @@ from .inspector import px_to_plan_m
 from .schemas import (
     ColumnCandidate,
     DetectionMethod,
+    ExtractionOptions,
     GridCandidate,
     PageInfo,
     ScaleCalibration,
 )
 
-LABEL_PATTERN = re.compile(r"^[A-Za-z0-9]{1,4}$")
+LABEL_PATTERN = re.compile(r"^[A-Za-z0-9]{1,3}$")
 
 
 @dataclass
@@ -64,11 +65,43 @@ def _estimate_column_dims_mm(
     return 400.0, 400.0
 
 
+def _in_outer_border_margin(
+    axis: str,
+    coord: float,
+    span_start: float,
+    span_end: float,
+    page_w: float,
+    page_h: float,
+    margin_ratio: float,
+) -> bool:
+    """Return True if a segment lies within the outer border_margin_ratio of page edges."""
+    if margin_ratio <= 0.0:
+        return False
+    margin_x = page_w * margin_ratio
+    margin_y = page_h * margin_ratio
+    lo, hi = min(span_start, span_end), max(span_start, span_end)
+
+    if axis == "x":
+        # Vertical line near left/right edge, or entirely inside top/bottom margin
+        if coord <= margin_x or coord >= page_w - margin_x:
+            return True
+        if hi <= margin_y or lo >= page_h - margin_y:
+            return True
+        return False
+
+    # Horizontal line near top/bottom edge, or entirely inside left/right margin
+    if coord <= margin_y or coord >= page_h - margin_y:
+        return True
+    if hi <= margin_x or lo >= page_w - margin_x:
+        return True
+    return False
+
+
 def _cluster_1d(items: list[tuple[float, float, float]], tol: float) -> list[dict]:
     """
-    Cluster segments by primary coordinate.
+    Cluster colinear segments by primary coordinate within `tol` px.
     Each item is (coord, span_start, span_end) where span_start <= span_end.
-    Returns list of dicts with avg coord, min_span, max_span, total_len, count.
+    Returns list of dicts with avg coord, min_span, max_span, span, covered, max_single, count.
     """
     if not items:
         return []
@@ -109,51 +142,78 @@ def _cluster_1d(items: list[tuple[float, float, float]], tol: float) -> list[dic
     return results
 
 
+def _cluster_qualifies_as_grid(
+    cl: dict,
+    min_span_px: float,
+    merge_dashed: bool,
+) -> bool:
+    if cl["span"] < min_span_px:
+        return False
+    if not merge_dashed:
+        return cl["max_single"] >= min_span_px
+    # Solid line, line split across a gap, or multi-dash grid line
+    if cl["max_single"] >= min_span_px * 0.65:
+        return True
+    if cl["covered"] >= cl["span"] * 0.25:
+        return True
+    if cl["count"] >= 3 and cl["covered"] >= cl["span"] * 0.10:
+        return True
+    return False
+
+
 def _find_grid_label(
     axis: str,
     coord: float,
     span_min: float,
     span_max: float,
-    words: list[tuple[float, float, str]],
-    max_perp_dist: float = 28.0,
-    max_end_dist: float = 65.0,
+    words: list[tuple[int, float, float, str]],
+    used_word_indices: set[int],
+    endpoint_radius_px: float = 48.0,
 ) -> str | None:
-    """Match a short grid bubble label near either endpoint of a detected grid line."""
+    """Match a short (1-3 char alphanumeric) grid label near either endpoint of a grid line."""
+    best_idx: int | None = None
     best_label: str | None = None
     best_score = float("inf")
 
-    for wx, wy, text in words:
+    for w_idx, wx, wy, text in words:
+        if w_idx in used_word_indices:
+            continue
         cleaned = text.strip()
         if not LABEL_PATTERN.match(cleaned):
             continue
-        if axis == "x":
-            perp = abs(wx - coord)
-            end_dist = min(abs(wy - span_min), abs(wy - span_max))
-            inside = span_min - 5.0 <= wy <= span_max + 5.0
-        else:
-            perp = abs(wy - coord)
-            end_dist = min(abs(wx - span_min), abs(wx - span_max))
-            inside = span_min - 5.0 <= wx <= span_max + 5.0
 
-        if perp > max_perp_dist or end_dist > max_end_dist:
+        if axis == "x":
+            d_start = hypot(wx - coord, wy - span_min)
+            d_end = hypot(wx - coord, wy - span_max)
+            perp = abs(wx - coord)
+            inside = span_min + 4.0 < wy < span_max - 4.0
+        else:
+            d_start = hypot(wx - span_min, wy - coord)
+            d_end = hypot(wx - span_max, wy - coord)
+            perp = abs(wy - coord)
+            inside = span_min + 4.0 < wx < span_max - 4.0
+
+        end_dist = min(d_start, d_end)
+        if end_dist > endpoint_radius_px or perp > 32.0:
             continue
-        # Prefer labels just outside endpoints rather than deep inside the drawing
-        penalty = 15.0 if inside and end_dist > 15.0 else 0.0
-        score = perp * 1.5 + end_dist + penalty
+
+        # Prefer labels just beyond either endpoint over text sitting inside the span
+        penalty = 18.0 if inside and end_dist > 12.0 else 0.0
+        score = end_dist + perp * 0.5 + penalty
         if score < best_score:
             best_score = score
+            best_idx = w_idx
             best_label = cleaned
 
+    if best_idx is not None:
+        used_word_indices.add(best_idx)
     return best_label
 
 
-def _deduplicate_boxes(
-    boxes: list[dict],
-) -> list[dict]:
+def _deduplicate_boxes(boxes: list[dict]) -> list[dict]:
     """Merge overlapping/concentric rectangle detections (e.g. stroke + fill of same column)."""
     if not boxes:
         return []
-    # Prefer filled boxes first so fill metadata is preserved
     ordered = sorted(boxes, key=lambda b: (not b.get("filled", False), -(b["w"] * b["h"])))
     kept: list[dict] = []
     for box in ordered:
@@ -244,24 +304,30 @@ def _extract_rect_from_drawing(drawing: dict, ox: float, oy: float, sx: float, s
     return rects, line_segs
 
 
-def extract_vector(
+def detect_vector_elements(
     pdf_path: Path,
     page_info: PageInfo,
     calibration: ScaleCalibration | None = None,
+    options: ExtractionOptions | None = None,
 ) -> DetectionOutput:
-    """Extract grid lines and column rectangles directly from PDF vector primitives via PyMuPDF."""
+    """Extract grid lines (including merged dashed segments + endpoint labels) and columns via PyMuPDF."""
+    opts = options if options is not None else ExtractionOptions()
     doc = pymupdf.open(pdf_path)
     try:
         page = doc[page_info.page_number - 1]
         ox = float(page.rect.x0)
         oy = float(page.rect.y0)
-        sx = page_info.width_px / max(float(page.rect.width), 1.0)
-        sy = page_info.height_px / max(float(page.rect.height), 1.0)
+        page_w = float(page_info.width_px)
+        page_h = float(page_info.height_px)
+        sx = page_w / max(float(page.rect.width), 1.0)
+        sy = page_h / max(float(page.rect.height), 1.0)
 
-        min_dim = float(min(page_info.width_px, page_info.height_px))
-        min_grid_span = max(min_dim * 0.25, 80.0)
+        min_dim = min(page_w, page_h)
+        min_v_span = page_h * opts.min_span_ratio
+        min_h_span = page_w * opts.min_span_ratio
         min_col_px = 5.0
         max_col_px = min_dim * 0.12
+        min_seg_len = 2.5 if opts.merge_dashed_segments else 8.0
 
         vert_segs: list[tuple[float, float, float]] = []
         horiz_segs: list[tuple[float, float, float]] = []
@@ -274,18 +340,25 @@ def extract_vector(
             for x0, y0, x1, y1 in rects:
                 w = x1 - x0
                 h = y1 - y0
-                # Very thin long rectangles are stroked/filled CAD lines
-                if w <= 3.5 and h >= 20.0:
-                    vert_segs.append(((x0 + x1) * 0.5, y0, y1))
-                elif h <= 3.5 and w >= 20.0:
-                    horiz_segs.append(((y0 + y1) * 0.5, x0, x1))
+                # Very thin rectangles are stroked/filled CAD line segments or dashes
+                if w <= 3.5 and h >= min_seg_len:
+                    xc = (x0 + x1) * 0.5
+                    if not _in_outer_border_margin("x", xc, y0, y1, page_w, page_h, opts.border_margin_ratio):
+                        vert_segs.append((xc, y0, y1))
+                elif h <= 3.5 and w >= min_seg_len:
+                    yc = (y0 + y1) * 0.5
+                    if not _in_outer_border_margin("y", yc, x0, x1, page_w, page_h, opts.border_margin_ratio):
+                        horiz_segs.append((yc, x0, x1))
                 elif min_col_px <= w <= max_col_px and min_col_px <= h <= max_col_px:
+                    cx, cy = (x0 + x1) * 0.5, (y0 + y1) * 0.5
+                    if _in_outer_border_margin("x", cx, y0, y1, page_w, page_h, opts.border_margin_ratio):
+                        continue
                     ratio = w / max(h, 1e-6)
                     if 0.25 <= ratio <= 4.0:
                         raw_boxes.append(
                             {
-                                "cx": (x0 + x1) * 0.5,
-                                "cy": (y0 + y1) * 0.5,
+                                "cx": cx,
+                                "cy": cy,
                                 "w": w,
                                 "h": h,
                                 "filled": is_filled,
@@ -296,41 +369,48 @@ def extract_vector(
                 dx = abs(x2 - x1)
                 dy = abs(y2 - y1)
                 length = hypot(dx, dy)
-                if length < 8.0:
+                if length < min_seg_len:
                     continue
-                if dx <= max(2.0, length * 0.02):
-                    vert_segs.append(((x1 + x2) * 0.5, min(y1, y2), max(y1, y2)))
-                elif dy <= max(2.0, length * 0.02):
-                    horiz_segs.append(((y1 + y2) * 0.5, min(x1, x2), max(x1, x2)))
+                if dx <= max(2.0, length * 0.025):
+                    xc = (x1 + x2) * 0.5
+                    ys, ye = min(y1, y2), max(y1, y2)
+                    if not _in_outer_border_margin("x", xc, ys, ye, page_w, page_h, opts.border_margin_ratio):
+                        vert_segs.append((xc, ys, ye))
+                elif dy <= max(2.0, length * 0.025):
+                    yc = (y1 + y2) * 0.5
+                    xs, xe = min(x1, x2), max(x1, x2)
+                    if not _in_outer_border_margin("y", yc, xs, xe, page_w, page_h, opts.border_margin_ratio):
+                        horiz_segs.append((yc, xs, xe))
 
         # Extract word centers for grid bubble labels
-        words: list[tuple[float, float, str]] = []
-        for w_item in page.get_text("words"):
-            wx0, wy0, wx1, wy1, text = w_item[:5]
-            wx = ((float(wx0) + float(wx1)) * 0.5 - ox) * sx
-            wy = ((float(wy0) + float(wy1)) * 0.5 - oy) * sy
-            words.append((wx, wy, str(text)))
+        words: list[tuple[int, float, float, str]] = []
+        if opts.detect_grid_labels:
+            for idx_w, w_item in enumerate(page.get_text("words")):
+                wx0, wy0, wx1, wy1, text = w_item[:5]
+                wx = ((float(wx0) + float(wx1)) * 0.5 - ox) * sx
+                wy = ((float(wy0) + float(wy1)) * 0.5 - oy) * sy
+                words.append((idx_w, wx, wy, str(text)))
 
-        # Cluster grid lines
-        vert_clusters = _cluster_1d(vert_segs, tol=4.5)
-        horiz_clusters = _cluster_1d(horiz_segs, tol=4.5)
+        vert_clusters = _cluster_1d(vert_segs, tol=opts.cluster_tolerance_px)
+        horiz_clusters = _cluster_1d(horiz_segs, tol=opts.cluster_tolerance_px)
 
         grids: list[GridCandidate] = []
+        used_word_indices: set[int] = set()
         used_x_labels: set[str] = set()
         x_idx = 0
         for cl in sorted(vert_clusters, key=lambda c: c["coord"]):
-            is_solid = cl["max_single"] >= min_grid_span * 0.75
-            is_dashed = (
-                cl["span"] >= min_grid_span
-                and cl["count"] >= 3
-                and cl["covered"] >= cl["span"] * 0.2
+            if not _cluster_qualifies_as_grid(cl, min_v_span, opts.merge_dashed_segments):
+                continue
+            if _in_outer_border_margin(
+                "x", cl["coord"], cl["min_span"], cl["max_span"], page_w, page_h, opts.border_margin_ratio
+            ):
+                continue
+
+            label = (
+                _find_grid_label("x", cl["coord"], cl["min_span"], cl["max_span"], words, used_word_indices)
+                if opts.detect_grid_labels
+                else None
             )
-            if not (is_solid or is_dashed):
-                continue
-            # Ignore page border lines right at extreme edge (within 6px)
-            if cl["coord"] < 6.0 or cl["coord"] > page_info.width_px - 6.0:
-                continue
-            label = _find_grid_label("x", cl["coord"], cl["min_span"], cl["max_span"], words)
             if not label or label in used_x_labels:
                 x_idx += 1
                 label = str(x_idx)
@@ -343,6 +423,7 @@ def extract_vector(
             if calibration is not None:
                 coord_m, _ = px_to_plan_m(cl["coord"], cl["min_span"], calibration)
 
+            is_solid = cl["max_single"] >= min_v_span * 0.75
             grids.append(
                 GridCandidate(
                     id=_new_id("grid"),
@@ -356,26 +437,27 @@ def extract_vector(
                     coord_px=round(cl["coord"], 2),
                     coord_m=coord_m,
                     source="vector",
-                    confidence=0.92 if is_solid else 0.84,
+                    confidence=0.92 if is_solid else 0.85,
                     status="pending",
                 )
             )
 
         used_y_labels: set[str] = set()
         y_idx = 0
-        # Sort bottom-to-top in plan Y (descending y_px) so A is at bottom, B above, etc.
+        # Sort bottom-to-top in plan Y (descending y_px) so fallback A is at bottom, B above, etc.
         for cl in sorted(horiz_clusters, key=lambda c: -c["coord"]):
-            is_solid = cl["max_single"] >= min_grid_span * 0.75
-            is_dashed = (
-                cl["span"] >= min_grid_span
-                and cl["count"] >= 3
-                and cl["covered"] >= cl["span"] * 0.2
+            if not _cluster_qualifies_as_grid(cl, min_h_span, opts.merge_dashed_segments):
+                continue
+            if _in_outer_border_margin(
+                "y", cl["coord"], cl["min_span"], cl["max_span"], page_w, page_h, opts.border_margin_ratio
+            ):
+                continue
+
+            label = (
+                _find_grid_label("y", cl["coord"], cl["min_span"], cl["max_span"], words, used_word_indices)
+                if opts.detect_grid_labels
+                else None
             )
-            if not (is_solid or is_dashed):
-                continue
-            if cl["coord"] < 6.0 or cl["coord"] > page_info.height_px - 6.0:
-                continue
-            label = _find_grid_label("y", cl["coord"], cl["min_span"], cl["max_span"], words)
             if not label or label in used_y_labels:
                 label = _index_to_letters(y_idx)
                 y_idx += 1
@@ -388,6 +470,7 @@ def extract_vector(
             if calibration is not None:
                 _, coord_m = px_to_plan_m(cl["min_span"], cl["coord"], calibration)
 
+            is_solid = cl["max_single"] >= min_h_span * 0.75
             grids.append(
                 GridCandidate(
                     id=_new_id("grid"),
@@ -401,14 +484,13 @@ def extract_vector(
                     coord_px=round(cl["coord"], 2),
                     coord_m=coord_m,
                     source="vector",
-                    confidence=0.92 if is_solid else 0.84,
+                    confidence=0.92 if is_solid else 0.85,
                     status="pending",
                 )
             )
 
         # Deduplicate and build column candidates
         deduped = _deduplicate_boxes(raw_boxes)
-        # Sort columns bottom-to-top, left-to-right (plan order)
         deduped.sort(key=lambda b: (-round(b["cy"] / 10.0), b["cx"]))
 
         columns: list[ColumnCandidate] = []
@@ -462,30 +544,44 @@ def extract_vector(
         doc.close()
 
 
-def extract_raster(
+def detect_raster_elements(
     png_path: Path,
     page_info: PageInfo,
     calibration: ScaleCalibration | None = None,
+    options: ExtractionOptions | None = None,
 ) -> DetectionOutput:
-    """OpenCV raster fallback detector for scanned or hybrid plan images."""
+    """OpenCV raster fallback detector with border margin exclusion and colinear dashed-segment merging."""
+    opts = options if options is not None else ExtractionOptions()
     img = cv2.imread(str(png_path), cv2.IMREAD_GRAYSCALE)
     if img is None:
         raise FileNotFoundError(f"Rendered page image not found: {png_path}")
 
     h_img, w_img = img.shape[:2]
-    min_dim = float(min(h_img, w_img))
-    min_grid_len = max(int(min_dim * 0.22), 60)
+    page_w, page_h = float(w_img), float(h_img)
+    min_dim = min(page_w, page_h)
+    min_v_span = page_h * opts.min_span_ratio
+    min_h_span = page_w * opts.min_span_ratio
 
     # 1. Detect grid lines using Canny + Probabilistic Hough Transform
     blurred = cv2.GaussianBlur(img, (3, 3), 0)
     edges = cv2.Canny(blurred, 50, 150, apertureSize=3)
+
+    if opts.merge_dashed_segments:
+        hough_min_len = max(12, int(min_dim * 0.018))
+        hough_threshold = 22
+        hough_max_gap = 22
+    else:
+        hough_min_len = max(int(min_dim * opts.min_span_ratio * 0.8), 60)
+        hough_threshold = 60
+        hough_max_gap = 18
+
     raw_lines = cv2.HoughLinesP(
         edges,
         rho=1,
         theta=np.pi / 180.0,
-        threshold=60,
-        minLineLength=min_grid_len,
-        maxLineGap=18,
+        threshold=hough_threshold,
+        minLineLength=hough_min_len,
+        maxLineGap=hough_max_gap,
     )
 
     vert_segs: list[tuple[float, float, float]] = []
@@ -496,20 +592,32 @@ def extract_raster(
             dx = abs(x2 - x1)
             dy = abs(y2 - y1)
             length = hypot(dx, dy)
-            if length < min_grid_len:
+            if length < hough_min_len:
                 continue
             if dx <= max(3.0, length * 0.025):
-                vert_segs.append(((x1 + x2) * 0.5, min(y1, y2), max(y1, y2)))
+                xc = (x1 + x2) * 0.5
+                ys, ye = min(y1, y2), max(y1, y2)
+                if not _in_outer_border_margin("x", xc, ys, ye, page_w, page_h, opts.border_margin_ratio):
+                    vert_segs.append((xc, ys, ye))
             elif dy <= max(3.0, length * 0.025):
-                horiz_segs.append(((y1 + y2) * 0.5, min(x1, x2), max(x1, x2)))
+                yc = (y1 + y2) * 0.5
+                xs, xe = min(x1, x2), max(x1, x2)
+                if not _in_outer_border_margin("y", yc, xs, xe, page_w, page_h, opts.border_margin_ratio):
+                    horiz_segs.append((yc, xs, xe))
 
-    vert_clusters = _cluster_1d(vert_segs, tol=8.0)
-    horiz_clusters = _cluster_1d(horiz_segs, tol=8.0)
+    vert_clusters = _cluster_1d(vert_segs, tol=opts.cluster_tolerance_px)
+    horiz_clusters = _cluster_1d(horiz_segs, tol=opts.cluster_tolerance_px)
 
     grids: list[GridCandidate] = []
-    for idx, cl in enumerate(sorted(vert_clusters, key=lambda c: c["coord"]), start=1):
-        if cl["coord"] < 8.0 or cl["coord"] > w_img - 8.0:
+    x_idx = 0
+    for cl in sorted(vert_clusters, key=lambda c: c["coord"]):
+        if not _cluster_qualifies_as_grid(cl, min_v_span, opts.merge_dashed_segments):
             continue
+        if _in_outer_border_margin(
+            "x", cl["coord"], cl["min_span"], cl["max_span"], page_w, page_h, opts.border_margin_ratio
+        ):
+            continue
+        x_idx += 1
         coord_m = None
         if calibration is not None:
             coord_m, _ = px_to_plan_m(cl["coord"], cl["min_span"], calibration)
@@ -518,7 +626,7 @@ def extract_raster(
                 id=_new_id("grid"),
                 page_number=page_info.page_number,
                 axis="x",
-                label=str(idx),
+                label=str(x_idx),
                 x1_px=round(cl["coord"], 2),
                 y1_px=round(cl["min_span"], 2),
                 x2_px=round(cl["coord"], 2),
@@ -531,9 +639,16 @@ def extract_raster(
             )
         )
 
-    for idx, cl in enumerate(sorted(horiz_clusters, key=lambda c: -c["coord"])):
-        if cl["coord"] < 8.0 or cl["coord"] > h_img - 8.0:
+    y_idx = 0
+    for cl in sorted(horiz_clusters, key=lambda c: -c["coord"]):
+        if not _cluster_qualifies_as_grid(cl, min_h_span, opts.merge_dashed_segments):
             continue
+        if _in_outer_border_margin(
+            "y", cl["coord"], cl["min_span"], cl["max_span"], page_w, page_h, opts.border_margin_ratio
+        ):
+            continue
+        label = _index_to_letters(y_idx)
+        y_idx += 1
         coord_m = None
         if calibration is not None:
             _, coord_m = px_to_plan_m(cl["min_span"], cl["coord"], calibration)
@@ -542,7 +657,7 @@ def extract_raster(
                 id=_new_id("grid"),
                 page_number=page_info.page_number,
                 axis="y",
-                label=_index_to_letters(idx),
+                label=label,
                 x1_px=round(cl["min_span"], 2),
                 y1_px=round(cl["coord"], 2),
                 x2_px=round(cl["max_span"], 2),
@@ -561,7 +676,6 @@ def extract_raster(
     max_col_px = min_dim * 0.12
     raw_boxes: list[dict] = []
 
-    # Try adaptive opening kernels to cleanly strip thin/anti-aliased grid lines while preserving column blocks
     base_k = max(7, int(min_dim * 0.009) | 1)
     for k_size in (base_k, max(5, base_k - 2)):
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k_size, k_size))
@@ -576,6 +690,9 @@ def extract_raster(
             wf, hf = float(w), float(h)
             if not (min_col_px <= wf <= max_col_px and min_col_px <= hf <= max_col_px):
                 continue
+            cx, cy = x + wf * 0.5, y + hf * 0.5
+            if _in_outer_border_margin("x", cx, float(y), float(y + h), page_w, page_h, opts.border_margin_ratio):
+                continue
             ratio = wf / max(hf, 1e-6)
             if not (0.25 <= ratio <= 4.0):
                 continue
@@ -584,8 +701,8 @@ def extract_raster(
                 continue
             raw_boxes.append(
                 {
-                    "cx": x + wf * 0.5,
-                    "cy": y + hf * 0.5,
+                    "cx": cx,
+                    "cy": cy,
                     "w": wf,
                     "h": hf,
                     "filled": True,
@@ -637,6 +754,11 @@ def extract_raster(
     )
 
 
+# Backward-compatible aliases
+extract_vector = detect_vector_elements
+extract_raster = detect_raster_elements
+
+
 class ExperimentalVLMDetector:
     """
     Experimental Vision-Language Model (VLM) detector placeholder interface.
@@ -675,31 +797,33 @@ def run_detection(
     page_info: PageInfo,
     calibration: ScaleCalibration | None = None,
     method: DetectionMethod = "auto",
+    options: ExtractionOptions | None = None,
 ) -> DetectionOutput:
     """Dispatch page detection across vector (PyMuPDF), raster (OpenCV), and VLM placeholder."""
+    opts = options if options is not None else ExtractionOptions()
     if method == "vlm":
         return ExperimentalVLMDetector().detect(png_path, page_info, calibration)
     if method == "vector":
-        return extract_vector(pdf_path, page_info, calibration)
+        return detect_vector_elements(pdf_path, page_info, calibration, options=opts)
     if method == "raster":
-        return extract_raster(png_path, page_info, calibration)
+        return detect_raster_elements(png_path, page_info, calibration, options=opts)
 
     # method == "auto"
     if page_info.classification == "vector":
-        result = extract_vector(pdf_path, page_info, calibration)
+        result = detect_vector_elements(pdf_path, page_info, calibration, options=opts)
         if result.grids or result.columns:
             return result
-        fallback = extract_raster(png_path, page_info, calibration)
+        fallback = detect_raster_elements(png_path, page_info, calibration, options=opts)
         fallback.method_used = "raster_fallback"
         return fallback
 
     if page_info.classification == "hybrid":
-        vec = extract_vector(pdf_path, page_info, calibration)
+        vec = detect_vector_elements(pdf_path, page_info, calibration, options=opts)
         if vec.grids or vec.columns:
             return vec
-        ras = extract_raster(png_path, page_info, calibration)
+        ras = detect_raster_elements(png_path, page_info, calibration, options=opts)
         ras.method_used = "raster_fallback"
         return ras
 
     # scanned
-    return extract_raster(png_path, page_info, calibration)
+    return detect_raster_elements(png_path, page_info, calibration, options=opts)

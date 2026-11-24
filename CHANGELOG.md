@@ -5,8 +5,15 @@ All notable changes to **AI Structural Engineering Office** are documented in th
 ## [Unreleased]
 
 ### Added
+- `ExtractionOptions` Pydantic model for `POST /api/projects/{project_id}/pdf-imports/{doc_id}/pages/{page_number}/extract` (`border_margin_ratio=0.04`, `min_span_ratio=0.28`, `cluster_tolerance_px=8.0`, `merge_dashed_segments=True`, `detect_grid_labels=True`).
+- Collapsible **Detection Settings** bar in `frontend/src/PdfImporter.jsx` (Min Grid Span %, Border Margin %, Cluster Tolerance px, Merge dashed, Detect labels) wired to **2. Detect Grids & Columns**.
+- Unit test `test_dashed_grids_labels_and_border_exclusion` covering outer sheet border exclusion, dashed vector & scanned grid merging, and endpoint grid label matching.
 - `CHANGELOG.md` to track all project phases, features, bug fixes, and schema updates.
 - Updated `README.md` with Phase 2 PDF Plan Importer architecture, storage layout, API endpoints, and test instructions.
+
+### Changed
+- Tuned `detect_vector_elements` and `detect_raster_elements` in `backend/app/pdf_importer/detector.py` to exclude segments in the outer border margin, merge colinear dashed segments within `cluster_tolerance_px`, filter by `min_span_ratio`, and match 1–3 character alphanumeric grid labels near line endpoints via `page.get_text("words")`.
+- Positioned SVG grid bubbles cleanly at the top (X-grid) and left (Y-grid) ends of grid lines on the overlay.
 
 ## [0.2.0] - 2026-11-24 — Phase 2: PDF Plan Importer
 

@@ -34,6 +34,12 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
 
   // Detection & manual placement controls
   const [method, setMethod] = useState("auto");
+  const [showDetectSettings, setShowDetectSettings] = useState(false);
+  const [minSpanPct, setMinSpanPct] = useState("28");
+  const [borderMarginPct, setBorderMarginPct] = useState("4");
+  const [clusterTolPx, setClusterTolPx] = useState("8");
+  const [mergeDashed, setMergeDashed] = useState(true);
+  const [detectLabels, setDetectLabels] = useState(true);
   const [manualWidthMm, setManualWidthMm] = useState("400");
   const [manualDepthMm, setManualDepthMm] = useState("400");
   const [manualGridRef, setManualGridRef] = useState("");
@@ -292,12 +298,26 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
     setBusy(true);
     setError("");
     try {
+      const minSpanVal = Math.min(100, Math.max(1, parseFloat(minSpanPct) || 28));
+      const borderMarginVal = Math.min(40, Math.max(0, parseFloat(borderMarginPct) || 4));
+      const clusterTolVal = Math.min(100, Math.max(1, parseFloat(clusterTolPx) || 8));
+
       const res = await apiJson(
         `/api/projects/${pid}/pdf-imports/${encodeURIComponent(doc.doc_id)}/pages/${activePage.page_number}/extract`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ method, replace_unreviewed: true }),
+          body: JSON.stringify({
+            method,
+            replace_unreviewed: true,
+            options: {
+              min_span_ratio: Number((minSpanVal / 100).toFixed(4)),
+              border_margin_ratio: Number((borderMarginVal / 100).toFixed(4)),
+              cluster_tolerance_px: clusterTolVal,
+              merge_dashed_segments: mergeDashed,
+              detect_grid_labels: detectLabels,
+            },
+          }),
         }
       );
       setDoc(res.document);
@@ -571,7 +591,7 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
                     ))}
                   </select>
                   <button className="secondary" disabled={busy} onClick={handleRunExtraction}>
-                    Run Detection
+                    2. Detect Grids &amp; Columns
                   </button>
                 </div>
                 {mode === "place_column" && (
@@ -606,6 +626,76 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
               </div>
             </div>
 
+            {/* Collapsible Detection Settings Bar */}
+            <div className="pdf-detect-settings">
+              <button
+                type="button"
+                className="pdf-settings-toggle"
+                onClick={() => setShowDetectSettings((v) => !v)}
+              >
+                <span>
+                  {showDetectSettings ? "▾" : "▸"} Detection Settings
+                </span>
+                <small>
+                  Min Span {minSpanPct}% · Border Margin {borderMarginPct}% · Cluster Tol{" "}
+                  {clusterTolPx}px
+                </small>
+              </button>
+              {showDetectSettings && (
+                <div className="pdf-settings-fields">
+                  <label className="pdf-field-chip">
+                    <span>Min Grid Span (%)</span>
+                    <input
+                      type="number"
+                      min="5"
+                      max="95"
+                      step="1"
+                      value={minSpanPct}
+                      onChange={(e) => setMinSpanPct(e.target.value)}
+                    />
+                  </label>
+                  <label className="pdf-field-chip">
+                    <span>Border Margin (%)</span>
+                    <input
+                      type="number"
+                      min="0"
+                      max="25"
+                      step="1"
+                      value={borderMarginPct}
+                      onChange={(e) => setBorderMarginPct(e.target.value)}
+                    />
+                  </label>
+                  <label className="pdf-field-chip">
+                    <span>Cluster Tolerance (px)</span>
+                    <input
+                      type="number"
+                      min="1"
+                      max="50"
+                      step="1"
+                      value={clusterTolPx}
+                      onChange={(e) => setClusterTolPx(e.target.value)}
+                    />
+                  </label>
+                  <label className="pdf-check-chip">
+                    <input
+                      type="checkbox"
+                      checked={mergeDashed}
+                      onChange={(e) => setMergeDashed(e.target.checked)}
+                    />
+                    <span>Merge dashed</span>
+                  </label>
+                  <label className="pdf-check-chip">
+                    <input
+                      type="checkbox"
+                      checked={detectLabels}
+                      onChange={(e) => setDetectLabels(e.target.checked)}
+                    />
+                    <span>Detect labels</span>
+                  </label>
+                </div>
+              )}
+            </div>
+
             {/* Rendered PNG + Interactive SVG Overlay */}
             <div className={`pdf-stage mode-${mode}`}>
               <img
@@ -627,8 +717,16 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
                   const isSel = selectedId === g.id;
                   const strokeW = Math.max(activePage.width_px * 0.0022, 1.5);
                   const bubbleR = Math.max(activePage.width_px * 0.014, 11);
-                  const bx = g.axis === "x" ? g.x1_px : Math.max(bubbleR + 4, g.x1_px - bubbleR);
-                  const by = g.axis === "x" ? Math.max(bubbleR + 4, g.y1_px - bubbleR) : g.y1_px;
+                  const topY = Math.min(g.y1_px, g.y2_px);
+                  const leftX = Math.min(g.x1_px, g.x2_px);
+                  const bx =
+                    g.axis === "x"
+                      ? Math.min(Math.max(bubbleR + 4, g.x1_px), activePage.width_px - bubbleR - 4)
+                      : Math.max(bubbleR + 4, leftX - bubbleR - 2);
+                  const by =
+                    g.axis === "x"
+                      ? Math.max(bubbleR + 4, topY - bubbleR - 2)
+                      : Math.min(Math.max(bubbleR + 4, g.y1_px), activePage.height_px - bubbleR - 4);
                   return (
                     <g
                       key={g.id}

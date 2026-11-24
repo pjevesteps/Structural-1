@@ -338,6 +338,7 @@ def extract_page(
 
     pdf_path = _original_pdf_path(project_id, doc_id)
     png_path = _pages_dir(project_id, doc_id) / page.image_filename
+    options = req.resolved_options()
 
     output = run_detection(
         pdf_path=pdf_path,
@@ -345,6 +346,7 @@ def extract_page(
         page_info=page,
         calibration=cal,
         method=req.method,
+        options=options,
     )
 
     if req.replace_unreviewed:
@@ -381,6 +383,7 @@ def extract_page(
             "page_number": page_number,
             "method_requested": req.method,
             "method_used": output.method_used,
+            "options": options.model_dump(),
             "grids_detected": len(output.grids),
             "columns_detected": len(output.columns),
         },
