@@ -130,6 +130,8 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
   // Manual tracing & column/opening inputs
   const [nextGridXLabel, setNextGridXLabel] = useState("A");
   const [nextGridYLabel, setNextGridYLabel] = useState("1");
+  const [undoStack, setUndoStack] = useState([]);
+  const [redoStack, setRedoStack] = useState([]);
   const [manualWidthMm, setManualWidthMm] = useState("400");
   const [manualDepthMm, setManualDepthMm] = useState("400");
   const [manualGridRef, setManualGridRef] = useState("");
@@ -352,17 +354,40 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
     return () => vp.removeEventListener("wheel", onWheel);
   }, [doc?.doc_id, pageNum]);
 
-  // Keyboard shortcuts (Space to pan, Shift to bypass snap, Enter/Backspace/Esc for polygon tracing)
+  useEffect(() => {
+    setUndoStack([]);
+    setRedoStack([]);
+  }, [doc?.doc_id]);
+
+  // Keyboard shortcuts (Space to pan, Shift to bypass snap, Ctrl+Z/Ctrl+Y for grid Undo/Redo, Enter/Backspace/Esc for polygon tracing)
   useEffect(() => {
     function onKeyDown(e) {
       const tag = e.target?.tagName?.toLowerCase();
-      const inInput = tag === "input" || tag === "textarea" || tag === "select";
+      const inInput =
+        tag === "input" ||
+        tag === "textarea" ||
+        tag === "select" ||
+        Boolean(e.target?.isContentEditable);
       if (e.code === "Space" && !inInput) {
         e.preventDefault();
         setSpacePressed(true);
       }
       if (e.key === "Shift") setShiftPressed(true);
       if (inInput) return;
+
+      if ((e.ctrlKey || e.metaKey) && !e.altKey) {
+        const k = e.key.toLowerCase();
+        if (k === "z" && !e.shiftKey) {
+          e.preventDefault();
+          handleUndoGrid();
+          return;
+        }
+        if (k === "y" || (k === "z" && e.shiftKey)) {
+          e.preventDefault();
+          handleRedoGrid();
+          return;
+        }
+      }
 
       if (e.key === "Escape") {
         setOpeningVertices([]);
@@ -386,7 +411,18 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
     };
-  }, [mode, openingVertices, openingCategory, openingLabel, activeRegionId, activePage, doc]);
+  }, [
+    mode,
+    openingVertices,
+    openingCategory,
+    openingLabel,
+    activeRegionId,
+    activePage,
+    doc,
+    undoStack,
+    redoStack,
+    busy,
+  ]);
 
   function zoomBy(factor) {
     const vp = viewportRef.current;
@@ -638,6 +674,16 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
       const ry1 = activeRegion ? activeRegion.y_px + activeRegion.height_px : activePage.height_px;
       const p1 = isX ? { x_px: pt.x_px, y_px: ry0 } : { x_px: rx0, y_px: pt.y_px };
       const p2 = isX ? { x_px: pt.x_px, y_px: ry1 } : { x_px: rx1, y_px: pt.y_px };
+      const payload = {
+        page_number: activePage.page_number,
+        region_id: activeRegionId || null,
+        element_type: isX ? "grid_x" : "grid_y",
+        label,
+        p1,
+        p2,
+      };
+      const prevIds = new Set((doc.grid_candidates || []).map((g) => g.id));
+      const nextLabelAfter = nextGridLabel(label, isX ? "x" : "y");
 
       setBusy(true);
       setError("");
@@ -647,19 +693,28 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              page_number: activePage.page_number,
-              region_id: activeRegionId || null,
-              element_type: isX ? "grid_x" : "grid_y",
-              label,
-              p1,
-              p2,
-            }),
+            body: JSON.stringify(payload),
           }
         );
+        const created =
+          (updated.grid_candidates || []).find((g) => !prevIds.has(g.id)) ||
+          updated.grid_candidates?.[updated.grid_candidates.length - 1];
         setDoc(updated);
-        if (isX) setNextGridXLabel(nextGridLabel(label, "x"));
-        else setNextGridYLabel(nextGridLabel(label, "y"));
+        if (isX) setNextGridXLabel(nextLabelAfter);
+        else setNextGridYLabel(nextLabelAfter);
+        if (created?.id) {
+          setUndoStack((prev) => [
+            ...prev,
+            {
+              action: "add_grid",
+              element_id: created.id,
+              payload,
+              prevNextLabel: label,
+              nextLabelAfter,
+            },
+          ]);
+          setRedoStack([]);
+        }
         setNotice(`Traced ${isX ? "Grid X (V)" : "Grid Y (H)"} '${label}'.`);
       } catch (err) {
         setError(err.message);
@@ -928,8 +983,136 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
     }
   }
 
+  function applyGridNextLabel(elementType, labelValue) {
+    if (elementType === "grid_x") setNextGridXLabel(labelValue);
+    else setNextGridYLabel(labelValue);
+  }
+
+  async function handleUndoGrid() {
+    if (!doc || busy || undoStack.length === 0) return;
+    const entry = undoStack[undoStack.length - 1];
+    setBusy(true);
+    setError("");
+    try {
+      if (entry.action === "add_grid") {
+        const updated = await apiJson(
+          `/api/projects/${pid}/pdf-imports/${encodeURIComponent(doc.doc_id)}/elements/${encodeURIComponent(entry.element_id)}`,
+          { method: "DELETE" }
+        );
+        setDoc(updated);
+        applyGridNextLabel(entry.payload.element_type, entry.prevNextLabel);
+        setUndoStack((prev) => prev.slice(0, -1));
+        setRedoStack((prev) => [...prev, entry]);
+        setNotice(`Undid manual grid '${entry.payload.label}'.`);
+      } else if (entry.action === "delete_grid") {
+        const prevIds = new Set((doc.grid_candidates || []).map((g) => g.id));
+        const updated = await apiJson(
+          `/api/projects/${pid}/pdf-imports/${encodeURIComponent(doc.doc_id)}/elements/manual-grid`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(entry.payload),
+          }
+        );
+        const recreated =
+          (updated.grid_candidates || []).find((g) => !prevIds.has(g.id)) ||
+          updated.grid_candidates?.[updated.grid_candidates.length - 1];
+        setDoc(updated);
+        applyGridNextLabel(entry.payload.element_type, entry.prevNextLabel);
+        setUndoStack((prev) => prev.slice(0, -1));
+        setRedoStack((prev) => [
+          ...prev,
+          { ...entry, element_id: recreated?.id || entry.element_id },
+        ]);
+        setNotice(`Restored deleted grid '${entry.payload.label}'.`);
+      }
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleRedoGrid() {
+    if (!doc || busy || redoStack.length === 0) return;
+    const entry = redoStack[redoStack.length - 1];
+    setBusy(true);
+    setError("");
+    try {
+      if (entry.action === "add_grid") {
+        const prevIds = new Set((doc.grid_candidates || []).map((g) => g.id));
+        const updated = await apiJson(
+          `/api/projects/${pid}/pdf-imports/${encodeURIComponent(doc.doc_id)}/elements/manual-grid`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(entry.payload),
+          }
+        );
+        const recreated =
+          (updated.grid_candidates || []).find((g) => !prevIds.has(g.id)) ||
+          updated.grid_candidates?.[updated.grid_candidates.length - 1];
+        setDoc(updated);
+        applyGridNextLabel(entry.payload.element_type, entry.nextLabelAfter);
+        setRedoStack((prev) => prev.slice(0, -1));
+        setUndoStack((prev) => [
+          ...prev,
+          { ...entry, element_id: recreated?.id || entry.element_id },
+        ]);
+        setNotice(`Redid manual grid '${entry.payload.label}'.`);
+      } else if (entry.action === "delete_grid") {
+        const updated = await apiJson(
+          `/api/projects/${pid}/pdf-imports/${encodeURIComponent(doc.doc_id)}/elements/${encodeURIComponent(entry.element_id)}`,
+          { method: "DELETE" }
+        );
+        setDoc(updated);
+        applyGridNextLabel(entry.payload.element_type, entry.nextLabelAfter);
+        setRedoStack((prev) => prev.slice(0, -1));
+        setUndoStack((prev) => [...prev, entry]);
+        setNotice(`Redid delete of grid '${entry.payload.label}'.`);
+      }
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleClearRegionGrids() {
+    if (!doc || !activeRegion || busy) return;
+    const regionGridCount = (doc.grid_candidates || []).filter(
+      (g) => g.region_id === activeRegion.region_id
+    ).length;
+    if (regionGridCount === 0) {
+      setNotice(`Region '${activeRegion.name}' has no grid lines to clear.`);
+      return;
+    }
+    const ok = window.confirm(
+      `Clear all ${regionGridCount} grid line(s) in '${activeRegion.name}'? Columns and openings will be kept.`
+    );
+    if (!ok) return;
+
+    setBusy(true);
+    setError("");
+    try {
+      const updated = await apiJson(
+        `/api/projects/${pid}/pdf-imports/${encodeURIComponent(doc.doc_id)}/regions/${encodeURIComponent(activeRegion.region_id)}/grids`,
+        { method: "DELETE" }
+      );
+      setDoc(updated);
+      setUndoStack((prev) => prev.filter((e) => e.payload?.region_id !== activeRegion.region_id));
+      setRedoStack((prev) => prev.filter((e) => e.payload?.region_id !== activeRegion.region_id));
+      setNotice(`Cleared ${regionGridCount} grid line(s) from '${activeRegion.name}'.`);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function handleDeleteElement(elementId) {
     if (!doc) return;
+    const existingGrid = (doc.grid_candidates || []).find((g) => g.id === elementId) || null;
     setBusy(true);
     setError("");
     try {
@@ -938,6 +1121,28 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
         { method: "DELETE" }
       );
       setDoc(updated);
+      if (existingGrid) {
+        const isX = existingGrid.axis === "x";
+        const curNext = isX ? nextGridXLabel : nextGridYLabel;
+        setUndoStack((prev) => [
+          ...prev,
+          {
+            action: "delete_grid",
+            element_id: existingGrid.id,
+            payload: {
+              page_number: existingGrid.page_number,
+              region_id: existingGrid.region_id || null,
+              element_type: isX ? "grid_x" : "grid_y",
+              label: existingGrid.label,
+              p1: { x_px: existingGrid.x1_px, y_px: existingGrid.y1_px },
+              p2: { x_px: existingGrid.x2_px, y_px: existingGrid.y2_px },
+            },
+            prevNextLabel: curNext,
+            nextLabelAfter: curNext,
+          },
+        ]);
+        setRedoStack([]);
+      }
     } catch (err) {
       setError(err.message);
     } finally {
@@ -1526,6 +1731,28 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
                     >
                       Trace Opening (Polygon)
                     </button>
+                    {mode !== "trace_grid_x" && mode !== "trace_grid_y" && (
+                      <div className="pdf-history-group">
+                        <button
+                          type="button"
+                          className="mini-btn"
+                          disabled={busy || undoStack.length === 0}
+                          onClick={handleUndoGrid}
+                          title="Undo last manual grid action (Ctrl+Z)"
+                        >
+                          ↶ Undo{undoStack.length > 0 ? ` (${undoStack.length})` : ""}
+                        </button>
+                        <button
+                          type="button"
+                          className="mini-btn"
+                          disabled={busy || redoStack.length === 0}
+                          onClick={handleRedoGrid}
+                          title="Redo manual grid action (Ctrl+Y / Ctrl+Shift+Z)"
+                        >
+                          ↷ Redo{redoStack.length > 0 ? ` (${redoStack.length})` : ""}
+                        </button>
+                      </div>
+                    )}
                   </div>
 
                   {/* Active Mode Contextual Controls */}
@@ -1544,9 +1771,28 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
                           placeholder={mode === "trace_grid_x" ? "A, B, C..." : "1', 1, 2..."}
                         />
                       </label>
+                      <button
+                        type="button"
+                        className="mini-btn"
+                        disabled={busy || undoStack.length === 0}
+                        onClick={handleUndoGrid}
+                        title="Undo last manual grid action (Ctrl+Z)"
+                      >
+                        ↶ Undo{undoStack.length > 0 ? ` (${undoStack.length})` : ""}
+                      </button>
+                      <button
+                        type="button"
+                        className="mini-btn"
+                        disabled={busy || redoStack.length === 0}
+                        onClick={handleRedoGrid}
+                        title="Redo manual grid action (Ctrl+Y / Ctrl+Shift+Z)"
+                      >
+                        ↷ Redo{redoStack.length > 0 ? ` (${redoStack.length})` : ""}
+                      </button>
                       <small className="pdf-hint">
                         Click on the grid line to place and auto-approve (auto-increments; supports
-                        primes like <code>1&apos;</code>). Hold Space + drag to pan.
+                        primes like <code>1&apos;</code>). Ctrl+Z Undo · Ctrl+Y Redo · Space+drag
+                        Pan.
                       </small>
                     </div>
                   )}
@@ -1679,15 +1925,31 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
                         </select>
                       </label>
                       {activeRegion && (
-                        <button
-                          type="button"
-                          className="secondary pdf-launch-btn"
-                          disabled={!canLockMaster}
-                          onClick={handleLockMasterGrid}
-                          title="Lock this region's approved grids and (0,0) origin as the document Master Grid"
-                        >
-                          Lock as Master Grid
-                        </button>
+                        <>
+                          <button
+                            type="button"
+                            className="secondary pdf-launch-btn"
+                            disabled={!canLockMaster}
+                            onClick={handleLockMasterGrid}
+                            title="Lock this region's approved grids and (0,0) origin as the document Master Grid"
+                          >
+                            Lock as Master Grid
+                          </button>
+                          <button
+                            type="button"
+                            className="mini-btn on-reject"
+                            disabled={
+                              busy ||
+                              !(doc.grid_candidates || []).some(
+                                (g) => g.region_id === activeRegion.region_id
+                              )
+                            }
+                            onClick={handleClearRegionGrids}
+                            title="Clear all grid lines in this active region (keeps columns and openings)"
+                          >
+                            Clear Grids
+                          </button>
+                        </>
                       )}
                     </div>
                   </div>
@@ -2723,7 +2985,25 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
                   </div>
 
                   <div className="pdf-review-list">
-                    <h4>Grid Lines ({pageGrids.length})</h4>
+                    <div className="pdf-review-section-head">
+                      <h4>Grid Lines ({pageGrids.length})</h4>
+                      {activeRegion && (
+                        <button
+                          type="button"
+                          className="mini-btn on-reject"
+                          disabled={
+                            busy ||
+                            !(doc.grid_candidates || []).some(
+                              (g) => g.region_id === activeRegion.region_id
+                            )
+                          }
+                          onClick={handleClearRegionGrids}
+                          title={`Clear all grid lines in '${activeRegion.name}'`}
+                        >
+                          Clear Grids
+                        </button>
+                      )}
+                    </div>
                     {pageGrids.length === 0 ? (
                       <p className="pdf-muted">
                         No grids on this page yet. Detect, trace manually, or stamp Master Grid.

@@ -125,6 +125,9 @@
 .pdf-zoom-bar{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
 .pdf-cursor-readout{font-size:10px;color:#7be0c3;background:#0e1828;border:1px solid #26364d;border-radius:6px;padding:4px 7px;font-variant-numeric:tabular-nums}
 .pdf-modes-bar{background:#111d2e;border:1px solid #26364d;border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:8px}
+.pdf-history-group{display:inline-flex;align-items:center;gap:5px;margin-left:auto}
+.pdf-review-section-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:6px 0 2px}
+.pdf-review-section-head h4{margin:0}
 .pdf-mode-subbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding-top:8px;border-top:1px solid #223147}
 .pdf-viewport{position:relative;overflow:hidden;height:68vh;min-height:440px;background:#070c14;border:1px solid #26364d;border-radius:10px;user-select:none}
 .pdf-viewport.mode-inspect{cursor:grab}

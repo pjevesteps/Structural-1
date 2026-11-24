@@ -95,6 +95,7 @@ Connect tablet and PC to the same trusted Wi-Fi. Run `ipconfig` on Windows, then
 - `POST /api/projects/{project_id}/pdf-imports/{doc_id}/transfer-levels` — Transfer engineer-approved floor levels into `ProjectState.levels`
 - `POST /api/projects/{project_id}/pdf-imports/{doc_id}/elements/manual-grid` — Manually trace a snapped vertical (`grid_x`) or horizontal (`grid_y`) grid line
 - `DELETE /api/projects/{project_id}/pdf-imports/{doc_id}/elements/{element_id}` — Delete a staged grid or column
+- `DELETE /api/projects/{project_id}/pdf-imports/{doc_id}/regions/{region_id}/grids` — Atomically clear all grid lines in a region while keeping columns, openings, and other regions intact
 - `POST /api/projects/{project_id}/pdf-imports/{doc_id}/master-grid` — Lock approved region grids & `(0,0)` origin as the document Master Grid in meters
 - `POST /api/projects/{project_id}/pdf-imports/{doc_id}/regions/{target_region_id}/stamp-master-grid` — Stamp the locked Master Grid onto a target floor region at `anchor_px`
 - `POST /api/projects/{project_id}/pdf-imports/{doc_id}/openings` — Create a polygon floor opening (`stairwell`, `airwell`, `shaft_other`)

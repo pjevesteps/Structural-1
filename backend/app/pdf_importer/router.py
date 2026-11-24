@@ -255,6 +255,18 @@ def delete_plan_region(
         raise _handle_error(exc)
 
 
+@router.delete("/{doc_id}/regions/{region_id}/grids", response_model=ImportDocumentState)
+def clear_plan_region_grids(
+    project_id: str,
+    doc_id: str,
+    region_id: str,
+):
+    try:
+        return service.clear_region_grids(project_id, doc_id, region_id)
+    except Exception as exc:
+        raise _handle_error(exc)
+
+
 @router.post(
     "/{doc_id}/regions/{target_region_id}/stamp-master-grid",
     response_model=ImportDocumentState,

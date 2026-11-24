@@ -4,6 +4,13 @@ All notable changes to **AI Structural Engineering Office** are documented in th
 
 ## [Unreleased]
 
+### Added
+- **Manual Grid Undo/Redo & Clear Region Grids (`backend/app/pdf_importer/`, `frontend/src/PdfImporter.jsx`)**:
+  - Added `DELETE /api/projects/{project_id}/pdf-imports/{doc_id}/regions/{region_id}/grids` (`clear_region_grids` in `service.py` + `router.py`) to atomically delete all `grid_x` / `grid_y` candidates in a region while preserving columns, openings, and other regions, logged as `region_grids_cleared` in `audit.jsonl`.
+  - Added per-session `undoStack` / `redoStack` in `frontend/src/PdfImporter.jsx` tracking manual grid additions and deletions (`add_grid` / `delete_grid`), rolling `Next Grid Label` back/forward automatically, with compact **Undo** (`Ctrl+Z`) and **Redo** (`Ctrl+Y` / `Ctrl+Shift+Z`) controls and global keyboard shortcuts.
+  - Added a one-click **Clear Grids** button (with lightweight confirmation) in the Plan Regions bar and Staged Review panel.
+  - Added unit test `test_manual_grid_undo_redo_and_clear_region_grids` in `backend/tests/test_pdf_importer.py`.
+
 ### Fixed
 - **Phase 2 Shaded/Hatched Column Scanner — Zero Text/Dimension False Positives (`backend/app/pdf_importer/detector.py`)**:
   - Removed the dark-pixel morphological closing pass that fused dimension numbers and room labels (`9.75`, `3.60`, `STORAGE`, `PARKING`, `BASEMENT`, `ALLEY`) into fake hatched boxes.

@@ -1358,3 +1358,136 @@ def test_shaded_hatched_column_scanner_filters_non_columns_and_preserves_grids(i
     )
     assert gray_res.status_code == 200, gray_res.text
     assert gray_res.json()["columns_detected"] == 2
+
+
+def test_manual_grid_undo_redo_and_clear_region_grids(isolated_env):
+    """
+    Verify manual grid undo (DELETE element), redo (re-POST manual-grid), and atomic
+    DELETE /regions/{region_id}/grids clearing ONLY grids in that region while keeping
+    columns, openings, and grids in other regions untouched (and logging to audit.jsonl).
+    """
+    client, _ = isolated_env
+    pid = "GRID-UNDO"
+    assert client.post("/api/projects", json=_make_sample_project(pid)).status_code == 200
+
+    pdf_bytes = _build_architectural_multipage_set_pdf()
+    up = client.post(
+        f"/api/projects/{pid}/pdf-imports",
+        files={"file": ("arch_undo.pdf", pdf_bytes, "application/pdf")},
+    )
+    assert up.status_code == 200, up.text
+    doc_state = up.json()
+    doc_id = doc_state["doc_id"]
+
+    p2 = doc_state["pages"][1]
+    sx = p2["width_px"] / p2["width_pt"]
+    sy = p2["height_px"] / p2["height_pt"]
+    p2_regions = [r for r in doc_state["regions"] if r["page_number"] == 2]
+    left_reg, right_reg = p2_regions[0], p2_regions[1]
+
+    # 1. Trace 3 manual grids in Left region + 1 manual grid in Right region
+    grid_payloads = [
+        {
+            "page_number": 2,
+            "region_id": left_reg["region_id"],
+            "element_type": "grid_x",
+            "label": "A",
+            "p1": {"x_px": 90.0 * sx, "y_px": 90.0 * sy},
+            "p2": {"x_px": 90.0 * sx, "y_px": 400.0 * sy},
+        },
+        {
+            "page_number": 2,
+            "region_id": left_reg["region_id"],
+            "element_type": "grid_x",
+            "label": "B",
+            "p1": {"x_px": 270.0 * sx, "y_px": 90.0 * sy},
+            "p2": {"x_px": 270.0 * sx, "y_px": 400.0 * sy},
+        },
+        {
+            "page_number": 2,
+            "region_id": left_reg["region_id"],
+            "element_type": "grid_y",
+            "label": "1'",
+            "p1": {"x_px": 50.0 * sx, "y_px": 350.0 * sy},
+            "p2": {"x_px": 340.0 * sx, "y_px": 350.0 * sy},
+        },
+        {
+            "page_number": 2,
+            "region_id": right_reg["region_id"],
+            "element_type": "grid_x",
+            "label": "A",
+            "p1": {"x_px": 490.0 * sx, "y_px": 90.0 * sy},
+            "p2": {"x_px": 490.0 * sx, "y_px": 400.0 * sy},
+        },
+    ]
+    for gp in grid_payloads:
+        res = client.post(
+            f"/api/projects/{pid}/pdf-imports/{doc_id}/elements/manual-grid",
+            json=gp,
+        )
+        assert res.status_code == 200, res.text
+
+    # Add 1 manual column in Left region to confirm columns survive grid undo/clear
+    col_res = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/candidates/columns",
+        json={
+            "page_number": 2,
+            "region_id": left_reg["region_id"],
+            "x_px": 90.0 * sx,
+            "y_px": 350.0 * sy,
+            "column_id": "C1",
+            "grid": "A-1'",
+            "width_mm": 400.0,
+            "depth_mm": 400.0,
+            "status": "approved",
+        },
+    )
+    assert col_res.status_code == 200, col_res.text
+
+    # 2. Undo: delete the last traced grid ("1'" in Left region)
+    left_1_prime = next(
+        g
+        for g in col_res.json()["grid_candidates"]
+        if g["region_id"] == left_reg["region_id"] and g["label"] == "1'"
+    )
+    undo_res = client.delete(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/elements/{left_1_prime['id']}"
+    )
+    assert undo_res.status_code == 200, undo_res.text
+    left_after_undo = [
+        g for g in undo_res.json()["grid_candidates"] if g["region_id"] == left_reg["region_id"]
+    ]
+    assert sorted(g["label"] for g in left_after_undo) == ["A", "B"]
+    assert len(undo_res.json()["column_candidates"]) == 1
+
+    # 3. Redo: re-create "1'" via POST /elements/manual-grid
+    redo_res = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/elements/manual-grid",
+        json=grid_payloads[2],
+    )
+    assert redo_res.status_code == 200, redo_res.text
+    left_after_redo = [
+        g for g in redo_res.json()["grid_candidates"] if g["region_id"] == left_reg["region_id"]
+    ]
+    assert sorted(g["label"] for g in left_after_redo) == ["1'", "A", "B"]
+    recreated = next(g for g in left_after_redo if g["label"] == "1'")
+    assert recreated["id"] != left_1_prime["id"]
+
+    # 4. Batch Clear Region Grids on Left region: wipes Left grids ONLY, preserves columns & Right grids
+    clear_res = client.delete(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/regions/{left_reg['region_id']}/grids"
+    )
+    assert clear_res.status_code == 200, clear_res.text
+    cleared_doc = clear_res.json()
+    assert [g for g in cleared_doc["grid_candidates"] if g["region_id"] == left_reg["region_id"]] == []
+    right_grids = [g for g in cleared_doc["grid_candidates"] if g["region_id"] == right_reg["region_id"]]
+    assert len(right_grids) == 1 and right_grids[0]["label"] == "A"
+    assert len(cleared_doc["column_candidates"]) == 1
+    assert cleared_doc["column_candidates"][0]["column_id"] == "C1"
+
+    # Confirm audit.jsonl logged region_grids_cleared
+    audit = client.get(f"/api/projects/{pid}/pdf-imports/{doc_id}/audit").json()
+    clear_events = [e for e in audit if e["event"] == "region_grids_cleared"]
+    assert len(clear_events) == 1
+    assert clear_events[0]["details"]["region_id"] == left_reg["region_id"]
+    assert clear_events[0]["details"]["removed_grids_count"] == 3

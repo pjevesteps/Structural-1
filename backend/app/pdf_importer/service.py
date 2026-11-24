@@ -1108,6 +1108,33 @@ def delete_element(
     return state
 
 
+def clear_region_grids(
+    project_id: str,
+    doc_id: str,
+    region_id: str,
+) -> ImportDocumentState:
+    """Delete all grid_x and grid_y candidates in region_id atomically; leave columns, openings, and other regions untouched."""
+    state = get_import(project_id, doc_id)
+    region = _get_region(state, region_id)
+
+    before_count = len(state.grid_candidates)
+    state.grid_candidates = [g for g in state.grid_candidates if g.region_id != region_id]
+    removed_count = before_count - len(state.grid_candidates)
+
+    _save_state(state)
+    _append_audit(
+        project_id,
+        doc_id,
+        "region_grids_cleared",
+        {
+            "region_id": region_id,
+            "page_number": region.page_number,
+            "removed_grids_count": removed_count,
+        },
+    )
+    return state
+
+
 def lock_master_grid(
     project_id: str,
     doc_id: str,
