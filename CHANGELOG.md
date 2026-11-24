@@ -4,7 +4,17 @@ All notable changes to **AI Structural Engineering Office** are documented in th
 
 ## [Unreleased]
 
+### Fixed
+- **Real-World AutoCAD Architectural PDF Support (`inspector.py`, `detector.py`)**:
+  - Transformed PyMuPDF text and vector drawing coordinates through `page.rotation_matrix` so rotated landscape sheets (e.g. `rotation=270`) align pixel-for-pixel with rendered PNGs.
+  - Added spaced-letter and newline-split AutoCAD text normalization (e.g., `"B A S E M E N T F L O O R P L A N"` -> `"BASEMENT FLOOR PLAN"`, `"C\nR\nO\nS\nS\n \nS\nE\nC\nT\nI\nO\nN"` -> `"CROSS SECTION"`).
+  - Restricted `sheet_number` extraction strictly to the bottom-right title block (`x >= 80%`, `y >= 84%`) so interior section-cut callouts (e.g. `"A12"`) are never mistaken for the sheet number.
+  - Added pixel-based + vector dual-plan center viewport divider detection (42%–58% width, >= 60% dark vertical coverage above the bottom 12% title block) and smart SHX text-clue fallbacks.
+  - Excluded scale strings (`SCALE: 1:100M`) and ceiling-line text from elevation floor-level extraction.
+
 ### Added
+- `PATCH /api/projects/{project_id}/pdf-imports/{doc_id}/pages/{page_number}` for overriding `sheet_type`, plus `POST /regions` and `DELETE /regions/{region_id}` for managing manual/auto `PlanRegion` boxes.
+- Interactive **Page Type dropdown**, **Draw Region** and **Set Origin (0,0)** toolbar buttons, live dashed region drawing preview, and a **Plan Regions panel** in `frontend/src/PdfImporter.jsx`.
 - **Multi-Page Architectural PDF Set Support**:
   - Automatic per-page sheet classification (`cover_toc`, `lot_site`, `floor_plan`, `roof_plan`, `elevation`, `section`, `schedule_detail`, `unknown`) and bottom-right title-block `sheet_number` / `sheet_title` extraction strictly from each page's own embedded text (`PageInfo` / `PageMetadata`).
   - Dual-plan viewport detection (`viewport_count`) and automatic `PlanRegion` creation (Left/Right floor plan viewports excluding bottom 12% title block).

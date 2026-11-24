@@ -102,3 +102,19 @@
 .pdf-level-num-row{display:flex;align-items:center;gap:6px;font-size:11px;color:#9baabe}
 .pdf-level-num-row input[type="number"]{width:84px;background:#111d2e;color:#eaf0f6;border:1px solid #304560;border-radius:6px;padding:5px 7px;font-size:11px}
 .pdf-level-warn{background:#2d1f14;border:1px solid #8a5a2b;color:#f5c98a;border-radius:6px;padding:6px 8px;font-size:10px;line-height:1.4}
+
+/* Interactive Page Type Selector & Plan Regions Panel */
+.pdf-type-select{font-size:10px;font-weight:800;letter-spacing:.5px;padding:5px 8px;border-radius:14px;background:#15253c;color:#eaf0f6;border:1px solid #355d8f;cursor:pointer}
+.pdf-type-select.sheet-floor{background:#122c28;border-color:#286554;color:#7be0c3}
+.pdf-type-select.sheet-elev{background:#15253c;border-color:#355d8f;color:#8ec5ff}
+.pdf-type-select.sheet-sect{background:#241c38;border-color:#5c4294;color:#c4b5fd}
+.pdf-type-select.sheet-skip{background:#23201b;border-color:#594b34;color:#c7b089}
+.pdf-regions-top{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap}
+.pdf-region-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:8px}
+.pdf-region-card{display:flex;justify-content:space-between;align-items:center;gap:8px;background:#0e1828;border:1px solid #26364d;border-radius:8px;padding:8px 10px;cursor:pointer}
+.pdf-region-card.active{border-color:#38bdf8;background:#13253a}
+.pdf-region-card-main{min-width:0}
+.pdf-region-card-main strong{display:block;font-size:11px;color:#eaf0f6}
+.pdf-region-card-main small{display:block;font-size:10px;color:#8999ae;margin-top:2px}
+.region-level-input{width:62px;background:#111d2e;color:#eaf0f6;border:1px solid #304560;border-radius:6px;padding:4px 6px;font-size:10px}
+.pdf-stage.mode-draw_region{cursor:crosshair}

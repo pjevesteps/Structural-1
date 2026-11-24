@@ -15,6 +15,8 @@ from .detector import (
 from .inspector import (
     DEFAULT_RENDER_DPI,
     InvalidPdfError,
+    _extract_text_blocks_px,
+    build_floor_plan_regions,
     compute_scale_metrics,
     inspect_and_render_pdf,
     px_to_plan_m,
@@ -36,8 +38,10 @@ from .schemas import (
     LevelUpdateRequest,
     ManualColumnRequest,
     ManualGridRequest,
+    PageUpdateRequest,
     PlanRegion,
     PointPx,
+    RegionCreateRequest,
     RegionUpdateRequest,
     ReviewStatus,
     ScaleCalibration,
@@ -48,6 +52,7 @@ from .schemas import (
     TransferRequest,
     TransferResponse,
 )
+import pymupdf
 
 
 def _utc_now() -> str:
@@ -400,6 +405,96 @@ def confirm_calibration(project_id: str, doc_id: str, page_number: int) -> Impor
     return state
 
 
+def update_page(
+    project_id: str,
+    doc_id: str,
+    page_number: int,
+    req: PageUpdateRequest,
+) -> ImportDocumentState:
+    state = get_import(project_id, doc_id)
+    page = _get_page(state, page_number)
+
+    if req.sheet_type is not None:
+        page.sheet_type = req.sheet_type
+    if req.sheet_number is not None:
+        page.sheet_number = req.sheet_number.strip()
+    if req.sheet_title is not None:
+        page.sheet_title = req.sheet_title.strip()
+
+    # If user switches a sheet to floor_plan and it has no regions yet, auto-propose regions
+    if page.sheet_type == "floor_plan" and not any(r.page_number == page_number for r in state.regions):
+        pdf_path = _original_pdf_path(project_id, doc_id)
+        png_path = _pages_dir(project_id, doc_id) / page.image_filename
+        if pdf_path.exists():
+            doc = pymupdf.open(pdf_path)
+            try:
+                pg = doc[page_number - 1]
+                blocks = _extract_text_blocks_px(pg, page.width_px, page.height_px)
+                vp_count, new_regions = build_floor_plan_regions(
+                    pg,
+                    png_path,
+                    page_number,
+                    page.width_px,
+                    page.height_px,
+                    blocks,
+                    page.sheet_title,
+                )
+                page.viewport_count = vp_count
+                state.regions.extend(new_regions)
+            finally:
+                doc.close()
+
+    _save_state(state)
+    _append_audit(
+        project_id,
+        doc_id,
+        "page_updated",
+        {
+            "page_number": page_number,
+            "sheet_type": page.sheet_type,
+            "sheet_number": page.sheet_number,
+            "sheet_title": page.sheet_title,
+        },
+    )
+    return state
+
+
+def create_region(
+    project_id: str,
+    doc_id: str,
+    req: RegionCreateRequest,
+) -> ImportDocumentState:
+    state = get_import(project_id, doc_id)
+    _get_page(state, req.page_number)
+
+    region = PlanRegion(
+        region_id=f"reg-p{req.page_number}-{uuid4().hex[:6]}",
+        page_number=req.page_number,
+        name=req.name.strip(),
+        floor_level=req.floor_level.strip(),
+        x_px=round(req.x_px, 2),
+        y_px=round(req.y_px, 2),
+        width_px=round(req.width_px, 2),
+        height_px=round(req.height_px, 2),
+        origin_px=req.origin_px,
+        auto_detected=False,
+    )
+    state.regions.append(region)
+    _save_state(state)
+    _append_audit(
+        project_id,
+        doc_id,
+        "region_created",
+        {
+            "region_id": region.region_id,
+            "page_number": req.page_number,
+            "name": region.name,
+            "floor_level": region.floor_level,
+        },
+    )
+    return state
+
+
 def update_region(
     project_id: str,
     doc_id: str,
@@ -411,6 +506,8 @@ def update_region(
 
     if req.name is not None and req.name.strip():
         region.name = req.name.strip()
+    if req.floor_level is not None:
+        region.floor_level = req.floor_level.strip()
     if req.origin_px is not None:
         region.origin_px = req.origin_px
     if req.x_px is not None:
@@ -430,9 +527,31 @@ def update_region(
         {
             "region_id": region_id,
             "name": region.name,
+            "floor_level": region.floor_level,
             "origin_px": region.origin_px.model_dump() if region.origin_px else None,
         },
     )
+    return state
+
+
+def delete_region(
+    project_id: str,
+    doc_id: str,
+    region_id: str,
+) -> ImportDocumentState:
+    state = get_import(project_id, doc_id)
+    _get_region(state, region_id)
+
+    state.regions = [r for r in state.regions if r.region_id != region_id]
+    for g in state.grid_candidates:
+        if g.region_id == region_id:
+            g.region_id = None
+    for c in state.column_candidates:
+        if c.region_id == region_id:
+            c.region_id = None
+
+    _save_state(state)
+    _append_audit(project_id, doc_id, "region_deleted", {"region_id": region_id})
     return state
 
 

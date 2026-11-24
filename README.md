@@ -74,6 +74,9 @@ Connect tablet and PC to the same trusted Wi-Fi. Run `ipconfig` on Windows, then
 - `GET /api/projects/{project_id}/pdf-imports/{doc_id}` — Get staged import state
 - `GET /api/projects/{project_id}/pdf-imports/{doc_id}/audit` — Read audit trail (`audit.jsonl`)
 - `GET /api/projects/{project_id}/pdf-imports/{doc_id}/pages/{page_number}/image` — Rendered page PNG
+- `PATCH /api/projects/{project_id}/pdf-imports/{doc_id}/pages/{page_number}` — Override page `sheet_type`, `sheet_number`, or `sheet_title`
+- `POST /api/projects/{project_id}/pdf-imports/{doc_id}/regions` — Manually create a `PlanRegion` box
+- `DELETE /api/projects/{project_id}/pdf-imports/{doc_id}/regions/{region_id}` — Delete a `PlanRegion` box
 - `POST /api/projects/{project_id}/pdf-imports/{doc_id}/pages/{page_number}/calibrate` — Set 2-point scale calibration
 - `POST /api/projects/{project_id}/pdf-imports/{doc_id}/pages/{page_number}/confirm-calibration` — Confirm scale calibration
 - `POST /api/projects/{project_id}/pdf-imports/{doc_id}/pages/{page_number}/extract` — Run vector, raster, auto, or VLM placeholder detection (with optional `ExtractionOptions` and `region_id`)

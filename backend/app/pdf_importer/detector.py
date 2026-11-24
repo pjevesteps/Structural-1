@@ -324,8 +324,15 @@ def _assign_grid_ref(
     return "", False
 
 
-def _extract_rect_from_drawing(drawing: dict, ox: float, oy: float, sx: float, sy: float):
-    """Extract axis-aligned rectangle bounds in px if a drawing item represents a closed 4-edge box."""
+def _extract_rect_from_drawing(
+    drawing: dict,
+    rot_mat: pymupdf.Matrix,
+    ox: float,
+    oy: float,
+    sx: float,
+    sy: float,
+):
+    """Extract axis-aligned rectangle bounds in display px (respecting page.rotation_matrix)."""
     items = drawing.get("items", [])
     rects: list[tuple[float, float, float, float]] = []
     line_segs: list[tuple[float, float, float, float]] = []
@@ -333,7 +340,7 @@ def _extract_rect_from_drawing(drawing: dict, ox: float, oy: float, sx: float, s
     for item in items:
         op = item[0]
         if op == "re":
-            r = item[1]
+            r = item[1] * rot_mat
             x0 = (float(r.x0) - ox) * sx
             y0 = (float(r.y0) - oy) * sy
             x1 = (float(r.x1) - ox) * sx
@@ -341,11 +348,13 @@ def _extract_rect_from_drawing(drawing: dict, ox: float, oy: float, sx: float, s
             rects.append((min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)))
         elif op == "qu":
             q = item[1]
-            xs = [(float(p.x) - ox) * sx for p in (q.ul, q.ur, q.ll, q.lr)]
-            ys = [(float(p.y) - oy) * sy for p in (q.ul, q.ur, q.ll, q.lr)]
+            pts = [p * rot_mat for p in (q.ul, q.ur, q.ll, q.lr)]
+            xs = [(float(p.x) - ox) * sx for p in pts]
+            ys = [(float(p.y) - oy) * sy for p in pts]
             rects.append((min(xs), min(ys), max(xs), max(ys)))
         elif op == "l":
-            p1, p2 = item[1], item[2]
+            p1 = item[1] * rot_mat
+            p2 = item[2] * rot_mat
             line_segs.append(
                 (
                     (float(p1.x) - ox) * sx,
@@ -391,6 +400,7 @@ def detect_vector_elements(
     doc = pymupdf.open(pdf_path)
     try:
         page = doc[page_info.page_number - 1]
+        rot_mat = page.rotation_matrix
         ox = float(page.rect.x0)
         oy = float(page.rect.y0)
         sx = float(page_info.width_px) / max(float(page.rect.width), 1.0)
@@ -409,7 +419,7 @@ def detect_vector_elements(
 
         for drawing in page.get_drawings():
             is_filled = drawing.get("fill") is not None
-            rects, line_segs = _extract_rect_from_drawing(drawing, ox, oy, sx, sy)
+            rects, line_segs = _extract_rect_from_drawing(drawing, rot_mat, ox, oy, sx, sy)
 
             for x0, y0, x1, y1 in rects:
                 w = x1 - x0
@@ -457,9 +467,10 @@ def detect_vector_elements(
         if opts.detect_grid_labels:
             pad = 50.0
             for idx_w, w_item in enumerate(page.get_text("words")):
-                wx0, wy0, wx1, wy1, text = w_item[:5]
-                wx = ((float(wx0) + float(wx1)) * 0.5 - ox) * sx
-                wy = ((float(wy0) + float(wy1)) * 0.5 - oy) * sy
+                wr = pymupdf.Rect(w_item[:4]) * rot_mat
+                text = w_item[4]
+                wx = ((float(wr.x0) + float(wr.x1)) * 0.5 - ox) * sx
+                wy = ((float(wr.y0) + float(wr.y1)) * 0.5 - oy) * sy
                 if bx0 - pad <= wx <= bx1 + pad and by0 - pad <= wy <= by1 + pad:
                     words.append((idx_w, wx, wy, str(text)))
 
@@ -907,6 +918,10 @@ def probe_columns_at_grid_intersections(
 
 
 def _parse_elevation_m(text: str) -> float | None:
+    upper = text.upper()
+    # Exclude architectural scale callouts like "SCALE: 1:100M" or "1:45M"
+    if "SCALE" in upper or re.search(r"\b1\s*:\s*\d+", upper):
+        return None
     m = ELEV_VALUE_RE.search(text)
     if m:
         try:
@@ -923,6 +938,8 @@ def _parse_elevation_m(text: str) -> float | None:
 
 
 def _contains_level_keyword(upper_text: str) -> bool:
+    if "CEILING" in upper_text or "SCALE" in upper_text:
+        return False
     return any(kw in upper_text for kw in LEVEL_KEYWORDS)
 
 
@@ -956,13 +973,14 @@ def extract_levels_from_elevation_or_section(
     doc = pymupdf.open(pdf_path)
     try:
         page = doc[page_info.page_number - 1]
+        rot_mat = page.rotation_matrix
         ox = float(page.rect.x0)
         oy = float(page.rect.y0)
         sx = page_w / max(float(page.rect.width), 1.0)
         sy = page_h / max(float(page.rect.height), 1.0)
 
         for drawing in page.get_drawings():
-            rects, line_segs = _extract_rect_from_drawing(drawing, ox, oy, sx, sy)
+            rects, line_segs = _extract_rect_from_drawing(drawing, rot_mat, ox, oy, sx, sy)
             for x0, y0, x1, y1 in rects:
                 if (y1 - y0) <= 3.5 and (x1 - x0) >= 6.0:
                     yc = (y0 + y1) * 0.5
@@ -987,11 +1005,13 @@ def extract_levels_from_elevation_or_section(
                 text = re.sub(r"\s+", " ", raw).strip()
                 if not text:
                     continue
-                bx0, by0, bx1, by1 = line.get("bbox", (0, 0, 0, 0))
-                x0 = (float(bx0) - ox) * sx
-                y0 = (float(by0) - oy) * sy
-                x1 = (float(bx1) - ox) * sx
-                y1 = (float(by1) - oy) * sy
+                lr = pymupdf.Rect(line.get("bbox", (0, 0, 0, 0))) * rot_mat
+                x0 = (float(lr.x0) - ox) * sx
+                y0 = (float(lr.y0) - oy) * sy
+                x1 = (float(lr.x1) - ox) * sx
+                y1 = (float(lr.y1) - oy) * sy
+                x0, x1 = min(x0, x1), max(x0, x1)
+                y0, y1 = min(y0, y1), max(y0, y1)
                 cy = (y0 + y1) * 0.5
                 if cy > bottom_limit + page_h * 0.02:
                     continue

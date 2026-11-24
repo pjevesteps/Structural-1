@@ -7,6 +7,16 @@ const METHODS = [
   { value: "raster", label: "Raster (OpenCV)" },
   { value: "vlm", label: "Experimental VLM (Placeholder)" },
 ];
+const SHEET_TYPE_OPTIONS = [
+  { value: "floor_plan", label: "Floor Plan" },
+  { value: "roof_plan", label: "Roof Plan" },
+  { value: "elevation", label: "Elevation" },
+  { value: "section", label: "Section" },
+  { value: "cover_toc", label: "Cover / TOC" },
+  { value: "lot_site", label: "Lot / Site Plan" },
+  { value: "schedule_detail", label: "Schedule / Detail" },
+  { value: "unknown", label: "Unknown / Plan" },
+];
 
 function statusColor(status) {
   if (status === "approved") return "#45c9a8";
@@ -38,7 +48,8 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
   const [imports, setImports] = useState([]);
   const [doc, setDoc] = useState(null);
   const [pageNum, setPageNum] = useState(1);
-  const [mode, setMode] = useState("inspect"); // inspect | calibrate | place_column | set_origin
+  // inspect | calibrate | place_column | draw_region | set_origin
+  const [mode, setMode] = useState("inspect");
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
@@ -63,9 +74,13 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
   const [mergeMode, setMergeMode] = useState("merge");
   const [selectedId, setSelectedId] = useState(null);
 
-  // Architectural multi-region & level state
+  // Plan Regions & Draw Region state
   const [activeRegionId, setActiveRegionId] = useState("");
   const [masterSourceRegionId, setMasterSourceRegionId] = useState("");
+  const [regionCorner1, setRegionCorner1] = useState(null);
+  const [hoverPt, setHoverPt] = useState(null);
+  const [newRegionName, setNewRegionName] = useState("");
+  const [newRegionLevel, setNewRegionLevel] = useState("");
   const [levelEdits, setLevelEdits] = useState({});
 
   async function apiJson(url, options) {
@@ -121,7 +136,6 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
     [pageRegions, activeRegionId]
   );
 
-  // Regions across the whole document that have approved grids + an origin (eligible master grid sources)
   const masterSourceRegions = useMemo(() => {
     if (!doc) return [];
     return (doc.regions || []).filter((r) => {
@@ -138,7 +152,6 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
     });
   }, [doc, activeRegionId]);
 
-  // Keep activeRegionId synced when changing page
   useEffect(() => {
     if (pageRegions.length > 0) {
       if (!pageRegions.some((r) => r.region_id === activeRegionId)) {
@@ -147,6 +160,7 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
     } else {
       setActiveRegionId("");
     }
+    setRegionCorner1(null);
   }, [doc?.doc_id, pageNum, pageRegions.length]);
 
   useEffect(() => {
@@ -159,7 +173,6 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
     }
   }, [masterSourceRegions]);
 
-  // Sync calibration preview points when switching pages or documents
   useEffect(() => {
     if (activeCalibration) {
       setCalP1(activeCalibration.p1);
@@ -258,6 +271,28 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
     }
   }
 
+  async function handleChangePageType(newSheetType) {
+    if (!doc || !activePage) return;
+    setBusy(true);
+    setError("");
+    try {
+      const updated = await apiJson(
+        `/api/projects/${pid}/pdf-imports/${encodeURIComponent(doc.doc_id)}/pages/${activePage.page_number}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sheet_type: newSheetType }),
+        }
+      );
+      setDoc(updated);
+      setNotice(`Page ${activePage.page_number} type set to ${newSheetType}.`);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function getSvgPoint(e) {
     if (!svgRef.current || !activePage) return null;
     const rect = svgRef.current.getBoundingClientRect();
@@ -268,6 +303,12 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
       x_px: Math.min(Math.max(0, x_px), activePage.width_px),
       y_px: Math.min(Math.max(0, y_px), activePage.height_px),
     };
+  }
+
+  function handleCanvasMove(e) {
+    if (mode !== "draw_region" || !regionCorner1) return;
+    const pt = getSvgPoint(e);
+    if (pt) setHoverPt(pt);
   }
 
   async function handleCanvasClick(e) {
@@ -289,16 +330,71 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
       return;
     }
 
+    if (mode === "draw_region") {
+      setError("");
+      if (!regionCorner1) {
+        setRegionCorner1(pt);
+        setHoverPt(pt);
+        setNotice(`Region Corner 1 set at (${pt.x_px}, ${pt.y_px}) px. Click opposite corner.`);
+        return;
+      }
+      const x0 = Math.min(regionCorner1.x_px, pt.x_px);
+      const y0 = Math.min(regionCorner1.y_px, pt.y_px);
+      const w = Math.abs(pt.x_px - regionCorner1.x_px);
+      const h = Math.abs(pt.y_px - regionCorner1.y_px);
+      if (w < 20 || h < 20) {
+        setError("Drawn region is too small. Click two opposite corners of the plan area.");
+        setRegionCorner1(null);
+        setHoverPt(null);
+        return;
+      }
+      setBusy(true);
+      try {
+        const regName =
+          newRegionName.trim() || `Page ${activePage.page_number} Region ${pageRegions.length + 1}`;
+        const updated = await apiJson(
+          `/api/projects/${pid}/pdf-imports/${encodeURIComponent(doc.doc_id)}/regions`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              page_number: activePage.page_number,
+              name: regName,
+              floor_level: newRegionLevel.trim(),
+              x_px: x0,
+              y_px: y0,
+              width_px: w,
+              height_px: h,
+            }),
+          }
+        );
+        setDoc(updated);
+        const created = updated.regions[updated.regions.length - 1];
+        if (created) setActiveRegionId(created.region_id);
+        setRegionCorner1(null);
+        setHoverPt(null);
+        setNewRegionName("");
+        setMode("inspect");
+        setNotice(`Created region '${regName}' (${Math.round(w)}×${Math.round(h)} px).`);
+      } catch (err) {
+        setError(err.message);
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+
     if (mode === "set_origin") {
-      if (!activeRegion) {
-        setError("Select a floor plan region first before setting its origin.");
+      const targetReg = activeRegion || pageRegions[0] || null;
+      if (!targetReg) {
+        setError("Create or select a Plan Region first (use 'Draw Region') before setting (0,0) origin.");
         return;
       }
       setBusy(true);
       setError("");
       try {
         const updated = await apiJson(
-          `/api/projects/${pid}/pdf-imports/${encodeURIComponent(doc.doc_id)}/regions/${encodeURIComponent(activeRegion.region_id)}`,
+          `/api/projects/${pid}/pdf-imports/${encodeURIComponent(doc.doc_id)}/regions/${encodeURIComponent(targetReg.region_id)}`,
           {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
@@ -306,8 +402,9 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
           }
         );
         setDoc(updated);
+        setActiveRegionId(targetReg.region_id);
         setMode("inspect");
-        setNotice(`Set origin for '${activeRegion.name}' at (${pt.x_px}, ${pt.y_px}) px.`);
+        setNotice(`Origin (0,0) for '${targetReg.name}' set at (${pt.x_px}, ${pt.y_px}) px.`);
       } catch (err) {
         setError(err.message);
       } finally {
@@ -348,6 +445,46 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
       } finally {
         setBusy(false);
       }
+    }
+  }
+
+  async function handleDeleteRegion(regionId) {
+    if (!doc) return;
+    setBusy(true);
+    setError("");
+    try {
+      const updated = await apiJson(
+        `/api/projects/${pid}/pdf-imports/${encodeURIComponent(doc.doc_id)}/regions/${encodeURIComponent(regionId)}`,
+        { method: "DELETE" }
+      );
+      setDoc(updated);
+      if (activeRegionId === regionId) setActiveRegionId("");
+      setNotice("Deleted plan region.");
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleUpdateRegionMeta(regionId, patch) {
+    if (!doc) return;
+    setBusy(true);
+    setError("");
+    try {
+      const updated = await apiJson(
+        `/api/projects/${pid}/pdf-imports/${encodeURIComponent(doc.doc_id)}/regions/${encodeURIComponent(regionId)}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(patch),
+        }
+      );
+      setDoc(updated);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -598,6 +735,7 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             page_number: activePage.page_number,
+            region_id: activeRegionId || null,
             merge_mode: mergeMode,
           }),
         }
@@ -615,9 +753,7 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
   }
 
   const canTransfer = Boolean(activeCalibration?.confirmed && counts.approved > 0 && !busy);
-  const canCopyMasterGrid = Boolean(
-    activeRegion?.origin_px && masterSourceRegionId && !busy
-  );
+  const canCopyMasterGrid = Boolean(activeRegion?.origin_px && masterSourceRegionId && !busy);
   const imageUrl =
     doc && activePage
       ? `/api/projects/${pid}/pdf-imports/${encodeURIComponent(doc.doc_id)}/pages/${activePage.page_number}/image`
@@ -725,9 +861,20 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
                   <span className={`pdf-badge class-${activePage.classification}`}>
                     {activePage.classification.toUpperCase()}
                   </span>
-                  <span className={`pdf-badge ${sheetBadgeInfo(activePage).cls}`}>
-                    {sheetBadgeInfo(activePage).label}
-                  </span>
+                  <select
+                    className={`pdf-type-select ${sheetBadgeInfo(activePage).cls}`}
+                    value={activePage.sheet_type || "unknown"}
+                    onChange={(e) => handleChangePageType(e.target.value)}
+                    disabled={busy}
+                    aria-label="Override page sheet type"
+                    title="Change page type (e.g., switch to Elevation/Section or Floor Plan)"
+                  >
+                    {SHEET_TYPE_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
                   {activePage.sheet_title && (
                     <span className="pdf-meta-dim" title={activePage.sheet_title}>
                       {activePage.sheet_title}
@@ -739,60 +886,168 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
                   <div className="pdf-modes">
                     <button
                       className={`secondary ${mode === "inspect" ? "active" : ""}`}
-                      onClick={() => setMode("inspect")}
+                      onClick={() => {
+                        setMode("inspect");
+                        setRegionCorner1(null);
+                      }}
                     >
                       Inspect
                     </button>
                     <button
                       className={`secondary ${mode === "calibrate" ? "active" : ""}`}
-                      onClick={() => setMode("calibrate")}
+                      onClick={() => {
+                        setMode("calibrate");
+                        setRegionCorner1(null);
+                      }}
                     >
                       Calibrate (2-Pt)
                     </button>
                     <button
                       className={`secondary ${mode === "place_column" ? "active" : ""}`}
-                      onClick={() => setMode("place_column")}
+                      onClick={() => {
+                        setMode("place_column");
+                        setRegionCorner1(null);
+                      }}
                     >
                       Place Column
                     </button>
-                    {pageRegions.length > 0 && (
-                      <button
-                        className={`secondary ${mode === "set_origin" ? "active" : ""}`}
-                        onClick={() => setMode("set_origin")}
-                        disabled={!activeRegion}
-                      >
-                        Set Region Origin
-                      </button>
-                    )}
+                    <button
+                      className={`secondary ${mode === "draw_region" ? "active" : ""}`}
+                      onClick={() => {
+                        setMode("draw_region");
+                        setRegionCorner1(null);
+                        setNotice("Draw Region mode: click Corner 1 then opposite Corner 2 on the sheet.");
+                      }}
+                    >
+                      Draw Region
+                    </button>
+                    <button
+                      className={`secondary ${mode === "set_origin" ? "active" : ""}`}
+                      onClick={() => {
+                        setMode("set_origin");
+                        setRegionCorner1(null);
+                        setNotice("Set Origin (0,0) mode: click the (0,0) grid intersection for the active region.");
+                      }}
+                    >
+                      Set Origin (0,0)
+                    </button>
                   </div>
                 )}
               </div>
 
-              {/* Floor Plan Auto-Regions & Master Grid Propagation Strip */}
-              {activePage.sheet_type === "floor_plan" && pageRegions.length > 0 && (
+              {/* Plan Regions Panel (shown on plan pages & whenever regions exist) */}
+              {!isElevationOrSection && (
                 <div className="pdf-regions-bar">
-                  <div className="pdf-region-tabs">
+                  <div className="pdf-regions-top">
                     <span className="pdf-group-title">
-                      Floor Viewports ({pageRegions.length})
+                      Plan Regions ({pageRegions.length})
                     </span>
-                    {pageRegions.map((reg) => (
-                      <button
-                        key={reg.region_id}
-                        type="button"
-                        className={`secondary region-tab ${activeRegionId === reg.region_id ? "active" : ""}`}
-                        onClick={() => setActiveRegionId(reg.region_id)}
-                      >
-                        {reg.name} {reg.origin_px ? "◎" : ""}
-                      </button>
-                    ))}
-                    <button
-                      type="button"
-                      className={`secondary region-tab ${activeRegionId === "" ? "active" : ""}`}
-                      onClick={() => setActiveRegionId("")}
-                    >
-                      Full Sheet
-                    </button>
+                    <div className="pdf-inline-form">
+                      <label className="pdf-field-chip">
+                        <span>Active Target Region</span>
+                        <select
+                          className="pdf-select"
+                          value={activeRegionId}
+                          onChange={(e) => setActiveRegionId(e.target.value)}
+                          disabled={busy}
+                        >
+                          <option value="">Full Sheet (No Crop)</option>
+                          {pageRegions.map((reg) => (
+                            <option key={reg.region_id} value={reg.region_id}>
+                              {reg.name}
+                              {reg.floor_level ? ` [${reg.floor_level}]` : ""}
+                              {reg.origin_px ? " ◎" : ""}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    </div>
                   </div>
+
+                  {mode === "draw_region" && (
+                    <div className="pdf-inline-form">
+                      <input
+                        type="text"
+                        value={newRegionName}
+                        onChange={(e) => setNewRegionName(e.target.value)}
+                        placeholder="New region name (e.g. Second Floor Plan)"
+                        style={{ minWidth: 210 }}
+                      />
+                      <input
+                        type="text"
+                        value={newRegionLevel}
+                        onChange={(e) => setNewRegionLevel(e.target.value)}
+                        placeholder="Floor level (e.g. 2F)"
+                        style={{ width: 120 }}
+                      />
+                      <small className="pdf-hint">
+                        {regionCorner1
+                          ? "Corner 1 set — click opposite corner to save region."
+                          : "Click two opposite corners on the plan image."}
+                      </small>
+                    </div>
+                  )}
+
+                  {pageRegions.length > 0 ? (
+                    <div className="pdf-region-cards">
+                      {pageRegions.map((reg) => {
+                        const isAct = reg.region_id === activeRegionId;
+                        return (
+                          <div
+                            key={reg.region_id}
+                            className={`pdf-region-card ${isAct ? "active" : ""}`}
+                            onClick={() => setActiveRegionId(reg.region_id)}
+                          >
+                            <div className="pdf-region-card-main">
+                              <strong>{reg.name}</strong>
+                              <small>
+                                {reg.floor_level ? `Level: ${reg.floor_level} · ` : ""}
+                                {Math.round(reg.width_px)}×{Math.round(reg.height_px)} px ·{" "}
+                                {reg.origin_px
+                                  ? `Origin (${Math.round(reg.origin_px.x_px)}, ${Math.round(reg.origin_px.y_px)})`
+                                  : "Origin not set"}
+                              </small>
+                            </div>
+                            <div className="pdf-cand-actions">
+                              <input
+                                type="text"
+                                className="region-level-input"
+                                defaultValue={reg.floor_level || ""}
+                                placeholder="Level"
+                                title="Floor level tag (press Enter or blur to save)"
+                                onClick={(ev) => ev.stopPropagation()}
+                                onBlur={(ev) => {
+                                  if (ev.target.value !== (reg.floor_level || "")) {
+                                    handleUpdateRegionMeta(reg.region_id, {
+                                      floor_level: ev.target.value,
+                                    });
+                                  }
+                                }}
+                              />
+                              <button
+                                type="button"
+                                className="mini-btn on-reject"
+                                disabled={busy}
+                                onClick={(ev) => {
+                                  ev.stopPropagation();
+                                  handleDeleteRegion(reg.region_id);
+                                }}
+                                title="Delete region"
+                              >
+                                Delete
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <small className="pdf-hint">
+                      No regions on this page yet. Click <strong>Draw Region</strong> to define a
+                      viewport box, or switch the Page Type dropdown above to{" "}
+                      <strong>Floor Plan</strong>.
+                    </small>
+                  )}
 
                   {activeRegion && (
                     <div className="pdf-master-grid-row">
@@ -818,7 +1073,7 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
                             title={
                               activeRegion.origin_px
                                 ? "Copy approved master grids into this region and probe intersection columns"
-                                : "Click 'Set Region Origin' on this viewport first"
+                                : "Click 'Set Origin (0,0)' on this viewport first"
                             }
                           >
                             Copy Master Grid to This Region
@@ -826,8 +1081,8 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
                         </>
                       ) : (
                         <small className="pdf-hint">
-                          Approve grids &amp; set origins on a floor region to enable Copy Master
-                          Grid.
+                          Approve grids &amp; set (0,0) origins on a floor region to enable Copy
+                          Master Grid.
                         </small>
                       )}
                     </div>
@@ -1052,29 +1307,30 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
                   viewBox={`0 0 ${activePage.width_px} ${activePage.height_px}`}
                   preserveAspectRatio="none"
                   onClick={handleCanvasClick}
+                  onMouseMove={handleCanvasMove}
                 >
-                  {/* Auto-proposed Floor Plan Regions */}
+                  {/* Saved PlanRegion Boxes & (0,0) Origin Crosshairs */}
                   {pageRegions.map((reg) => {
                     const isActiveReg = reg.region_id === activeRegionId;
                     const strokeW = Math.max(activePage.width_px * 0.0022, 1.8);
                     const fontSize = Math.max(activePage.width_px * 0.012, 12);
                     return (
-                      <g key={reg.region_id} opacity={isActiveReg ? 0.95 : 0.45}>
+                      <g key={reg.region_id} opacity={isActiveReg ? 0.96 : 0.52}>
                         <rect
-                          x={reg.x_px + 2}
-                          y={reg.y_px + 2}
-                          width={Math.max(10, reg.width_px - 4)}
-                          height={Math.max(10, reg.height_px - 4)}
+                          x={reg.x_px}
+                          y={reg.y_px}
+                          width={Math.max(10, reg.width_px)}
+                          height={Math.max(10, reg.height_px)}
                           fill={isActiveReg ? "#38bdf8" : "none"}
                           fillOpacity={isActiveReg ? 0.05 : 0}
-                          stroke={isActiveReg ? "#38bdf8" : "#64748b"}
+                          stroke={isActiveReg ? "#38bdf8" : "#94a3b8"}
                           strokeWidth={strokeW}
                           strokeDasharray={`${strokeW * 4} ${strokeW * 3}`}
                         />
                         <text
                           x={reg.x_px + 12}
                           y={reg.y_px + fontSize + 8}
-                          fill={isActiveReg ? "#38bdf8" : "#94a3b8"}
+                          fill={isActiveReg ? "#38bdf8" : "#cbd5e1"}
                           fontSize={fontSize}
                           fontWeight="800"
                           stroke="#0b1220"
@@ -1082,6 +1338,7 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
                           paintOrder="stroke"
                         >
                           {reg.name}
+                          {reg.floor_level ? ` (${reg.floor_level})` : ""}
                         </text>
                         {reg.origin_px && (
                           <g>
@@ -1094,26 +1351,53 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
                               strokeWidth={strokeW}
                             />
                             <line
-                              x1={reg.origin_px.x_px - 12}
+                              x1={reg.origin_px.x_px - 14}
                               y1={reg.origin_px.y_px}
-                              x2={reg.origin_px.x_px + 12}
+                              x2={reg.origin_px.x_px + 14}
                               y2={reg.origin_px.y_px}
                               stroke="#45c9a8"
                               strokeWidth={strokeW}
                             />
                             <line
                               x1={reg.origin_px.x_px}
-                              y1={reg.origin_px.y_px - 12}
+                              y1={reg.origin_px.y_px - 14}
                               x2={reg.origin_px.x_px}
-                              y2={reg.origin_px.y_px + 12}
+                              y2={reg.origin_px.y_px + 14}
                               stroke="#45c9a8"
                               strokeWidth={strokeW}
                             />
+                            <text
+                              x={reg.origin_px.x_px + 12}
+                              y={reg.origin_px.y_px - 8}
+                              fill="#45c9a8"
+                              fontSize={Math.max(activePage.width_px * 0.01, 11)}
+                              fontWeight="800"
+                              stroke="#0b1220"
+                              strokeWidth="3"
+                              paintOrder="stroke"
+                            >
+                              (0,0)
+                            </text>
                           </g>
                         )}
                       </g>
                     );
                   })}
+
+                  {/* Live Preview Box while Drawing a Region */}
+                  {mode === "draw_region" && regionCorner1 && hoverPt && (
+                    <rect
+                      x={Math.min(regionCorner1.x_px, hoverPt.x_px)}
+                      y={Math.min(regionCorner1.y_px, hoverPt.y_px)}
+                      width={Math.abs(hoverPt.x_px - regionCorner1.x_px)}
+                      height={Math.abs(hoverPt.y_px - regionCorner1.y_px)}
+                      fill="#45c9a8"
+                      fillOpacity={0.12}
+                      stroke="#45c9a8"
+                      strokeWidth={Math.max(activePage.width_px * 0.0025, 2)}
+                      strokeDasharray="8 5"
+                    />
+                  )}
 
                   {/* Elevation / Section Horizontal Floor Level Datum Lines */}
                   {pageLevels.map((lvl) => {

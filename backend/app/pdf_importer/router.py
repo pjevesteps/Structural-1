@@ -16,6 +16,8 @@ from .schemas import (
     LevelUpdateRequest,
     ManualColumnRequest,
     ManualGridRequest,
+    PageUpdateRequest,
+    RegionCreateRequest,
     RegionUpdateRequest,
     ScaleCalibrationRequest,
     TransferLevelsRequest,
@@ -72,6 +74,19 @@ def get_pdf_import(project_id: str, doc_id: str):
 def get_pdf_import_audit(project_id: str, doc_id: str):
     try:
         return service.read_audit_log(project_id, doc_id)
+    except Exception as exc:
+        raise _handle_error(exc)
+
+
+@router.patch("/{doc_id}/pages/{page_number}", response_model=ImportDocumentState)
+def update_pdf_page(
+    project_id: str,
+    doc_id: str,
+    page_number: int,
+    payload: PageUpdateRequest,
+):
+    try:
+        return service.update_page(project_id, doc_id, page_number, payload)
     except Exception as exc:
         raise _handle_error(exc)
 
@@ -157,6 +172,18 @@ def transfer_approved_levels(
         raise _handle_error(exc)
 
 
+@router.post("/{doc_id}/regions", response_model=ImportDocumentState)
+def create_plan_region(
+    project_id: str,
+    doc_id: str,
+    payload: RegionCreateRequest,
+):
+    try:
+        return service.create_region(project_id, doc_id, payload)
+    except Exception as exc:
+        raise _handle_error(exc)
+
+
 @router.patch("/{doc_id}/regions/{region_id}", response_model=ImportDocumentState)
 def update_plan_region(
     project_id: str,
@@ -166,6 +193,18 @@ def update_plan_region(
 ):
     try:
         return service.update_region(project_id, doc_id, region_id, payload)
+    except Exception as exc:
+        raise _handle_error(exc)
+
+
+@router.delete("/{doc_id}/regions/{region_id}", response_model=ImportDocumentState)
+def delete_plan_region(
+    project_id: str,
+    doc_id: str,
+    region_id: str,
+):
+    try:
+        return service.delete_region(project_id, doc_id, region_id)
     except Exception as exc:
         raise _handle_error(exc)
 

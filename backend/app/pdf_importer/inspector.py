@@ -1,6 +1,9 @@
 from math import hypot
 from pathlib import Path
 import re
+
+import cv2
+import numpy as np
 import pymupdf
 
 from .schemas import (
@@ -16,15 +19,94 @@ MAX_PDF_SIZE_BYTES = 50 * 1024 * 1024  # 50 MB
 DEFAULT_RENDER_DPI = 150
 
 SHEET_NUM_RE = re.compile(r"^(?:[A-Z]{1,2}-?\d{1,3}[A-Z]?)$")
+
+# Words to split apart after collapsing single-character AutoCAD spacing (e.g. "FRONTELEVATION" -> "FRONT ELEVATION")
+COMPOUND_KEYWORDS = (
+    "TABLEOFCONTENTS",
+    "VICINITYMAP",
+    "EXTERIORPERSPECTIVE",
+    "SITEDEVELOPMENTPLAN",
+    "SITEDEVELOPMENT",
+    "LOTPLAN",
+    "BASEMENTFLOORPLAN",
+    "GROUNDFLOORPLAN",
+    "FIRSTFLOORPLAN",
+    "SECONDFLOORPLAN",
+    "THIRDFLOORPLAN",
+    "FOURTHFLOORPLAN",
+    "FIFTHFLOORPLAN",
+    "SIXTHFLOORPLAN",
+    "MEZZANINEFLOORPLAN",
+    "TYPICALFLOORPLAN",
+    "ROOFDECKPLAN",
+    "FLOORPLAN",
+    "ROOFPLAN",
+    "FRONTELEVATION",
+    "REARELEVATION",
+    "LEFTELEVATION",
+    "RIGHTELEVATION",
+    "SIDEELEVATION",
+    "ELEVATION",
+    "CROSSSECTION",
+    "LONGITUDINALSECTION",
+    "TRANSVERSECTION",
+    "SECTION",
+    "DOORSANDWINDOWSSCHEDULE",
+    "DOORSANDWINDOWS",
+    "SCHEDULE",
+)
+
+COMPOUND_REPLACEMENTS = {
+    "TABLEOFCONTENTS": "TABLE OF CONTENTS",
+    "VICINITYMAP": "VICINITY MAP",
+    "EXTERIORPERSPECTIVE": "EXTERIOR PERSPECTIVE",
+    "SITEDEVELOPMENTPLAN": "SITE DEVELOPMENT PLAN",
+    "SITEDEVELOPMENT": "SITE DEVELOPMENT",
+    "LOTPLAN": "LOT PLAN",
+    "BASEMENTFLOORPLAN": "BASEMENT FLOOR PLAN",
+    "GROUNDFLOORPLAN": "GROUND FLOOR PLAN",
+    "FIRSTFLOORPLAN": "FIRST FLOOR PLAN",
+    "SECONDFLOORPLAN": "SECOND FLOOR PLAN",
+    "THIRDFLOORPLAN": "THIRD FLOOR PLAN",
+    "FOURTHFLOORPLAN": "FOURTH FLOOR PLAN",
+    "FIFTHFLOORPLAN": "FIFTH FLOOR PLAN",
+    "SIXTHFLOORPLAN": "SIXTH FLOOR PLAN",
+    "MEZZANINEFLOORPLAN": "MEZZANINE FLOOR PLAN",
+    "TYPICALFLOORPLAN": "TYPICAL FLOOR PLAN",
+    "ROOFDECKPLAN": "ROOF DECK PLAN",
+    "FLOORPLAN": "FLOOR PLAN",
+    "ROOFPLAN": "ROOF PLAN",
+    "FRONTELEVATION": "FRONT ELEVATION",
+    "REARELEVATION": "REAR ELEVATION",
+    "LEFTELEVATION": "LEFT ELEVATION",
+    "RIGHTELEVATION": "RIGHT ELEVATION",
+    "SIDEELEVATION": "SIDE ELEVATION",
+    "ELEVATION": "ELEVATION",
+    "CROSSSECTION": "CROSS SECTION",
+    "LONGITUDINALSECTION": "LONGITUDINAL SECTION",
+    "TRANSVERSECTION": "TRANSVERSE SECTION",
+    "SECTION": "SECTION",
+    "DOORSANDWINDOWSSCHEDULE": "DOORS AND WINDOWS SCHEDULE",
+    "DOORSANDWINDOWS": "DOORS AND WINDOWS",
+    "SCHEDULE": "SCHEDULE",
+}
+
 FLOOR_TITLE_RE = re.compile(
-    r"([A-Z0-9][A-Z0-9\s\-/&]{0,36}?(?:FLOOR PLAN|ROOF DECK PLAN))",
+    r"\b((?:BASEMENT|GROUND|FIRST|SECOND|THIRD|FOURTH|FIFTH|SIXTH|MEZZANINE|TYPICAL|UPPER|LOWER|ROOF\s+DECK)"
+    r"(?:\s+[A-Z0-9\-]{1,12}){0,2}\s*(?:FLOOR\s+PLAN|PLAN)|[A-Z0-9\-]{1,12}\s+FLOOR\s+PLAN|ROOF\s+DECK\s+PLAN)\b",
     re.IGNORECASE,
 )
+
 GENERAL_TITLE_RE = re.compile(
-    r"([A-Z0-9][A-Z0-9\s\-/&]{0,42}?(?:"
-    r"TABLE OF CONTENTS|VICINITY MAP|SITE DEVELOPMENT PLAN|SITE DEVELOPMENT|LOT PLAN|"
-    r"ROOF DECK PLAN|FLOOR PLAN|ROOF PLAN|ELEVATION|CROSS SECTION|LONGITUDINAL SECTION|"
-    r"SECTION|SCHEDULE OF DOORS AND WINDOWS|DOORS AND WINDOWS|SCHEDULE))",
+    r"\b("
+    r"TABLE OF CONTENTS|VICINITY MAP|EXTERIOR PERSPECTIVE|"
+    r"SITE DEVELOPMENT PLAN|SITE DEVELOPMENT|LOT PLAN|"
+    r"(?:BASEMENT|GROUND|FIRST|SECOND|THIRD|FOURTH|FIFTH|SIXTH|MEZZANINE|TYPICAL)?\s*FLOOR PLAN|"
+    r"ROOF DECK PLAN|ROOF PLAN|"
+    r"(?:FRONT|REAR|LEFT|RIGHT|SIDE)?\s*ELEVATION|"
+    r"CROSS SECTION|LONGITUDINAL SECTION|SECTION|"
+    r"DOORS AND WINDOWS SCHEDULE|SCHEDULE OF DOORS AND WINDOWS|DOORS AND WINDOWS|SCHEDULE"
+    r")\b",
     re.IGNORECASE,
 )
 
@@ -48,6 +130,37 @@ def validate_pdf_bytes(data: bytes, max_bytes: int = MAX_PDF_SIZE_BYTES) -> None
         raise InvalidPdfError("Invalid PDF file: missing %PDF- header.")
 
 
+def normalize_spaced_text(text: str) -> str:
+    """
+    Collapse AutoCAD spaced-out single-character runs such as:
+      'F L O O R  P L A N' -> 'FLOOR PLAN'
+      'L\\nO\\nT\\n \\nP\\nL\\nA\\nN' -> 'LOT PLAN'
+      'B A S E M E N T F L O O R P L A N' -> 'BASEMENT FLOOR PLAN'
+      'C\\nR\\nO\\nS\\nS\\n \\nS\\nE\\nC\\nT\\nI\\nO\\nN' -> 'CROSS SECTION'
+    """
+    if not text:
+        return ""
+
+    # Preserve explicit space-only lines (word breaks between vertically split letters)
+    s = text.replace("\r\n", "\n").replace("\r", "\n")
+    s = re.sub(r"\n[ \t]+\n", "  ", s)
+    # Collapse runs of 3+ single letters separated by single space or single newline
+    s = re.sub(
+        r"(?<![A-Za-z])([A-Za-z])(?:[ \t\n]([A-Za-z])){2,}(?![A-Za-z])",
+        lambda m: re.sub(r"\s+", "", m.group(0)),
+        s,
+    )
+    # Normalize remaining whitespace
+    s = re.sub(r"\s+", " ", s).strip().upper()
+
+    # Re-insert clean word boundaries for merged AutoCAD architectural titles
+    for compact in COMPOUND_KEYWORDS:
+        if compact in s:
+            s = s.replace(compact, f" {COMPOUND_REPLACEMENTS[compact]} ")
+
+    return re.sub(r"\s+", " ", s).strip()
+
+
 def classify_page(page: pymupdf.Page) -> tuple[PageClassification, int, int, int, float]:
     """Classify a PDF page as 'vector', 'scanned', or 'hybrid' using PyMuPDF metrics."""
     drawings = page.get_drawings()
@@ -62,6 +175,7 @@ def classify_page(page: pymupdf.Page) -> tuple[PageClassification, int, int, int
     page_area = max(float(page.rect.width * page.rect.height), 1.0)
     covered_area = 0.0
     seen_xrefs: set[int] = set()
+    rot_mat = page.rotation_matrix
     for img in images:
         xref = img[0]
         if xref in seen_xrefs:
@@ -69,7 +183,8 @@ def classify_page(page: pymupdf.Page) -> tuple[PageClassification, int, int, int
         seen_xrefs.add(xref)
         try:
             for rect in page.get_image_rects(xref):
-                clipped = rect & page.rect
+                disp_rect = rect * rot_mat
+                clipped = disp_rect & page.rect
                 if not clipped.is_empty:
                     covered_area += float(clipped.width * clipped.height)
         except Exception:
@@ -97,121 +212,148 @@ def classify_page(page: pymupdf.Page) -> tuple[PageClassification, int, int, int
     return classification, drawing_count, image_count, text_word_count, image_coverage
 
 
-def _extract_text_lines_px(page: pymupdf.Page, width_px: int, height_px: int) -> list[dict]:
-    """Extract normalized text lines with bounding boxes in rendered PNG pixel coordinates."""
+def _to_display_rect_px(
+    bbox: tuple[float, float, float, float],
+    page: pymupdf.Page,
+    width_px: int,
+    height_px: int,
+) -> tuple[float, float, float, float]:
+    """Transform an unrotated PyMuPDF bbox into rendered PNG display pixel coordinates."""
+    r = pymupdf.Rect(bbox) * page.rotation_matrix
     ox = float(page.rect.x0)
     oy = float(page.rect.y0)
     sx = width_px / max(float(page.rect.width), 1.0)
     sy = height_px / max(float(page.rect.height), 1.0)
+    x0 = (float(r.x0) - ox) * sx
+    y0 = (float(r.y0) - oy) * sy
+    x1 = (float(r.x1) - ox) * sx
+    y1 = (float(r.y1) - oy) * sy
+    return min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)
 
-    lines: list[dict] = []
+
+def _extract_text_blocks_px(page: pymupdf.Page, width_px: int, height_px: int) -> list[dict]:
+    """
+    Extract text blocks & lines in rendered PNG display pixel coordinates (respecting page rotation),
+    with spaced-letter normalization applied to both block and line text.
+    """
+    items: list[dict] = []
     text_dict = page.get_text("dict")
     for block in text_dict.get("blocks", []):
         if block.get("type") != 0:
             continue
+        block_lines: list[str] = []
+        max_font = 0.0
         for line in block.get("lines", []):
             spans = line.get("spans", [])
-            raw_text = " ".join(str(s.get("text", "")).strip() for s in spans if str(s.get("text", "")).strip())
-            text = re.sub(r"\s+", " ", raw_text).strip()
-            if not text:
-                continue
-            bx0, by0, bx1, by1 = line.get("bbox", (0, 0, 0, 0))
-            max_font = max((float(s.get("size", 0.0)) for s in spans), default=0.0)
-            x0 = (float(bx0) - ox) * sx
-            y0 = (float(by0) - oy) * sy
-            x1 = (float(bx1) - ox) * sx
-            y1 = (float(by1) - oy) * sy
-            lines.append(
-                {
-                    "text": text,
-                    "upper": text.upper(),
-                    "x0": x0,
-                    "y0": y0,
-                    "x1": x1,
-                    "y1": y1,
-                    "cx": (x0 + x1) * 0.5,
-                    "cy": (y0 + y1) * 0.5,
-                    "font_size": max_font,
-                }
-            )
-    return lines
+            raw_line = " ".join(str(s.get("text", "")).strip() for s in spans if str(s.get("text", "")).strip())
+            if raw_line:
+                block_lines.append(raw_line)
+            max_font = max(max_font, max((float(s.get("size", 0.0)) for s in spans), default=0.0))
+
+        raw_block = "\n".join(block_lines).strip()
+        if not raw_block:
+            continue
+        norm = normalize_spaced_text(raw_block)
+        if not norm:
+            continue
+        x0, y0, x1, y1 = _to_display_rect_px(block.get("bbox", (0, 0, 0, 0)), page, width_px, height_px)
+        items.append(
+            {
+                "raw": raw_block,
+                "norm": norm,
+                "x0": x0,
+                "y0": y0,
+                "x1": x1,
+                "y1": y1,
+                "cx": (x0 + x1) * 0.5,
+                "cy": (y0 + y1) * 0.5,
+                "font_size": max_font,
+            }
+        )
+    return items
 
 
 def _extract_sheet_number(
-    lines: list[dict],
     words: list,
     page: pymupdf.Page,
     width_px: int,
     height_px: int,
 ) -> str:
-    """Extract sheet number (e.g., A4, A12, S-1) from the bottom-right title block."""
-    ox = float(page.rect.x0)
-    oy = float(page.rect.y0)
-    sx = width_px / max(float(page.rect.width), 1.0)
-    sy = height_px / max(float(page.rect.height), 1.0)
+    """
+    Strictly extract sheet_number from the bottom-right title block corner ONLY:
+    x >= 80% of page width and y >= 84% of page height (in display pixel coords).
+    Never picks up section-cut callouts (e.g. 'A12') inside the drawing area.
+    """
+    min_x = width_px * 0.80
+    min_y = height_px * 0.84
 
     candidates: list[tuple[float, str]] = []
     for w in words:
-        wx0, wy0, wx1, wy1, raw = w[:5]
-        token = str(raw).strip().upper().rstrip(".,;:")
-        if not SHEET_NUM_RE.match(token):
+        raw = str(w[4]).strip().upper().rstrip(".,;:")
+        if not SHEET_NUM_RE.match(raw):
             continue
-        # Exclude common non-sheet tokens like 2F, 3F, C1, B1 if outside title block
-        cx = ((float(wx0) + float(wx1)) * 0.5 - ox) * sx
-        cy = ((float(wy0) + float(wy1)) * 0.5 - oy) * sy
-        if cx >= width_px * 0.70 and cy >= height_px * 0.78:
-            # Prefer discipline sheet prefixes (A, S, E, P, M, C, CS, AR, ST) closest to bottom-right
-            prefix_bonus = 0.0 if token[0] in ("A", "S", "E", "P", "M", "C") else 0.5
-            dist_corner = hypot((width_px - cx) / max(width_px, 1), (height_px - cy) / max(height_px, 1))
-            candidates.append((prefix_bonus + dist_corner, token))
+        x0, y0, x1, y1 = _to_display_rect_px(w[:4], page, width_px, height_px)
+        cx = (x0 + x1) * 0.5
+        cy = (y0 + y1) * 0.5
+        if cx >= min_x and cy >= min_y:
+            # Prefer discipline-prefixed sheet codes (A1..A14, S1..S10, etc.)
+            if raw[0] in ("A", "S", "E", "P", "M", "C"):
+                dist_corner = hypot((width_px - cx) / max(width_px, 1), (height_px - cy) / max(height_px, 1))
+                candidates.append((dist_corner, raw))
 
     if candidates:
         candidates.sort(key=lambda item: item[0])
         return candidates[0][1]
-
-    # Fallback: check bottom-right lines for patterns like "SHEET NO: A4"
-    for ln in lines:
-        if ln["cx"] >= width_px * 0.65 and ln["cy"] >= height_px * 0.78:
-            m = re.search(r"\b([A-Z]{1,2}-?\d{1,3}[A-Z]?)\b", ln["upper"])
-            if m and m.group(1)[0] in ("A", "S", "E", "P", "M", "C"):
-                return m.group(1)
     return ""
 
 
-def classify_sheet_type_from_text(full_upper_text: str) -> SheetType:
+def classify_sheet_type_from_text(norm_upper_text: str) -> SheetType:
     """
-    Classify an architectural PDF sheet strictly from its own embedded text
-    (never relying on Page 1 TOC).
+    Classify an architectural PDF sheet strictly from its own normalized embedded text
+    (never relying on Page 1 TOC), with smart fallback clues when main titles use SHX vector strokes.
     """
-    if "TABLE OF CONTENTS" in full_upper_text or "VICINITY MAP" in full_upper_text:
+    t = norm_upper_text
+    if "TABLE OF CONTENTS" in t or "VICINITY MAP" in t or "VICINITY" in t or "EXTERIOR PERSPECTIVE" in t:
         return "cover_toc"
-    if "LOT PLAN" in full_upper_text or "SITE DEVELOPMENT" in full_upper_text:
+    if "LOT PLAN" in t or "SITE DEVELOPMENT" in t:
         return "lot_site"
-    if "FLOOR PLAN" in full_upper_text or "ROOF DECK PLAN" in full_upper_text:
+    if "FLOOR PLAN" in t or "ROOF DECK PLAN" in t:
         return "floor_plan"
-    if "ROOF PLAN" in full_upper_text and "DECK" not in full_upper_text:
+    if "ROOF PLAN" in t and "ROOF DECK PLAN" not in t:
         return "roof_plan"
-    if "ELEVATION" in full_upper_text:
-        return "elevation"
-    if (
-        "CROSS SECTION" in full_upper_text
-        or "LONGITUDINAL SECTION" in full_upper_text
-        or "SECTION" in full_upper_text
-    ):
+    if "CROSS SECTION" in t or "LONGITUDINAL SECTION" in t or "TRANSVERSE SECTION" in t:
         return "section"
-    if "SCHEDULE" in full_upper_text or "DOORS AND WINDOWS" in full_upper_text:
+    if "ELEVATION" in t:
+        return "elevation"
+    if re.search(r"\bSECTION\b", t):
+        return "section"
+    if "DOORS AND WINDOWS" in t or "SCHEDULE" in t or ("NO. OF SETS" in t and "DOOR TYPE" in t):
+        return "schedule_detail"
+
+    # Smart fallback clues when main sheet title uses AutoCAD SHX vector strokes
+    if ("NATURAL GRADE" in t or "BUILDING HEIGHT" in t) and ("FINISHED FLOOR" in t or "LEVEL" in t):
+        return "elevation"
+    if ("BEARING" in t or "TIE POINT" in t or re.search(r"[NS]\s*\d+[°º]\s*\d+", t)) and "LOT" in t:
+        return "lot_site"
+    if "NO. OF SETS" in t or "DOOR TYPE" in t or "WINDOW TYPE" in t:
         return "schedule_detail"
     return "unknown"
 
 
-def _extract_sheet_title(lines: list[dict], sheet_type: SheetType) -> str:
-    """Extract clean human-readable sheet title from callout/title lines."""
+def _extract_sheet_title(blocks: list[dict], sheet_type: SheetType, full_norm: str) -> str:
+    """Extract clean human-readable sheet title from normalized callout/title text."""
     matched_titles: list[str] = []
     seen: set[str] = set()
 
     if sheet_type == "floor_plan":
-        for ln in sorted(lines, key=lambda x: (x["cx"], x["cy"])):
-            for m in FLOOR_TITLE_RE.finditer(ln["upper"]):
+        for blk in sorted(blocks, key=lambda x: (x["cx"], x["cy"])):
+            for m in FLOOR_TITLE_RE.finditer(blk["norm"]):
+                title = re.sub(r"\s+", " ", m.group(1)).strip(" -:/|")
+                if title and title not in seen:
+                    seen.add(title)
+                    matched_titles.append(title)
+        if not matched_titles:
+            for m in FLOOR_TITLE_RE.finditer(full_norm):
                 title = re.sub(r"\s+", " ", m.group(1)).strip(" -:/|")
                 if title and title not in seen:
                     seen.add(title)
@@ -219,8 +361,14 @@ def _extract_sheet_title(lines: list[dict], sheet_type: SheetType) -> str:
         if matched_titles:
             return " / ".join(matched_titles[:4])
 
-    for ln in sorted(lines, key=lambda x: (-x["font_size"], x["cy"], x["cx"])):
-        for m in GENERAL_TITLE_RE.finditer(ln["upper"]):
+    for blk in sorted(blocks, key=lambda x: (-x["font_size"], x["cy"], x["cx"])):
+        for m in GENERAL_TITLE_RE.finditer(blk["norm"]):
+            title = re.sub(r"\s+", " ", m.group(1)).strip(" -:/|")
+            if title and title not in seen:
+                seen.add(title)
+                matched_titles.append(title)
+    if not matched_titles:
+        for m in GENERAL_TITLE_RE.finditer(full_norm):
             title = re.sub(r"\s+", " ", m.group(1)).strip(" -:/|")
             if title and title not in seen:
                 seen.add(title)
@@ -230,49 +378,50 @@ def _extract_sheet_title(lines: list[dict], sheet_type: SheetType) -> str:
     return ""
 
 
-def _detect_center_viewport_divider_x(
+def _detect_center_viewport_divider_x_vector(
     page: pymupdf.Page,
     width_px: int,
     height_px: int,
 ) -> float | None:
-    """Detect a vertical center viewport divider (42%-58% of width, above bottom 12% title block)."""
+    """Detect a vertical center viewport divider from vector drawings (respecting page rotation)."""
+    rot_mat = page.rotation_matrix
     ox = float(page.rect.x0)
     oy = float(page.rect.y0)
     sx = width_px / max(float(page.rect.width), 1.0)
     sy = height_px / max(float(page.rect.height), 1.0)
 
+    top_y = height_px * 0.03
     usable_h = height_px * 0.88
     min_x = width_px * 0.42
     max_x = width_px * 0.58
-    min_div_span = usable_h * 0.35
+    min_div_span = (usable_h - top_y) * 0.50
 
     vert_segments: list[tuple[float, float, float]] = []
     for drawing in page.get_drawings():
         for item in drawing.get("items", []):
             if item[0] == "l":
-                p1, p2 = item[1], item[2]
+                p1 = item[1] * rot_mat
+                p2 = item[2] * rot_mat
                 x1, y1 = (float(p1.x) - ox) * sx, (float(p1.y) - oy) * sy
                 x2, y2 = (float(p2.x) - ox) * sx, (float(p2.y) - oy) * sy
                 if abs(x2 - x1) <= 3.0 and abs(y2 - y1) >= 20.0:
                     xc = (x1 + x2) * 0.5
-                    ys, ye = min(y1, y2), min(max(y1, y2), usable_h)
+                    ys, ye = max(min(y1, y2), top_y), min(max(y1, y2), usable_h)
                     if min_x <= xc <= max_x and ye - ys >= 20.0:
                         vert_segments.append((xc, ys, ye))
             elif item[0] == "re":
-                r = item[1]
+                r = item[1] * rot_mat
                 x0, y0 = (float(r.x0) - ox) * sx, (float(r.y0) - oy) * sy
                 x1, y1 = (float(r.x1) - ox) * sx, (float(r.y1) - oy) * sy
-                # Check thin vertical bar or either vertical edge of a viewport frame near center
                 if abs(x1 - x0) <= 4.0 and abs(y1 - y0) >= 20.0:
                     xc = (x0 + x1) * 0.5
-                    ys, ye = min(y0, y1), min(max(y0, y1), usable_h)
+                    ys, ye = max(min(y0, y1), top_y), min(max(y0, y1), usable_h)
                     if min_x <= xc <= max_x and ye - ys >= 20.0:
                         vert_segments.append((xc, ys, ye))
 
     if not vert_segments:
         return None
 
-    # Cluster nearby center vertical segments
     vert_segments.sort(key=lambda t: t[0])
     clusters: list[list[tuple[float, float, float]]] = [[vert_segments[0]]]
     for seg in vert_segments[1:]:
@@ -292,31 +441,74 @@ def _detect_center_viewport_divider_x(
     return best_x
 
 
-def _build_floor_plan_regions(
+def _detect_center_viewport_divider_x_raster(png_path: Path) -> float | None:
+    """
+    Scan rendered grayscale PNG columns between 42% and 58% of image width
+    (strictly above bottom 12% title block and below top 3% border).
+    If any narrow vertical band (3px window) has dark pixels covering >= 60% of the
+    active drawing height, return that band's X pixel coordinate.
+    """
+    if not png_path.exists():
+        return None
+    img = cv2.imread(str(png_path), cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        return None
+    ih, iw = img.shape[:2]
+    y0 = int(ih * 0.03)
+    y1 = int(ih * 0.88)
+    x0 = int(iw * 0.42)
+    x1 = int(iw * 0.58)
+    if y1 <= y0 or x1 <= x0:
+        return None
+
+    dark = img[y0:y1, x0:x1] < 200
+    # Use a 3-pixel horizontal dilation so anti-aliased or 1-2px slightly jittered dividers register cleanly
+    if dark.shape[1] >= 3:
+        band_dark = dark.copy()
+        band_dark[:, 1:] |= dark[:, :-1]
+        band_dark[:, :-1] |= dark[:, 1:]
+    else:
+        band_dark = dark
+
+    col_coverage = band_dark.mean(axis=0)
+    best_idx = int(np.argmax(col_coverage))
+    if float(col_coverage[best_idx]) >= 0.60:
+        return float(x0 + best_idx)
+    return None
+
+
+def build_floor_plan_regions(
     page: pymupdf.Page,
+    png_path: Path,
     page_number: int,
     width_px: int,
     height_px: int,
-    lines: list[dict],
+    blocks: list[dict],
     sheet_title: str,
 ) -> tuple[int, list[PlanRegion]]:
-    """Detect single vs dual floor plan viewports and create initial PlanRegion boxes."""
-    usable_h = round(height_px * 0.88, 2)
-    divider_x = _detect_center_viewport_divider_x(page, width_px, height_px)
+    """Detect single vs dual floor plan viewports (pixel + vector divider + titles) and create PlanRegions."""
+    margin_x = round(width_px * 0.025, 2)
+    margin_y = round(height_px * 0.03, 2)
+    usable_bottom = round(height_px * 0.88, 2)
+    usable_h = round(usable_bottom - margin_y, 2)
+
+    divider_x = _detect_center_viewport_divider_x_raster(png_path)
+    if divider_x is None:
+        divider_x = _detect_center_viewport_divider_x_vector(page, width_px, height_px)
     split_x = divider_x if divider_x is not None else (width_px * 0.5)
 
     left_titles: list[str] = []
     right_titles: list[str] = []
     all_titles: list[tuple[float, str]] = []
-    for ln in lines:
-        if ln["cy"] > usable_h + height_px * 0.04:
+    for blk in blocks:
+        if blk["cy"] > usable_bottom + height_px * 0.04:
             continue
-        for m in FLOOR_TITLE_RE.finditer(ln["upper"]):
+        for m in FLOOR_TITLE_RE.finditer(blk["norm"]):
             title = re.sub(r"\s+", " ", m.group(1)).strip(" -:/|")
             if not title:
                 continue
-            all_titles.append((ln["cx"], title))
-            if ln["cx"] < split_x:
+            all_titles.append((blk["cx"], title))
+            if blk["cx"] < split_x:
                 if title not in left_titles:
                     left_titles.append(title)
             else:
@@ -328,20 +520,27 @@ def _build_floor_plan_regions(
 
     if is_dual:
         sx_round = round(split_x, 2)
-        left_name = left_titles[0] if left_titles else (distinct_titles[0] if distinct_titles else f"Page {page_number} Left Floor Plan")
+        left_name = (
+            left_titles[0]
+            if left_titles
+            else (distinct_titles[0] if distinct_titles else f"Page {page_number} Left Plan")
+        )
         right_name = (
             right_titles[0]
             if right_titles
-            else (distinct_titles[1] if len(distinct_titles) >= 2 else f"Page {page_number} Right Floor Plan")
+            else (distinct_titles[1] if len(distinct_titles) >= 2 else f"Page {page_number} Right Plan")
         )
+        left_w = max(20.0, round(sx_round - margin_x - 4.0, 2))
+        right_x = round(sx_round + 4.0, 2)
+        right_w = max(20.0, round((float(width_px) - margin_x) - right_x, 2))
         regions = [
             PlanRegion(
                 region_id=f"reg-p{page_number}-L",
                 page_number=page_number,
                 name=left_name,
-                x_px=0.0,
-                y_px=0.0,
-                width_px=sx_round,
+                x_px=margin_x,
+                y_px=margin_y,
+                width_px=left_w,
                 height_px=usable_h,
                 auto_detected=True,
             ),
@@ -349,9 +548,9 @@ def _build_floor_plan_regions(
                 region_id=f"reg-p{page_number}-R",
                 page_number=page_number,
                 name=right_name,
-                x_px=sx_round,
-                y_px=0.0,
-                width_px=round(float(width_px) - sx_round, 2),
+                x_px=right_x,
+                y_px=margin_y,
+                width_px=right_w,
                 height_px=usable_h,
                 auto_detected=True,
             ),
@@ -364,9 +563,9 @@ def _build_floor_plan_regions(
             region_id=f"reg-p{page_number}-1",
             page_number=page_number,
             name=single_name,
-            x_px=0.0,
-            y_px=0.0,
-            width_px=float(width_px),
+            x_px=margin_x,
+            y_px=margin_y,
+            width_px=max(20.0, round(float(width_px) - 2.0 * margin_x, 2)),
             height_px=usable_h,
             auto_detected=True,
         )
@@ -380,7 +579,7 @@ def inspect_and_render_pdf(
 ) -> tuple[list[PageInfo], list[PlanRegion]]:
     """
     Inspect all pages of an immutable PDF, render PNG previews into pages_dir,
-    classify each sheet strictly from its own text, and auto-create PlanRegions for floor plans.
+    classify each sheet strictly from its own normalized text, and auto-create PlanRegions for floor plans.
     """
     pages_dir.mkdir(parents=True, exist_ok=True)
     try:
@@ -401,26 +600,28 @@ def inspect_and_render_pdf(
             )
             pix = page.get_pixmap(dpi=dpi, alpha=False)
             image_filename = f"page_{page_number:03d}.png"
-            pix.save(str(pages_dir / image_filename))
+            png_path = pages_dir / image_filename
+            pix.save(str(png_path))
 
             width_px = int(pix.width)
             height_px = int(pix.height)
-            lines = _extract_text_lines_px(page, width_px, height_px)
+            blocks = _extract_text_blocks_px(page, width_px, height_px)
             words = page.get_text("words")
-            full_upper = " ".join(ln["upper"] for ln in lines)
+            full_norm = normalize_spaced_text(page.get_text("text"))
 
-            sheet_number = _extract_sheet_number(lines, words, page, width_px, height_px)
-            sheet_type = classify_sheet_type_from_text(full_upper)
-            sheet_title = _extract_sheet_title(lines, sheet_type)
+            sheet_number = _extract_sheet_number(words, page, width_px, height_px)
+            sheet_type = classify_sheet_type_from_text(full_norm)
+            sheet_title = _extract_sheet_title(blocks, sheet_type, full_norm)
 
             viewport_count = 1
             if sheet_type == "floor_plan":
-                viewport_count, page_regions = _build_floor_plan_regions(
+                viewport_count, page_regions = build_floor_plan_regions(
                     page,
+                    png_path,
                     page_number,
                     width_px,
                     height_px,
-                    lines,
+                    blocks,
                     sheet_title,
                 )
                 regions.extend(page_regions)

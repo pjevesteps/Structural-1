@@ -775,3 +775,55 @@ def test_elevation_level_extraction_and_transfer(isolated_env):
     )
     assert [lv.elevation_m for lv in reloaded.levels] == [-2.6, 0.0, 2.8, 5.8]
     assert len({lv.id for lv in reloaded.levels}) == 4
+
+
+def test_spaced_text_page_override_and_region_crud(isolated_env):
+    from backend.app.pdf_importer.inspector import normalize_spaced_text
+
+    assert "FLOOR PLAN" in normalize_spaced_text("F L O O R  P L A N")
+    assert "BASEMENT FLOOR PLAN" in normalize_spaced_text("B A S E M E N T F L O O R P L A N")
+    assert "LEFT ELEVATION" in normalize_spaced_text("L\nE\nF\nT\n \nE\nL\nE\nV\nA\nT\nI\nO\nN")
+    assert "CROSS SECTION" in normalize_spaced_text("C\nR\nO\nS\nS\n \nS\nE\nC\nT\nI\nO\nN")
+
+    client, _ = isolated_env
+    pid = "OVERRIDE-REG"
+    assert client.post("/api/projects", json=_make_sample_project(pid)).status_code == 200
+
+    pdf_bytes = _build_architectural_multipage_set_pdf()
+    up = client.post(
+        f"/api/projects/{pid}/pdf-imports",
+        files={"file": ("arch_set.pdf", pdf_bytes, "application/pdf")},
+    )
+    assert up.status_code == 200
+    doc_id = up.json()["doc_id"]
+
+    # Override Page 4 sheet_type to elevation via PATCH /pages/{page_number}
+    ov = client.patch(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/pages/4",
+        json={"sheet_type": "elevation"},
+    )
+    assert ov.status_code == 200
+    assert ov.json()["pages"][3]["sheet_type"] == "elevation"
+
+    # Manually create and delete a PlanRegion on Page 2
+    cr = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/regions",
+        json={
+            "page_number": 2,
+            "name": "Custom Plan Box",
+            "floor_level": "2F",
+            "x_px": 50.0,
+            "y_px": 50.0,
+            "width_px": 300.0,
+            "height_px": 300.0,
+        },
+    )
+    assert cr.status_code == 200
+    created_reg = [r for r in cr.json()["regions"] if r["name"] == "Custom Plan Box"][0]
+    assert created_reg["floor_level"] == "2F"
+
+    dl = client.delete(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/regions/{created_reg['region_id']}"
+    )
+    assert dl.status_code == 200
+    assert not any(r["region_id"] == created_reg["region_id"] for r in dl.json()["regions"])

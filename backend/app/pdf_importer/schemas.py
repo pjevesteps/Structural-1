@@ -68,6 +68,7 @@ class PlanRegion(BaseModel):
     region_id: str
     page_number: int = Field(ge=1)
     name: str = Field(min_length=1)
+    floor_level: str = ""
     x_px: float
     y_px: float
     width_px: float = Field(gt=0)
@@ -76,14 +77,34 @@ class PlanRegion(BaseModel):
     auto_detected: bool = True
 
 
+class RegionCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    page_number: int = Field(ge=1)
+    name: str = Field(min_length=1)
+    floor_level: str = ""
+    x_px: float
+    y_px: float
+    width_px: float = Field(gt=0)
+    height_px: float = Field(gt=0)
+    origin_px: PointPx | None = None
+
+
 class RegionUpdateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str | None = None
+    floor_level: str | None = None
     origin_px: PointPx | None = None
     x_px: float | None = None
     y_px: float | None = None
     width_px: float | None = Field(default=None, gt=0)
     height_px: float | None = Field(default=None, gt=0)
+
+
+class PageUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    sheet_type: SheetType | None = None
+    sheet_number: str | None = None
+    sheet_title: str | None = None
 
 
 class ScaleCalibrationRequest(BaseModel):
