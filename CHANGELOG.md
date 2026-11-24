@@ -5,6 +5,13 @@ All notable changes to **AI Structural Engineering Office** are documented in th
 ## [Unreleased]
 
 ### Added
+- **Multi-Page Architectural PDF Set Support**:
+  - Automatic per-page sheet classification (`cover_toc`, `lot_site`, `floor_plan`, `roof_plan`, `elevation`, `section`, `schedule_detail`, `unknown`) and bottom-right title-block `sheet_number` / `sheet_title` extraction strictly from each page's own embedded text (`PageInfo` / `PageMetadata`).
+  - Dual-plan viewport detection (`viewport_count`) and automatic `PlanRegion` creation (Left/Right floor plan viewports excluding bottom 12% title block).
+  - Elevation & Section floor-level extractor (`extract_levels_from_elevation_or_section` + `DetectedLevel`), duplicate tag & story-height consistency warnings, inline review/edit (`PATCH /levels/{level_id}`), and sorted transfer into `ProjectState.levels` (`POST /transfer-levels`).
+  - Master Grid propagation across floor regions (`POST /regions/{target_region_id}/apply-master-grid`) with origin shift `(target.origin_px - source.origin_px)` and intersection-gated column probing inside the target viewport, plus `PATCH /regions/{region_id}` for setting region origins.
+  - Architectural Set UI in `frontend/src/PdfImporter.jsx`: color-coded Page Navigator strip (`FLOOR PLAN (2)`, `ELEVATION`, `SECTION`, `SKIP: COVER`, `SKIP: SCHEDULE`), auto-region SVG overlays, **Set Region Origin**, **Copy Master Grid to This Region**, **Extract Floor Levels**, SVG datum overlays, inline level editing, and **Transfer Approved Levels to Project**.
+  - Added unit tests `test_architectural_sheet_classification_and_master_grid` and `test_elevation_level_extraction_and_transfer` in `backend/tests/test_pdf_importer.py`.
 - `ExtractionOptions` Pydantic model for `POST /api/projects/{project_id}/pdf-imports/{doc_id}/pages/{page_number}/extract` (`border_margin_ratio=0.04`, `min_span_ratio=0.28`, `cluster_tolerance_px=8.0`, `merge_dashed_segments=True`, `detect_grid_labels=True`).
 - Collapsible **Detection Settings** bar in `frontend/src/PdfImporter.jsx` (Min Grid Span %, Border Margin %, Cluster Tolerance px, Merge dashed, Detect labels) wired to **2. Detect Grids & Columns**.
 - Unit test `test_dashed_grids_labels_and_border_exclusion` covering outer sheet border exclusion, dashed vector & scanned grid merging, and endpoint grid label matching.

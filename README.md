@@ -76,7 +76,12 @@ Connect tablet and PC to the same trusted Wi-Fi. Run `ipconfig` on Windows, then
 - `GET /api/projects/{project_id}/pdf-imports/{doc_id}/pages/{page_number}/image` — Rendered page PNG
 - `POST /api/projects/{project_id}/pdf-imports/{doc_id}/pages/{page_number}/calibrate` — Set 2-point scale calibration
 - `POST /api/projects/{project_id}/pdf-imports/{doc_id}/pages/{page_number}/confirm-calibration` — Confirm scale calibration
-- `POST /api/projects/{project_id}/pdf-imports/{doc_id}/pages/{page_number}/extract` — Run vector, raster, auto, or VLM placeholder detection
+- `POST /api/projects/{project_id}/pdf-imports/{doc_id}/pages/{page_number}/extract` — Run vector, raster, auto, or VLM placeholder detection (with optional `ExtractionOptions` and `region_id`)
+- `POST /api/projects/{project_id}/pdf-imports/{doc_id}/pages/{page_number}/extract-levels` — Extract floor levels & story heights from elevation/section sheets
+- `PATCH /api/projects/{project_id}/pdf-imports/{doc_id}/levels/{level_id}` — Edit or approve/reject a detected floor level
+- `POST /api/projects/{project_id}/pdf-imports/{doc_id}/transfer-levels` — Transfer engineer-approved floor levels into `ProjectState.levels`
+- `PATCH /api/projects/{project_id}/pdf-imports/{doc_id}/regions/{region_id}` — Update floor plan region metadata or anchor `origin_px`
+- `POST /api/projects/{project_id}/pdf-imports/{doc_id}/regions/{target_region_id}/apply-master-grid` — Copy approved master grids into a target floor region and probe intersection columns
 - `POST /api/projects/{project_id}/pdf-imports/{doc_id}/candidates/columns` — Manually place a column candidate
 - `POST /api/projects/{project_id}/pdf-imports/{doc_id}/candidates/grids` — Manually place a grid candidate
 - `PATCH /api/projects/{project_id}/pdf-imports/{doc_id}/candidates/{candidate_id}` — Accept, reject, or edit a candidate

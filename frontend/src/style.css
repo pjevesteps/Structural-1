@@ -75,3 +75,30 @@
 .pdf-field-chip{display:inline-flex;align-items:center;gap:6px;font-size:10px;color:#9baabe;font-weight:600;letter-spacing:.3px;text-transform:none}
 .pdf-field-chip input{width:64px;background:#111d2e;color:#eaf0f6;border:1px solid #304560;border-radius:6px;padding:5px 7px;font-size:11px}
 .pdf-check-chip{display:inline-flex;align-items:center;gap:5px;font-size:10px;color:#c7d5e5;font-weight:600;letter-spacing:.2px;cursor:pointer}
+
+/* Architectural Set Page Navigator, Regions, and Elevation Levels */
+.pdf-page-strip{display:flex;gap:8px;overflow-x:auto;padding:8px 2px 14px;margin-bottom:6px}
+.pdf-sheet-pill{display:inline-flex;align-items:center;gap:7px;background:#111d2e;color:#d8e3f0;border:1px solid #26364d;border-radius:9px;padding:7px 10px;font-size:11px;font-weight:700;flex-shrink:0}
+.pdf-sheet-pill.active{border-color:#45c9a8;background:#142d2b;color:#eaf0f6}
+.pdf-sheet-pill .sheet-num{font-weight:900;font-size:11px;color:#eaf0f6}
+.sheet-tag,.pdf-badge.sheet-floor,.pdf-badge.sheet-roof,.pdf-badge.sheet-elev,.pdf-badge.sheet-sect,.pdf-badge.sheet-skip,.pdf-badge.sheet-unknown{font-size:9px;font-weight:800;letter-spacing:.7px;padding:3px 7px;border-radius:14px}
+.sheet-tag.sheet-floor,.pdf-badge.sheet-floor{background:#122c28;border:1px solid #286554;color:#7be0c3}
+.sheet-tag.sheet-roof,.pdf-badge.sheet-roof{background:#132a36;border:1px solid #296b85;color:#7dd3fc}
+.sheet-tag.sheet-elev,.pdf-badge.sheet-elev{background:#15253c;border:1px solid #355d8f;color:#8ec5ff}
+.sheet-tag.sheet-sect,.pdf-badge.sheet-sect{background:#241c38;border:1px solid #5c4294;color:#c4b5fd}
+.sheet-tag.sheet-skip,.pdf-badge.sheet-skip{background:#23201b;border:1px solid #594b34;color:#c7b089}
+.sheet-tag.sheet-unknown,.pdf-badge.sheet-unknown{background:#1a2538;border:1px solid #304560;color:#9baabe}
+.pdf-regions-bar{background:#111d2e;border:1px solid #26364d;border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:8px}
+.pdf-region-tabs{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+.region-tab.active{background:#152e45;border-color:#38bdf8;color:#bae6fd}
+.pdf-master-grid-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding-top:6px;border-top:1px solid #223147}
+.pdf-controls-strip.elev-strip{grid-template-columns:1fr}
+.pdf-stage.mode-set_origin{cursor:crosshair}
+.pdf-level-card{background:#0e1828;border:1px solid #233349;border-left:3px solid #efc37d;border-radius:8px;padding:9px;display:flex;flex-direction:column;gap:7px}
+.pdf-level-card.status-approved{border-left-color:#45c9a8}
+.pdf-level-card.status-rejected{border-left-color:#e06c75;opacity:.68}
+.pdf-level-inputs{display:flex;flex-direction:column;gap:6px}
+.pdf-level-inputs input[type="text"]{width:100%;background:#111d2e;color:#eaf0f6;border:1px solid #304560;border-radius:6px;padding:6px 8px;font-size:11px;font-weight:700}
+.pdf-level-num-row{display:flex;align-items:center;gap:6px;font-size:11px;color:#9baabe}
+.pdf-level-num-row input[type="number"]{width:84px;background:#111d2e;color:#eaf0f6;border:1px solid #304560;border-radius:6px;padding:5px 7px;font-size:11px}
+.pdf-level-warn{background:#2d1f14;border:1px solid #8a5a2b;color:#f5c98a;border-radius:6px;padding:6px 8px;font-size:10px;line-height:1.4}

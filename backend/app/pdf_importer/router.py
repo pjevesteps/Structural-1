@@ -3,6 +3,8 @@ from fastapi.responses import FileResponse
 
 from .inspector import InvalidPdfError, PdfTooLargeError
 from .schemas import (
+    ApplyMasterGridRequest,
+    ApplyMasterGridResponse,
     AuditEntry,
     BulkReviewRequest,
     CandidateReviewUpdate,
@@ -10,9 +12,14 @@ from .schemas import (
     ExtractionResponse,
     ImportDocumentState,
     ImportDocumentSummary,
+    LevelExtractionResponse,
+    LevelUpdateRequest,
     ManualColumnRequest,
     ManualGridRequest,
+    RegionUpdateRequest,
     ScaleCalibrationRequest,
+    TransferLevelsRequest,
+    TransferLevelsResponse,
     TransferRequest,
     TransferResponse,
 )
@@ -112,6 +119,69 @@ def extract_pdf_page(
     try:
         req = payload if payload is not None else ExtractRequest()
         return service.extract_page(project_id, doc_id, page_number, req)
+    except Exception as exc:
+        raise _handle_error(exc)
+
+
+@router.post("/{doc_id}/pages/{page_number}/extract-levels", response_model=LevelExtractionResponse)
+def extract_pdf_page_levels(project_id: str, doc_id: str, page_number: int):
+    try:
+        return service.extract_levels(project_id, doc_id, page_number)
+    except Exception as exc:
+        raise _handle_error(exc)
+
+
+@router.patch("/{doc_id}/levels/{level_id}", response_model=ImportDocumentState)
+def update_detected_level(
+    project_id: str,
+    doc_id: str,
+    level_id: str,
+    payload: LevelUpdateRequest,
+):
+    try:
+        return service.update_level(project_id, doc_id, level_id, payload)
+    except Exception as exc:
+        raise _handle_error(exc)
+
+
+@router.post("/{doc_id}/transfer-levels", response_model=TransferLevelsResponse)
+def transfer_approved_levels(
+    project_id: str,
+    doc_id: str,
+    payload: TransferLevelsRequest | None = None,
+):
+    try:
+        req = payload if payload is not None else TransferLevelsRequest()
+        return service.transfer_levels(project_id, doc_id, req)
+    except Exception as exc:
+        raise _handle_error(exc)
+
+
+@router.patch("/{doc_id}/regions/{region_id}", response_model=ImportDocumentState)
+def update_plan_region(
+    project_id: str,
+    doc_id: str,
+    region_id: str,
+    payload: RegionUpdateRequest,
+):
+    try:
+        return service.update_region(project_id, doc_id, region_id, payload)
+    except Exception as exc:
+        raise _handle_error(exc)
+
+
+@router.post(
+    "/{doc_id}/regions/{target_region_id}/apply-master-grid",
+    response_model=ApplyMasterGridResponse,
+)
+def apply_master_grid_to_region(
+    project_id: str,
+    doc_id: str,
+    target_region_id: str,
+    payload: ApplyMasterGridRequest,
+):
+    try:
+        return service.apply_master_grid(project_id, doc_id, target_region_id, payload)
     except Exception as exc:
         raise _handle_error(exc)
 

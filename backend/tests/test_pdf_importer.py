@@ -535,3 +535,243 @@ def test_dashed_grids_labels_and_border_exclusion(isolated_env):
         assert p2_info["width_px"] * 0.04 < g["coord_px"] < p2_info["width_px"] * 0.96
     for g in p2_y:
         assert p2_info["height_px"] * 0.04 < g["coord_px"] < p2_info["height_px"] * 0.96
+
+
+def _build_architectural_multipage_set_pdf() -> bytes:
+    """
+    Build a 4-page synthetic architectural PDF set:
+      - Page 1 (A1): Cover / Table of Contents listing Floor Plan, Elevation, Schedule -> cover_toc
+      - Page 2 (A4): Dual Floor Plan sheet with vertical center divider + BASEMENT FLOOR PLAN (left)
+                     and FIRST FLOOR PLAN (right), each with identical shifted 2x2 grids + 4 columns
+      - Page 3 (A10): Front Elevation sheet with datum lines, left-side level names (including a
+                      duplicate "LEVEL 2" tag), and right-side elevation values
+      - Page 4 (A14): Schedule of Doors and Windows -> schedule_detail
+    """
+    doc = pymupdf.open()
+
+    # --- Page 1 (A1): Cover / Table of Contents ---
+    p1 = doc.new_page(width=800, height=560)
+    p1.insert_text(pymupdf.Point(80, 90), "TABLE OF CONTENTS", fontsize=18)
+    p1.insert_text(pymupdf.Point(80, 130), "A1 - COVER SHEET AND VICINITY MAP", fontsize=11)
+    p1.insert_text(pymupdf.Point(80, 155), "A4 - BASEMENT FLOOR PLAN / FIRST FLOOR PLAN", fontsize=11)
+    p1.insert_text(pymupdf.Point(80, 180), "A10 - FRONT ELEVATION", fontsize=11)
+    p1.insert_text(pymupdf.Point(80, 205), "A14 - SCHEDULE OF DOORS AND WINDOWS", fontsize=11)
+    p1.insert_text(pymupdf.Point(710, 520), "A1", fontsize=16)
+
+    # --- Page 2 (A4): Dual Floor Plan sheet ---
+    p2 = doc.new_page(width=800, height=560)
+    s2 = p2.new_shape()
+    # Vertical center viewport divider at x=400 (50% width), above bottom 12% title block (y=492)
+    s2.draw_line(pymupdf.Point(400.0, 25.0), pymupdf.Point(400.0, 470.0))
+    s2.finish(color=(0.3, 0.3, 0.3), width=1.2)
+
+    # Left viewport: BASEMENT FLOOR PLAN (grids at x=90, 270; y=350, 190)
+    p2.insert_text(pymupdf.Point(100, 445), "BASEMENT FLOOR PLAN", fontsize=12)
+    for label, x in [("1", 90.0), ("2", 270.0)]:
+        s2.draw_line(pymupdf.Point(x, 90.0), pymupdf.Point(x, 400.0))
+        s2.finish(color=(0.2, 0.2, 0.2), width=0.8)
+        p2.insert_text(pymupdf.Point(x - 3, 78.0), label, fontsize=10)
+    for label, y in [("A", 350.0), ("B", 190.0)]:
+        s2.draw_line(pymupdf.Point(55.0, y), pymupdf.Point(345.0, y))
+        s2.finish(color=(0.2, 0.2, 0.2), width=0.8)
+        p2.insert_text(pymupdf.Point(36.0, y + 4), label, fontsize=10)
+    for y in (350.0, 190.0):
+        for x in (90.0, 270.0):
+            s2.draw_rect(pymupdf.Rect(x - 6, y - 6, x + 6, y + 6))
+            s2.finish(color=(0, 0, 0), fill=(0, 0, 0), width=0.6)
+
+    # Right viewport: FIRST FLOOR PLAN (shifted by +400 pt in X, 0 in Y -> x=490, 670; y=350, 190)
+    p2.insert_text(pymupdf.Point(500, 445), "FIRST FLOOR PLAN", fontsize=12)
+    for y in (350.0, 190.0):
+        for x in (490.0, 670.0):
+            s2.draw_rect(pymupdf.Rect(x - 6, y - 6, x + 6, y + 6))
+            s2.finish(color=(0, 0, 0), fill=(0, 0, 0), width=0.6)
+
+    s2.commit()
+    p2.insert_text(pymupdf.Point(710, 520), "A4", fontsize=16)
+
+    # --- Page 3 (A10): Front Elevation with 4 datum lines (including duplicate LEVEL 2) ---
+    p3 = doc.new_page(width=800, height=560)
+    p3.insert_text(pymupdf.Point(290, 460), "FRONT ELEVATION", fontsize=14)
+    s3 = p3.new_shape()
+    datum_specs = [
+        (390.0, "BASEMENT FLOOR FINISHED LINE", "-2.60 m"),
+        (310.0, "FIRST FLOOR FINISHED FLOOR LINE", "0.00 m"),
+        (220.0, "LEVEL 2 SECOND FLOOR", "2.80 m"),
+        (130.0, "LEVEL 2 ROOF DECK", "5.80 m"),
+    ]
+    for y, left_label, right_elev in datum_specs:
+        s3.draw_line(pymupdf.Point(160.0, y), pymupdf.Point(650.0, y))
+        s3.finish(color=(0.15, 0.15, 0.15), width=0.9)
+        p3.insert_text(pymupdf.Point(35.0, y - 4.0), left_label, fontsize=9)
+        p3.insert_text(pymupdf.Point(665.0, y - 4.0), right_elev, fontsize=10)
+    s3.commit()
+    p3.insert_text(pymupdf.Point(705, 520), "A10", fontsize=16)
+
+    # --- Page 4 (A14): Schedule of Doors and Windows ---
+    p4 = doc.new_page(width=800, height=560)
+    p4.insert_text(pymupdf.Point(120, 90), "SCHEDULE OF DOORS AND WINDOWS", fontsize=16)
+    p4.insert_text(pymupdf.Point(120, 140), "D1 - MAIN ENTRY DOOR 1.00 x 2.10m", fontsize=10)
+    p4.insert_text(pymupdf.Point(705, 520), "A14", fontsize=16)
+
+    pdf_bytes = doc.tobytes()
+    doc.close()
+    return pdf_bytes
+
+
+def test_architectural_sheet_classification_and_master_grid(isolated_env):
+    client, _ = isolated_env
+    pid = "ARCH-SET"
+    assert client.post("/api/projects", json=_make_sample_project(pid)).status_code == 200
+
+    pdf_bytes = _build_architectural_multipage_set_pdf()
+    up = client.post(
+        f"/api/projects/{pid}/pdf-imports",
+        files={"file": ("arch_set.pdf", pdf_bytes, "application/pdf")},
+    )
+    assert up.status_code == 200, up.text
+    doc_state = up.json()
+    doc_id = doc_state["doc_id"]
+    pages = doc_state["pages"]
+
+    assert len(pages) == 4
+    # 1. Verify sheet classification strictly from each page's own embedded text
+    assert pages[0]["sheet_type"] == "cover_toc"
+    assert pages[0]["sheet_number"] == "A1"
+
+    assert pages[1]["sheet_type"] == "floor_plan"
+    assert pages[1]["sheet_number"] == "A4"
+    assert pages[1]["viewport_count"] == 2
+    assert "BASEMENT FLOOR PLAN" in pages[1]["sheet_title"]
+    assert "FIRST FLOOR PLAN" in pages[1]["sheet_title"]
+
+    assert pages[2]["sheet_type"] == "elevation"
+    assert pages[2]["sheet_number"] == "A10"
+
+    assert pages[3]["sheet_type"] == "schedule_detail"
+    assert pages[3]["sheet_number"] == "A14"
+
+    # Verify auto-created dual PlanRegion boxes on Page 2 (excluding bottom 12% title block)
+    p2_regions = [r for r in doc_state["regions"] if r["page_number"] == 2]
+    assert len(p2_regions) == 2
+    left_reg, right_reg = p2_regions[0], p2_regions[1]
+    assert "BASEMENT FLOOR PLAN" in left_reg["name"]
+    assert "FIRST FLOOR PLAN" in right_reg["name"]
+    assert left_reg["height_px"] <= pages[1]["height_px"] * 0.89
+
+    # 2. Extract grids in Left region, approve them, set origins, and propagate master grid to Right region
+    p2 = pages[1]
+    sx = p2["width_px"] / p2["width_pt"]
+    sy = p2["height_px"] / p2["height_pt"]
+
+    ext_left = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/pages/2/extract",
+        json={"method": "vector", "region_id": left_reg["region_id"]},
+    )
+    assert ext_left.status_code == 200, ext_left.text
+    assert ext_left.json()["grids_detected"] == 4
+    left_grids = [
+        g for g in ext_left.json()["document"]["grid_candidates"] if g["region_id"] == left_reg["region_id"]
+    ]
+    for g in left_grids:
+        assert (
+            client.patch(
+                f"/api/projects/{pid}/pdf-imports/{doc_id}/candidates/{g['id']}",
+                json={"status": "approved"},
+            ).status_code
+            == 200
+        )
+
+    # Set origins at Grid A-1 in Left (90, 350 pt) and Right (490, 350 pt)
+    assert (
+        client.patch(
+            f"/api/projects/{pid}/pdf-imports/{doc_id}/regions/{left_reg['region_id']}",
+            json={"origin_px": {"x_px": 90.0 * sx, "y_px": 350.0 * sy}},
+        ).status_code
+        == 200
+    )
+    assert (
+        client.patch(
+            f"/api/projects/{pid}/pdf-imports/{doc_id}/regions/{right_reg['region_id']}",
+            json={"origin_px": {"x_px": 490.0 * sx, "y_px": 350.0 * sy}},
+        ).status_code
+        == 200
+    )
+
+    prop = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/regions/{right_reg['region_id']}/apply-master-grid",
+        json={"source_region_id": left_reg["region_id"]},
+    )
+    assert prop.status_code == 200, prop.text
+    prop_body = prop.json()
+    assert prop_body["copied_grids"] == 4
+    assert prop_body["probed_columns"] == 4
+
+    right_cols = [
+        c for c in prop_body["document"]["column_candidates"] if c["region_id"] == right_reg["region_id"]
+    ]
+    assert len(right_cols) == 4
+    assert sorted(c["grid"] for c in right_cols) == ["A-1", "A-2", "B-1", "B-2"]
+
+
+def test_elevation_level_extraction_and_transfer(isolated_env):
+    client, data_root = isolated_env
+    pid = "ELEV-LVL"
+    assert client.post("/api/projects", json=_make_sample_project(pid)).status_code == 200
+
+    pdf_bytes = _build_architectural_multipage_set_pdf()
+    up = client.post(
+        f"/api/projects/{pid}/pdf-imports",
+        files={"file": ("arch_set.pdf", pdf_bytes, "application/pdf")},
+    )
+    assert up.status_code == 200, up.text
+    doc_id = up.json()["doc_id"]
+
+    # 1. Extract levels from Elevation Page 3 (A10)
+    ext = client.post(f"/api/projects/{pid}/pdf-imports/{doc_id}/pages/3/extract-levels")
+    assert ext.status_code == 200, ext.text
+    body = ext.json()
+    assert body["levels_detected"] == 4
+
+    # Verify duplicate "LEVEL 2" warning was flagged
+    assert any("LEVEL 2" in w and "Duplicate" in w for w in body["warnings"])
+
+    levels = sorted(body["document"]["detected_levels"], key=lambda l: l["elevation_m"])
+    assert [l["elevation_m"] for l in levels] == [-2.6, 0.0, 2.8, 5.8]
+    assert levels[0]["story_height_m"] is None
+    assert abs(levels[1]["story_height_m"] - 2.6) < 1e-4
+    assert abs(levels[2]["story_height_m"] - 2.8) < 1e-4
+    assert abs(levels[3]["story_height_m"] - 3.0) < 1e-4
+
+    # 2. Engineer renames the duplicate top level and approves all 4 levels
+    assert (
+        client.patch(
+            f"/api/projects/{pid}/pdf-imports/{doc_id}/levels/{levels[3]['level_id']}",
+            json={"name": "ROOF DECK", "engineer_approved": True},
+        ).status_code
+        == 200
+    )
+    for lvl in levels[:3]:
+        assert (
+            client.patch(
+                f"/api/projects/{pid}/pdf-imports/{doc_id}/levels/{lvl['level_id']}",
+                json={"review_status": "approved", "engineer_approved": True},
+            ).status_code
+            == 200
+        )
+
+    # 3. Transfer approved levels into ProjectState.levels
+    tx = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/transfer-levels",
+        json={"page_number": 3, "replace_existing": True},
+    )
+    assert tx.status_code == 200, tx.text
+    tx_body = tx.json()
+    assert tx_body["transferred_levels"] == 4
+    assert tx_body["total_project_levels"] == 4
+
+    reloaded = ProjectState.model_validate(
+        json.loads((data_root / "projects" / f"{pid}.json").read_text(encoding="utf-8"))
+    )
+    assert [lv.elevation_m for lv in reloaded.levels] == [-2.6, 0.0, 2.8, 5.8]
+    assert len({lv.id for lv in reloaded.levels}) == 4

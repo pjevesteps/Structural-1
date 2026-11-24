@@ -2,11 +2,16 @@ from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
+import re
 from uuid import uuid4
 
 from .. import storage
-from ..models import Column, GridLine, ProjectState
-from .detector import run_detection
+from ..models import Column, GridLine, Level, ProjectState
+from .detector import (
+    extract_levels_from_elevation_or_section,
+    probe_columns_at_grid_intersections,
+    run_detection,
+)
 from .inspector import (
     DEFAULT_RENDER_DPI,
     InvalidPdfError,
@@ -16,6 +21,8 @@ from .inspector import (
     validate_pdf_bytes,
 )
 from .schemas import (
+    ApplyMasterGridRequest,
+    ApplyMasterGridResponse,
     AuditEntry,
     BulkReviewRequest,
     CandidateReviewUpdate,
@@ -25,11 +32,18 @@ from .schemas import (
     GridCandidate,
     ImportDocumentState,
     ImportDocumentSummary,
+    LevelExtractionResponse,
+    LevelUpdateRequest,
     ManualColumnRequest,
     ManualGridRequest,
+    PlanRegion,
     PointPx,
+    RegionUpdateRequest,
+    ReviewStatus,
     ScaleCalibration,
     ScaleCalibrationRequest,
+    TransferLevelsRequest,
+    TransferLevelsResponse,
     TransferRecord,
     TransferRequest,
     TransferResponse,
@@ -118,6 +132,13 @@ def _get_page(state: ImportDocumentState, page_number: int):
     raise ValueError(f"Page {page_number} does not exist (document has {state.page_count} page(s)).")
 
 
+def _get_region(state: ImportDocumentState, region_id: str) -> PlanRegion:
+    for r in state.regions:
+        if r.region_id == region_id:
+            return r
+    raise KeyError(f"Region '{region_id}' not found.")
+
+
 def _recalculate_page_coordinates(state: ImportDocumentState, page_number: int) -> None:
     cal = state.calibrations.get(str(page_number))
     if cal is None:
@@ -135,6 +156,57 @@ def _recalculate_page_coordinates(state: ImportDocumentState, page_number: int) 
         col.x_m, col.y_m = px_to_plan_m(col.x_px, col.y_px, cal)
 
 
+def _recompute_page_story_heights(state: ImportDocumentState, page_number: int) -> None:
+    page_lvls = [lvl for lvl in state.detected_levels if lvl.page_number == page_number]
+    page_lvls.sort(key=lambda l: (-l.y_px, l.elevation_m))
+    for idx, lvl in enumerate(page_lvls):
+        if idx == 0:
+            lvl.story_height_m = None
+        else:
+            lvl.story_height_m = round(lvl.elevation_m - page_lvls[idx - 1].elevation_m, 4)
+
+
+def _derive_level_id(name: str, used_ids: set[str]) -> str:
+    upper = name.upper()
+    mapping = [
+        ("BASEMENT", "B1"),
+        ("NATURAL GRADE", "NGL"),
+        ("NGL", "NGL"),
+        ("GROUND FLOOR", "GF"),
+        ("FIRST FLOOR", "1F"),
+        ("SECOND FLOOR", "2F"),
+        ("THIRD FLOOR", "3F"),
+        ("FOURTH FLOOR", "4F"),
+        ("FIFTH FLOOR", "5F"),
+        ("SIXTH FLOOR", "6F"),
+        ("ROOF DECK", "RD"),
+        ("ROOF LINE", "ROOF"),
+        ("ROOF BEAM", "RB"),
+        ("FIREWALL", "FW"),
+        ("PARAPET", "PAR"),
+    ]
+    base = ""
+    for kw, code in mapping:
+        if kw in upper:
+            base = code
+            break
+    if not base:
+        m = re.search(r"LEVEL\s*(\d+)", upper)
+        if m:
+            base = f"L{m.group(1)}"
+        else:
+            slug = re.sub(r"[^A-Z0-9]+", "_", upper).strip("_")
+            base = (slug[:12] or "LVL").rstrip("_")
+
+    candidate = base
+    suffix = 2
+    while candidate in used_ids:
+        candidate = f"{base}_{suffix}"
+        suffix += 1
+    used_ids.add(candidate)
+    return candidate
+
+
 def upload_pdf(
     project_id: str,
     filename: str,
@@ -150,13 +222,11 @@ def upload_pdf(
     pdf_path = _original_pdf_path(project_id, doc_id)
 
     doc_root.mkdir(parents=True, exist_ok=False)
-    # Write immutable original PDF once
     pdf_path.write_bytes(content)
 
     try:
-        pages = inspect_and_render_pdf(pdf_path, pages_dir, dpi=dpi)
+        pages, regions = inspect_and_render_pdf(pdf_path, pages_dir, dpi=dpi)
     except InvalidPdfError:
-        # Clean up incomplete directory if PDF cannot be opened
         for child in sorted(doc_root.rglob("*"), reverse=True):
             if child.is_file():
                 child.unlink()
@@ -178,6 +248,7 @@ def upload_pdf(
         updated_at=now,
         page_count=len(pages),
         pages=pages,
+        regions=regions,
     )
     _save_state(state)
     _append_audit(
@@ -190,6 +261,8 @@ def upload_pdf(
             "file_size_bytes": state.file_size_bytes,
             "page_count": state.page_count,
             "classifications": {str(p.page_number): p.classification for p in pages},
+            "sheet_types": {str(p.page_number): p.sheet_type for p in pages},
+            "auto_regions_count": len(regions),
         },
     )
     return state
@@ -215,8 +288,9 @@ def list_imports(project_id: str) -> list[ImportDocumentSummary]:
                     updated_at=st.updated_at,
                     calibrated_pages=len(st.calibrations),
                     confirmed_pages=sum(1 for c in st.calibrations.values() if c.confirmed),
-                    approved_grids=sum(1 for g in st.grid_candidates if g.status == "approved"),
-                    approved_columns=sum(1 for c in st.column_candidates if c.status == "approved"),
+                    approved_grids=sum(1 for g in st.grid_candidates if g.status == ReviewStatus.APPROVED),
+                    approved_columns=sum(1 for c in st.column_candidates if c.status == ReviewStatus.APPROVED),
+                    approved_levels=sum(1 for l in st.detected_levels if l.engineer_approved),
                     transfers_count=len(st.transfers),
                 )
             )
@@ -326,6 +400,42 @@ def confirm_calibration(project_id: str, doc_id: str, page_number: int) -> Impor
     return state
 
 
+def update_region(
+    project_id: str,
+    doc_id: str,
+    region_id: str,
+    req: RegionUpdateRequest,
+) -> ImportDocumentState:
+    state = get_import(project_id, doc_id)
+    region = _get_region(state, region_id)
+
+    if req.name is not None and req.name.strip():
+        region.name = req.name.strip()
+    if req.origin_px is not None:
+        region.origin_px = req.origin_px
+    if req.x_px is not None:
+        region.x_px = req.x_px
+    if req.y_px is not None:
+        region.y_px = req.y_px
+    if req.width_px is not None:
+        region.width_px = req.width_px
+    if req.height_px is not None:
+        region.height_px = req.height_px
+
+    _save_state(state)
+    _append_audit(
+        project_id,
+        doc_id,
+        "region_updated",
+        {
+            "region_id": region_id,
+            "name": region.name,
+            "origin_px": region.origin_px.model_dump() if region.origin_px else None,
+        },
+    )
+    return state
+
+
 def extract_page(
     project_id: str,
     doc_id: str,
@@ -335,6 +445,12 @@ def extract_page(
     state = get_import(project_id, doc_id)
     page = _get_page(state, page_number)
     cal = state.calibrations.get(str(page_number))
+
+    region: PlanRegion | None = None
+    if req.region_id is not None:
+        region = _get_region(state, req.region_id)
+        if region.page_number != page_number:
+            raise ValueError(f"Region '{req.region_id}' belongs to page {region.page_number}, not page {page_number}.")
 
     pdf_path = _original_pdf_path(project_id, doc_id)
     png_path = _pages_dir(project_id, doc_id) / page.image_filename
@@ -347,21 +463,31 @@ def extract_page(
         calibration=cal,
         method=req.method,
         options=options,
+        region=region,
     )
 
     if req.replace_unreviewed:
         state.grid_candidates = [
             g
             for g in state.grid_candidates
-            if not (g.page_number == page_number and g.source != "manual" and g.status == "pending")
+            if not (
+                g.page_number == page_number
+                and g.source != "manual"
+                and g.status == ReviewStatus.PENDING
+                and (req.region_id is None or g.region_id == req.region_id)
+            )
         ]
         state.column_candidates = [
             c
             for c in state.column_candidates
-            if not (c.page_number == page_number and c.source != "manual" and c.status == "pending")
+            if not (
+                c.page_number == page_number
+                and c.source != "manual"
+                and c.status == ReviewStatus.PENDING
+                and (req.region_id is None or c.region_id == req.region_id)
+            )
         ]
 
-    # Ensure new column_ids don't collide with existing staged column_ids on this page
     existing_col_ids = {c.column_id for c in state.column_candidates}
     next_num = 1
     for col in output.columns:
@@ -381,6 +507,7 @@ def extract_page(
         "extraction_run",
         {
             "page_number": page_number,
+            "region_id": req.region_id,
             "method_requested": req.method,
             "method_used": output.method_used,
             "options": options.model_dump(),
@@ -397,6 +524,346 @@ def extract_page(
         grids_detected=len(output.grids),
         columns_detected=len(output.columns),
         notice=output.notice,
+    )
+
+
+def extract_levels(
+    project_id: str,
+    doc_id: str,
+    page_number: int,
+) -> LevelExtractionResponse:
+    state = get_import(project_id, doc_id)
+    page = _get_page(state, page_number)
+
+    pdf_path = _original_pdf_path(project_id, doc_id)
+    png_path = _pages_dir(project_id, doc_id) / page.image_filename
+
+    levels, warnings = extract_levels_from_elevation_or_section(pdf_path, png_path, page)
+
+    # Replace pending levels on this page while keeping already-approved levels intact
+    state.detected_levels = [
+        lvl
+        for lvl in state.detected_levels
+        if not (lvl.page_number == page_number and not lvl.engineer_approved)
+    ]
+    state.detected_levels.extend(levels)
+    _save_state(state)
+
+    _append_audit(
+        project_id,
+        doc_id,
+        "levels_extracted",
+        {
+            "page_number": page_number,
+            "sheet_type": page.sheet_type,
+            "levels_detected": len(levels),
+            "warnings": warnings,
+        },
+    )
+
+    notice = (
+        f"Extracted {len(levels)} floor level(s) from page {page_number}."
+        + (f" Warnings: {' '.join(warnings)}" if warnings else " Review and approve levels before transferring.")
+    )
+    return LevelExtractionResponse(
+        document=state,
+        page_number=page_number,
+        levels_detected=len(levels),
+        warnings=warnings,
+        notice=notice,
+    )
+
+
+def update_level(
+    project_id: str,
+    doc_id: str,
+    level_id: str,
+    req: LevelUpdateRequest,
+) -> ImportDocumentState:
+    state = get_import(project_id, doc_id)
+    for lvl in state.detected_levels:
+        if lvl.level_id == level_id:
+            if req.name is not None and req.name.strip():
+                lvl.name = req.name.strip()
+            if req.elevation_m is not None:
+                lvl.elevation_m = round(req.elevation_m, 4)
+            if req.story_height_m is not None:
+                lvl.story_height_m = round(req.story_height_m, 4)
+
+            if req.review_status is not None and req.engineer_approved is not None:
+                lvl.review_status = req.review_status
+                lvl.engineer_approved = req.engineer_approved
+            elif req.engineer_approved is not None:
+                lvl.engineer_approved = req.engineer_approved
+                lvl.review_status = ReviewStatus.APPROVED if req.engineer_approved else ReviewStatus.PENDING
+            elif req.review_status is not None:
+                lvl.review_status = req.review_status
+                lvl.engineer_approved = req.review_status == ReviewStatus.APPROVED
+
+            if req.elevation_m is not None and req.story_height_m is None:
+                _recompute_page_story_heights(state, lvl.page_number)
+
+            _save_state(state)
+            _append_audit(
+                project_id,
+                doc_id,
+                "level_reviewed",
+                {
+                    "level_id": level_id,
+                    "name": lvl.name,
+                    "elevation_m": lvl.elevation_m,
+                    "review_status": lvl.review_status.value,
+                    "engineer_approved": lvl.engineer_approved,
+                },
+            )
+            return state
+
+    raise KeyError(f"Level '{level_id}' not found.")
+
+
+def transfer_levels(
+    project_id: str,
+    doc_id: str,
+    req: TransferLevelsRequest,
+) -> TransferLevelsResponse:
+    project = _ensure_project_exists(project_id)
+    state = _load_state(project_id, doc_id)
+
+    approved_levels = [
+        lvl
+        for lvl in state.detected_levels
+        if (lvl.engineer_approved or lvl.review_status == ReviewStatus.APPROVED)
+        and (req.page_number is None or lvl.page_number == req.page_number)
+    ]
+    if not approved_levels:
+        raise ValueError(
+            "No engineer-approved floor levels are ready to transfer. Approve at least one level first."
+        )
+
+    approved_levels.sort(key=lambda l: l.elevation_m)
+
+    if req.replace_existing:
+        used_ids: set[str] = set()
+        new_levels: list[Level] = []
+    else:
+        used_ids = {lv.id for lv in project.levels}
+        new_levels = list(project.levels)
+
+    for det in approved_levels:
+        lid = _derive_level_id(det.name, used_ids)
+        new_levels.append(Level(id=lid, elevation_m=round(det.elevation_m, 4)))
+
+    new_levels.sort(key=lambda lv: lv.elevation_m)
+    valid_level_ids = {lv.id for lv in new_levels}
+    new_beams = [b for b in project.beams if b.level in valid_level_ids]
+
+    updated_payload = project.model_dump()
+    updated_payload["levels"] = [lv.model_dump() for lv in new_levels]
+    updated_payload["beams"] = [b.model_dump() for b in new_beams]
+    updated_project = ProjectState.model_validate(updated_payload)
+
+    storage.save_project(updated_project)
+
+    for det in approved_levels:
+        det.transferred = True
+
+    involved_pages = sorted({det.page_number for det in approved_levels})
+    state.transfers.append(
+        TransferRecord(
+            transferred_at=_utc_now(),
+            page_numbers=involved_pages,
+            merge_mode="replace_levels" if req.replace_existing else "merge_levels",
+            levels_count=len(approved_levels),
+        )
+    )
+    _save_state(state)
+
+    _append_audit(
+        project_id,
+        doc_id,
+        "levels_transferred",
+        {
+            "page_numbers": involved_pages,
+            "replace_existing": req.replace_existing,
+            "levels_transferred": len(approved_levels),
+            "level_ids": [lv.id for lv in new_levels],
+        },
+    )
+
+    return TransferLevelsResponse(
+        project_id=project_id,
+        doc_id=doc_id,
+        transferred_levels=len(approved_levels),
+        total_project_levels=len(updated_project.levels),
+        notice=(
+            f"Transferred {len(approved_levels)} engineer-approved level(s) into project '{project_id}' "
+            f"(sorted by elevation_m)."
+        ),
+        project=updated_project,
+        document=state,
+    )
+
+
+def apply_master_grid(
+    project_id: str,
+    doc_id: str,
+    target_region_id: str,
+    req: ApplyMasterGridRequest,
+) -> ApplyMasterGridResponse:
+    state = get_import(project_id, doc_id)
+    source_region = _get_region(state, req.source_region_id)
+    target_region = _get_region(state, target_region_id)
+
+    if source_region.region_id == target_region.region_id:
+        raise ValueError("Source and target regions must differ.")
+
+    # Resolve origins (allow fallback to page calibration origin if it lies within the region)
+    src_origin = source_region.origin_px
+    if src_origin is None:
+        src_cal = state.calibrations.get(str(source_region.page_number))
+        if src_cal is not None:
+            op = src_cal.origin_px
+            if (
+                source_region.x_px <= op.x_px <= source_region.x_px + source_region.width_px
+                and source_region.y_px <= op.y_px <= source_region.y_px + source_region.height_px
+            ):
+                src_origin = op
+    if src_origin is None:
+        raise ValueError(f"Source region '{source_region.name}' requires an origin_px before propagating grids.")
+
+    tgt_origin = target_region.origin_px
+    if tgt_origin is None:
+        raise ValueError(f"Target region '{target_region.name}' requires an origin_px before receiving the master grid.")
+
+    # Collect approved X & Y grids from source region
+    source_grids = [
+        g
+        for g in state.grid_candidates
+        if g.status == ReviewStatus.APPROVED
+        and (
+            g.region_id == source_region.region_id
+            or (
+                g.region_id is None
+                and g.page_number == source_region.page_number
+                and (
+                    (g.axis == "x" and source_region.x_px <= g.coord_px <= source_region.x_px + source_region.width_px)
+                    or (g.axis == "y" and source_region.y_px <= g.coord_px <= source_region.y_px + source_region.height_px)
+                )
+            )
+        )
+    ]
+    if not source_grids:
+        raise ValueError(f"Source region '{source_region.name}' has no approved grid lines to copy.")
+
+    dx = tgt_origin.x_px - src_origin.x_px
+    dy = tgt_origin.y_px - src_origin.y_px
+
+    # Clear prior unreviewed grids/columns in target region so repeated runs stay clean
+    state.grid_candidates = [
+        g
+        for g in state.grid_candidates
+        if not (g.region_id == target_region_id and g.status == ReviewStatus.PENDING)
+    ]
+    state.column_candidates = [
+        c
+        for c in state.column_candidates
+        if not (c.region_id == target_region_id and c.status == ReviewStatus.PENDING)
+    ]
+
+    tx0, ty0 = target_region.x_px, target_region.y_px
+    tx1, ty1 = target_region.x_px + target_region.width_px, target_region.y_px + target_region.height_px
+    target_cal = state.calibrations.get(str(target_region.page_number))
+
+    copied_grids: list[GridCandidate] = []
+    for sg in source_grids:
+        nx1 = min(max(sg.x1_px + dx, tx0), tx1)
+        nx2 = min(max(sg.x2_px + dx, tx0), tx1)
+        ny1 = min(max(sg.y1_px + dy, ty0), ty1)
+        ny2 = min(max(sg.y2_px + dy, ty0), ty1)
+        ncoord = (sg.coord_px + dx) if sg.axis == "x" else (sg.coord_px + dy)
+
+        if sg.axis == "x" and not (tx0 <= ncoord <= tx1):
+            continue
+        if sg.axis == "y" and not (ty0 <= ncoord <= ty1):
+            continue
+
+        coord_m = sg.coord_m
+        if coord_m is None and target_cal is not None:
+            coord_m = (
+                px_to_plan_m(ncoord, ny1, target_cal)[0]
+                if sg.axis == "x"
+                else px_to_plan_m(nx1, ncoord, target_cal)[1]
+            )
+
+        copied_grids.append(
+            GridCandidate(
+                id=f"grid-{uuid4().hex[:8]}",
+                page_number=target_region.page_number,
+                region_id=target_region_id,
+                axis=sg.axis,
+                label=sg.label,
+                x1_px=round(nx1, 2),
+                y1_px=round(ny1, 2),
+                x2_px=round(nx2, 2),
+                y2_px=round(ny2, 2),
+                coord_px=round(ncoord, 2),
+                coord_m=coord_m,
+                source=sg.source,
+                confidence=sg.confidence,
+                status=ReviewStatus.PENDING,
+                notes=f"Propagated from {source_region.name}",
+            )
+        )
+
+    target_page = _get_page(state, target_region.page_number)
+    pdf_path = _original_pdf_path(project_id, doc_id)
+    png_path = _pages_dir(project_id, doc_id) / target_page.image_filename
+
+    probed_cols = probe_columns_at_grid_intersections(
+        pdf_path=pdf_path,
+        png_path=png_path,
+        page_info=target_page,
+        target_region=target_region,
+        target_grids=copied_grids,
+        calibration=target_cal,
+    )
+
+    existing_col_ids = {c.column_id for c in state.column_candidates}
+    next_num = 1
+    for col in probed_cols:
+        if col.column_id in existing_col_ids:
+            while f"C{next_num}" in existing_col_ids:
+                next_num += 1
+            col.column_id = f"C{next_num}"
+        existing_col_ids.add(col.column_id)
+
+    state.grid_candidates.extend(copied_grids)
+    state.column_candidates.extend(probed_cols)
+    _save_state(state)
+
+    _append_audit(
+        project_id,
+        doc_id,
+        "master_grid_applied",
+        {
+            "source_region_id": source_region.region_id,
+            "target_region_id": target_region_id,
+            "shift_px": {"dx": round(dx, 2), "dy": round(dy, 2)},
+            "copied_grids": len(copied_grids),
+            "probed_columns": len(probed_cols),
+        },
+    )
+
+    return ApplyMasterGridResponse(
+        document=state,
+        source_region_id=source_region.region_id,
+        target_region_id=target_region_id,
+        copied_grids=len(copied_grids),
+        probed_columns=len(probed_cols),
+        notice=(
+            f"Copied {len(copied_grids)} master grid line(s) from '{source_region.name}' into "
+            f"'{target_region.name}' and probed {len(probed_cols)} intersection column(s)."
+        ),
     )
 
 
@@ -427,6 +894,7 @@ def add_manual_column(
     candidate = ColumnCandidate(
         id=f"col-{uuid4().hex[:8]}",
         page_number=req.page_number,
+        region_id=req.region_id,
         column_id=col_id,
         grid=req.grid.strip(),
         x_px=round(req.x_px, 2),
@@ -454,11 +922,12 @@ def add_manual_column(
             "candidate_id": candidate.id,
             "column_id": candidate.column_id,
             "page_number": req.page_number,
+            "region_id": req.region_id,
             "x_px": candidate.x_px,
             "y_px": candidate.y_px,
             "x_m": candidate.x_m,
             "y_m": candidate.y_m,
-            "status": candidate.status,
+            "status": candidate.status.value,
         },
     )
     return state
@@ -483,6 +952,7 @@ def add_manual_grid(
     candidate = GridCandidate(
         id=f"grid-{uuid4().hex[:8]}",
         page_number=req.page_number,
+        region_id=req.region_id,
         axis=req.axis,
         label=req.label.strip(),
         x1_px=round(x1, 2),
@@ -540,7 +1010,7 @@ def update_candidate(
                 {
                     "candidate_type": "grid",
                     "candidate_id": candidate_id,
-                    "status": grid.status,
+                    "status": grid.status.value,
                     "label": grid.label,
                 },
             )
@@ -568,7 +1038,7 @@ def update_candidate(
                 {
                     "candidate_type": "column",
                     "candidate_id": candidate_id,
-                    "status": col.status,
+                    "status": col.status.value,
                     "column_id": col.column_id,
                 },
             )
@@ -605,7 +1075,7 @@ def bulk_review_candidates(
         "candidate_reviewed",
         {
             "bulk": True,
-            "status": req.status,
+            "status": req.status.value,
             "updated_count": updated_count,
             "candidate_ids": sorted(target_ids),
         },
@@ -624,14 +1094,16 @@ def transfer_approved(
     approved_grids = [
         g
         for g in state.grid_candidates
-        if g.status == "approved"
+        if g.status == ReviewStatus.APPROVED
         and (req.page_number is None or g.page_number == req.page_number)
+        and (req.region_id is None or g.region_id == req.region_id)
     ]
     approved_cols = [
         c
         for c in state.column_candidates
-        if c.status == "approved"
+        if c.status == ReviewStatus.APPROVED
         and (req.page_number is None or c.page_number == req.page_number)
+        and (req.region_id is None or c.region_id == req.region_id)
     ]
 
     if not approved_grids and not approved_cols:
@@ -649,7 +1121,6 @@ def transfer_approved(
             )
         _recalculate_page_coordinates(state, pnum)
 
-    # Check duplicate approved column_ids in transfer batch
     seen_batch_col_ids: set[str] = set()
     for c in approved_cols:
         if c.column_id in seen_batch_col_ids:
@@ -658,7 +1129,6 @@ def transfer_approved(
             )
         seen_batch_col_ids.add(c.column_id)
 
-    # Prepare updated ProjectState geometry
     if req.merge_mode == "replace_geometry":
         x_map: dict[str, GridLine] = {}
         y_map: dict[str, GridLine] = {}
@@ -699,7 +1169,6 @@ def transfer_approved(
         b for b in project.beams if b.start_col in valid_col_ids and b.end_col in valid_col_ids
     ]
 
-    # Strictly validate against Phase 1 ProjectState (extra="forbid" + reference checks)
     updated_payload = project.model_dump()
     updated_payload["grids"] = {
         "x_grids": [g.model_dump() for g in new_x_grids],

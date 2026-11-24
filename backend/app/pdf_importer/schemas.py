@@ -1,12 +1,29 @@
+from enum import Enum
 from typing import Any, Literal
 from pydantic import BaseModel, Field, ConfigDict
 from ..models import ProjectState
 
 LengthUnit = Literal["mm", "cm", "m", "ft", "in"]
 PageClassification = Literal["vector", "scanned", "hybrid"]
-ReviewStatus = Literal["pending", "approved", "rejected"]
+SheetType = Literal[
+    "cover_toc",
+    "lot_site",
+    "floor_plan",
+    "roof_plan",
+    "elevation",
+    "section",
+    "schedule_detail",
+    "unknown",
+]
 DetectionMethod = Literal["auto", "vector", "raster", "vlm"]
 CandidateSource = Literal["vector", "raster", "manual", "vlm"]
+
+
+class ReviewStatus(str, Enum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
 
 UNIT_TO_METERS: dict[str, float] = {
     "mm": 0.001,
@@ -37,6 +54,36 @@ class PageInfo(BaseModel):
     text_word_count: int = Field(ge=0, default=0)
     image_coverage: float = Field(ge=0.0, le=1.0, default=0.0)
     image_filename: str
+    sheet_number: str = ""
+    sheet_title: str = ""
+    sheet_type: SheetType = "unknown"
+    viewport_count: int = Field(ge=1, default=1)
+
+
+PageMetadata = PageInfo
+
+
+class PlanRegion(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    region_id: str
+    page_number: int = Field(ge=1)
+    name: str = Field(min_length=1)
+    x_px: float
+    y_px: float
+    width_px: float = Field(gt=0)
+    height_px: float = Field(gt=0)
+    origin_px: PointPx | None = None
+    auto_detected: bool = True
+
+
+class RegionUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str | None = None
+    origin_px: PointPx | None = None
+    x_px: float | None = None
+    y_px: float | None = None
+    width_px: float | None = Field(default=None, gt=0)
+    height_px: float | None = Field(default=None, gt=0)
 
 
 class ScaleCalibrationRequest(BaseModel):
@@ -72,6 +119,7 @@ class GridCandidate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     id: str
     page_number: int = Field(ge=1)
+    region_id: str | None = None
     axis: Literal["x", "y"]
     label: str = Field(min_length=1)
     x1_px: float
@@ -82,7 +130,7 @@ class GridCandidate(BaseModel):
     coord_m: float | None = None
     source: CandidateSource
     confidence: float = Field(ge=0.0, le=1.0, default=0.5)
-    status: ReviewStatus = "pending"
+    status: ReviewStatus = ReviewStatus.PENDING
     transferred: bool = False
     notes: str = ""
 
@@ -91,6 +139,7 @@ class ColumnCandidate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     id: str
     page_number: int = Field(ge=1)
+    region_id: str | None = None
     column_id: str = Field(min_length=1)
     grid: str = ""
     x_px: float
@@ -103,9 +152,33 @@ class ColumnCandidate(BaseModel):
     depth_mm: float = Field(gt=0, default=400.0)
     source: CandidateSource
     confidence: float = Field(ge=0.0, le=1.0, default=0.5)
-    status: ReviewStatus = "pending"
+    status: ReviewStatus = ReviewStatus.PENDING
     transferred: bool = False
     notes: str = ""
+
+
+class DetectedLevel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    level_id: str
+    name: str
+    elevation_m: float
+    story_height_m: float | None = None
+    page_number: int = Field(ge=1)
+    y_px: float
+    confidence: float = Field(ge=0.0, le=1.0, default=0.75)
+    review_status: ReviewStatus = ReviewStatus.PENDING
+    engineer_approved: bool = False
+    warnings: list[str] = Field(default_factory=list)
+    transferred: bool = False
+
+
+class LevelUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str | None = None
+    elevation_m: float | None = None
+    story_height_m: float | None = None
+    review_status: ReviewStatus | None = None
+    engineer_approved: bool | None = None
 
 
 class ExtractionOptions(BaseModel):
@@ -121,6 +194,7 @@ class ExtractRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     method: DetectionMethod = "auto"
     replace_unreviewed: bool = True
+    region_id: str | None = None
     options: ExtractionOptions | None = None
     border_margin_ratio: float | None = Field(default=None, ge=0.0, lt=0.45)
     min_span_ratio: float | None = Field(default=None, gt=0.0, le=1.0)
@@ -146,23 +220,25 @@ class ExtractRequest(BaseModel):
 class ManualColumnRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     page_number: int = Field(ge=1)
+    region_id: str | None = None
     x_px: float
     y_px: float
     column_id: str | None = None
     grid: str = ""
     width_mm: float = Field(gt=0, default=400.0)
     depth_mm: float = Field(gt=0, default=400.0)
-    status: ReviewStatus = "approved"
+    status: ReviewStatus = ReviewStatus.APPROVED
     notes: str = ""
 
 
 class ManualGridRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     page_number: int = Field(ge=1)
+    region_id: str | None = None
     axis: Literal["x", "y"]
     label: str = Field(min_length=1)
     coord_px: float
-    status: ReviewStatus = "approved"
+    status: ReviewStatus = ReviewStatus.APPROVED
     notes: str = ""
 
 
@@ -183,10 +259,22 @@ class BulkReviewRequest(BaseModel):
     status: ReviewStatus
 
 
+class ApplyMasterGridRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    source_region_id: str
+
+
 class TransferRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     page_number: int | None = Field(default=None, ge=1)
+    region_id: str | None = None
     merge_mode: Literal["merge", "replace_geometry"] = "merge"
+
+
+class TransferLevelsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    page_number: int | None = Field(default=None, ge=1)
+    replace_existing: bool = True
 
 
 class TransferRecord(BaseModel):
@@ -194,9 +282,10 @@ class TransferRecord(BaseModel):
     transferred_at: str
     page_numbers: list[int]
     merge_mode: str
-    x_grids_count: int
-    y_grids_count: int
-    columns_count: int
+    x_grids_count: int = 0
+    y_grids_count: int = 0
+    columns_count: int = 0
+    levels_count: int = 0
 
 
 class ImportDocumentState(BaseModel):
@@ -210,10 +299,15 @@ class ImportDocumentState(BaseModel):
     updated_at: str
     page_count: int = Field(ge=1)
     pages: list[PageInfo]
+    regions: list[PlanRegion] = Field(default_factory=list)
     calibrations: dict[str, ScaleCalibration] = Field(default_factory=dict)
     grid_candidates: list[GridCandidate] = Field(default_factory=list)
     column_candidates: list[ColumnCandidate] = Field(default_factory=list)
+    detected_levels: list[DetectedLevel] = Field(default_factory=list)
     transfers: list[TransferRecord] = Field(default_factory=list)
+
+
+PdfDocumentRecord = ImportDocumentState
 
 
 class ImportDocumentSummary(BaseModel):
@@ -228,6 +322,7 @@ class ImportDocumentSummary(BaseModel):
     confirmed_pages: int
     approved_grids: int
     approved_columns: int
+    approved_levels: int = 0
     transfers_count: int
 
 
@@ -242,6 +337,25 @@ class ExtractionResponse(BaseModel):
     notice: str | None = None
 
 
+class LevelExtractionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    document: ImportDocumentState
+    page_number: int
+    levels_detected: int
+    warnings: list[str] = Field(default_factory=list)
+    notice: str | None = None
+
+
+class ApplyMasterGridResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    document: ImportDocumentState
+    source_region_id: str
+    target_region_id: str
+    copied_grids: int
+    probed_columns: int
+    notice: str
+
+
 class TransferResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
     project_id: str
@@ -250,6 +364,17 @@ class TransferResponse(BaseModel):
     transferred_y_grids: int
     transferred_columns: int
     total_project_columns: int
+    notice: str
+    project: ProjectState
+    document: ImportDocumentState
+
+
+class TransferLevelsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    project_id: str
+    doc_id: str
+    transferred_levels: int
+    total_project_levels: int
     notice: str
     project: ProjectState
     document: ImportDocumentState
