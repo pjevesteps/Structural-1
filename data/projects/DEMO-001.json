@@ -1,0 +1,96 @@
+{
+  "project_info": {
+    "project_id": "DEMO-001",
+    "project_name": "Three-Story Demonstration Frame",
+    "location": "Baguio City, Philippines",
+    "design_code": "To be confirmed by responsible structural engineer",
+    "materials": {
+      "fc_mpa": 27.6,
+      "fy_mpa": 414.0,
+      "concrete_density_kn_m3": 24.0
+    }
+  },
+  "levels": [
+    {
+      "id": "BASE",
+      "elevation_m": 0.0
+    },
+    {
+      "id": "2F",
+      "elevation_m": 3.6
+    },
+    {
+      "id": "3F",
+      "elevation_m": 7.2
+    },
+    {
+      "id": "ROOF",
+      "elevation_m": 10.8
+    }
+  ],
+  "grids": {
+    "x_grids": [
+      {
+        "label": "1",
+        "coord_m": 0.0
+      },
+      {
+        "label": "2",
+        "coord_m": 6.0
+      }
+    ],
+    "y_grids": [
+      {
+        "label": "A",
+        "coord_m": 0.0
+      }
+    ]
+  },
+  "columns": [
+    {
+      "id": "C1",
+      "grid": "A-1",
+      "x_m": 0.0,
+      "y_m": 0.0,
+      "width_mm": 400.0,
+      "depth_mm": 400.0
+    },
+    {
+      "id": "C2",
+      "grid": "A-2",
+      "x_m": 6.0,
+      "y_m": 0.0,
+      "width_mm": 450.0,
+      "depth_mm": 450.0
+    }
+  ],
+  "beams": [
+    {
+      "id": "B1-2F",
+      "start_col": "C1",
+      "end_col": "C2",
+      "level": "2F",
+      "width_mm": 250.0,
+      "depth_mm": 450.0,
+      "span_m": 6.0
+    },
+    {
+      "id": "B1-3F",
+      "start_col": "C1",
+      "end_col": "C2",
+      "level": "3F",
+      "width_mm": 250.0,
+      "depth_mm": 450.0,
+      "span_m": 6.0
+    },
+    {
+      "id": "B1-RF",
+      "start_col": "C1",
+      "end_col": "C2",
+      "level": "ROOF",
+      "width_mm": 250.0,
+      "depth_mm": 450.0,
+      "span_m": 6.0
+    }
+  ]
+}

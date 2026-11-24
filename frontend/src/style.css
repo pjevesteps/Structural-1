@@ -1,0 +1,68 @@
+:root{font-family:Inter,system-ui,Segoe UI,sans-serif;color:#eaf0f6;background:#0b1220}*{box-sizing:border-box}body{margin:0}.shell{max-width:1150px;margin:auto;padding:0 26px 45px}header{height:76px;display:flex;align-items:center;gap:13px;border-bottom:1px solid #26344a}header b{font-size:12px;letter-spacing:1.4px}header small{display:block;color:#8494aa;font-size:11px;margin-top:4px}.logo{width:38px;height:38px;border-radius:10px;background:#45c9a8;color:#08251f;display:grid;place-items:center;font-weight:900}.status,.online{margin-left:auto;border:1px solid #775b37;color:#efc37d;padding:7px 12px;border-radius:30px;font-size:11px}.online{border-color:#286554;color:#7be0c3}.hero{padding:65px 0 48px;max-width:700px}label{font-size:10px;color:#50d2b0;font-weight:800;letter-spacing:2px}h1{font-size:clamp(38px,6vw,64px);line-height:1.05;letter-spacing:-2px;margin:16px 0}h1 em{color:#56d4b3;font-style:normal}.hero p{color:#9baabe;line-height:1.7;max-width:560px;margin-bottom:24px}button{background:#45c9a8;color:#08251f;border:0;border-radius:8px;padding:12px 16px;font-weight:800;cursor:pointer}button:disabled{opacity:.5}.notice{background:#142d2b;border:1px solid #286554;padding:13px;border-radius:9px;margin:0 0 22px;color:#b9f2df;overflow-wrap:anywhere}h2{font-size:23px;margin:8px 0 16px}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:11px;margin-bottom:35px}.grid article{background:#111d2e;border:1px solid #26364d;border-radius:11px;padding:17px;min-height:137px}.grid i{font-size:11px;color:#50d2b0;font-style:normal;font-weight:800}.grid h3{font-size:14px;margin:16px 0 7px}.grid p,.projects p{font-size:11px;line-height:1.5;color:#8999ae;margin:0}.projects{border:1px solid #26364d;border-radius:11px;overflow:hidden}.projects article{padding:17px;display:flex;justify-content:space-between;align-items:center;gap:15px;border-bottom:1px solid #26364d}.projects article:last-child{border:0}.projects h3{font-size:14px;margin:0 0 5px}.projects small{display:block;color:#8999ae;font-size:10px;margin-top:5px}.projects nav{display:flex;gap:7px;flex-wrap:wrap}.secondary{background:#1b2a40;color:#e0eaf5;border:1px solid #344860;font-size:10px;padding:9px 11px}footer{color:#66768c;font-size:10px;margin-top:32px}@media(max-width:800px){.grid{grid-template-columns:repeat(2,1fr)}.projects article{align-items:flex-start;flex-direction:column}}@media(max-width:480px){.shell{padding:0 15px 30px}.hero{padding:45px 0 35px}.grid{gap:7px}.grid article{padding:12px;min-height:130px}.grid h3{font-size:12px}.projects nav button{flex:1}}
+
+
+/* Phase 2: PDF Plan Importer */
+.pdf-launch-btn{border-color:#286554;color:#7be0c3}
+.pdf-importer{padding:26px 0 12px}
+.pdf-topbar{display:flex;justify-content:space-between;align-items:flex-end;gap:14px;flex-wrap:wrap;margin-bottom:18px}
+.pdf-topbar h2{margin:6px 0 0;font-size:21px}
+.pdf-topbar h2 small{color:#8999ae;font-weight:500;font-size:13px}
+.pdf-topbar-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.pdf-upload-btn{display:inline-flex;align-items:center;gap:8px;background:#45c9a8;color:#08251f;border-radius:8px;padding:10px 14px;font-weight:800;font-size:11px;letter-spacing:.3px;cursor:pointer}
+.pdf-upload-btn input{display:none}
+.pdf-select,.pdf-inline-form input,.pdf-inline-form select{background:#0e1828;color:#eaf0f6;border:1px solid #304560;border-radius:7px;padding:8px 10px;font-size:11px;outline:none}
+.pdf-select:focus,.pdf-inline-form input:focus,.pdf-inline-form select:focus{border-color:#45c9a8}
+.pdf-alert.error{background:#2d161b;border:1px solid #7a313e;color:#f5b5be;padding:12px 14px;border-radius:9px;margin:0 0 16px;font-size:12px}
+.pdf-empty{background:#111d2e;border:1px dashed #2e425e;border-radius:12px;padding:38px 24px;text-align:center;color:#9baabe}
+.pdf-empty h3{color:#eaf0f6;margin:0 0 8px}
+.pdf-empty p{max-width:560px;margin:0 auto;font-size:12px;line-height:1.6}
+.pdf-workspace{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:16px;align-items:start}
+.pdf-canvas-col{display:flex;flex-direction:column;gap:12px;min-width:0}
+.pdf-toolbar{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;background:#111d2e;border:1px solid #26364d;border-radius:10px;padding:10px 12px}
+.pdf-pager,.pdf-modes{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+.pdf-page-label{font-size:11px;font-weight:700;padding:0 4px}
+.pdf-meta-dim{font-size:10px;color:#8999ae}
+.pdf-badge{font-size:9px;font-weight:800;letter-spacing:1px;padding:4px 8px;border-radius:20px;border:1px solid #344860}
+.pdf-badge.class-vector{background:#122c28;border-color:#286554;color:#7be0c3}
+.pdf-badge.class-scanned{background:#2b2214;border-color:#775b37;color:#efc37d}
+.pdf-badge.class-hybrid{background:#15253c;border-color:#355d8f;color:#8ec5ff}
+.pdf-modes button.active{background:#45c9a8;color:#08251f;border-color:#45c9a8}
+.pdf-controls-strip{display:grid;grid-template-columns:1.3fr 1fr;gap:12px;background:#111d2e;border:1px solid #26364d;border-radius:10px;padding:12px}
+.pdf-control-group{display:flex;flex-direction:column;gap:7px}
+.pdf-group-title{font-size:11px;font-weight:700;color:#d8e3f0;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.pdf-cal-status{font-style:normal;font-size:10px;padding:2px 7px;border-radius:12px}
+.pdf-cal-status.confirmed{background:#122c28;color:#7be0c3;border:1px solid #286554}
+.pdf-cal-status.draft{background:#2b2214;color:#efc37d;border:1px solid #775b37}
+.pdf-cal-status.none{background:#1a2538;color:#8999ae;border:1px solid #304560}
+.pdf-inline-form{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+.pdf-inline-form input[type="number"]{width:88px}
+.pdf-inline-form.manual-opts input{width:92px}
+.pdf-hint{font-size:10px;color:#8999ae;line-height:1.4}
+.pdf-stage{position:relative;background:#0a101b;border:1px solid #26364d;border-radius:10px;overflow:hidden;user-select:none}
+.pdf-stage.mode-calibrate,.pdf-stage.mode-place_column{cursor:crosshair}
+.pdf-page-img{display:block;width:100%;height:auto}
+.pdf-overlay-svg{position:absolute;inset:0;width:100%;height:100%;display:block}
+.pdf-review-col{background:#111d2e;border:1px solid #26364d;border-radius:10px;padding:14px;display:flex;flex-direction:column;gap:12px;max-height:82vh}
+.pdf-review-header{display:flex;flex-direction:column;gap:8px;border-bottom:1px solid #223147;padding-bottom:10px}
+.pdf-review-header h3{margin:4px 0 0;font-size:12px;color:#d8e3f0;font-weight:600}
+.pdf-bulk-actions{display:flex;gap:7px}
+.pdf-bulk-actions button{flex:1}
+.pdf-review-list{overflow-y:auto;display:flex;flex-direction:column;gap:7px;padding-right:2px;flex:1;min-height:160px}
+.pdf-review-list h4{margin:6px 0 2px;font-size:11px;color:#50d2b0;letter-spacing:.6px;text-transform:uppercase}
+.pdf-muted{font-size:11px;color:#8999ae;margin:2px 0 8px}
+.pdf-cand-row{display:flex;justify-content:space-between;align-items:center;gap:8px;background:#0e1828;border:1px solid #233349;border-left:3px solid #efc37d;border-radius:8px;padding:8px 9px;cursor:pointer}
+.pdf-cand-row.status-approved{border-left-color:#45c9a8}
+.pdf-cand-row.status-rejected{border-left-color:#e06c75;opacity:.68}
+.pdf-cand-row.selected{border-color:#50d2b0;background:#132438}
+.pdf-cand-info{min-width:0}
+.pdf-cand-info strong{display:block;font-size:12px;color:#eaf0f6}
+.pdf-cand-info small{display:block;font-size:10px;color:#8999ae;margin-top:2px;overflow-wrap:anywhere}
+.pdf-cand-actions{display:flex;gap:5px;flex-shrink:0}
+.mini-btn{background:#1b2a40;color:#d0dcea;border:1px solid #344860;border-radius:6px;padding:5px 7px;font-size:10px;font-weight:700}
+.mini-btn.on-approve{background:#163830;border-color:#45c9a8;color:#7be0c3}
+.mini-btn.on-reject{background:#381920;border-color:#e06c75;color:#f5b5be}
+.pdf-transfer-box{border-top:1px solid #223147;padding-top:12px;display:flex;flex-direction:column;gap:8px}
+.pdf-transfer-box select{width:100%}
+.pdf-transfer-btn{width:100%;padding:11px 14px;font-size:12px}
+@media(max-width:980px){.pdf-workspace{grid-template-columns:1fr}.pdf-controls-strip{grid-template-columns:1fr}.pdf-review-col{max-height:none}}
+@media(max-width:560px){.pdf-topbar-actions{width:100%}.pdf-select{width:100%}}
