@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from math import hypot, sqrt
+import re
 
 from ..models import (
     AnalyticalMember,
@@ -7,11 +8,98 @@ from ..models import (
     FloorOpening,
     GeometryCheckIssue,
     GeometryGenerationOptions,
+    Level,
     ProjectState,
     SlabPanel,
     StructuralModelState,
 )
 from .validator import validate_structural_model
+
+FLOOR_ALIAS_GROUPS: tuple[tuple[str, ...], ...] = (
+    ("B1", "BASEMENT", "BSMT", "BASEMENT 1", "BASEMENT FLOOR", "BASEMENT FLOOR FINISHED LINE"),
+    ("GF", "GROUND", "GROUND FLOOR", "GL"),
+    ("L1", "1F", "F1", "FIRST", "FIRST FLOOR", "1ST", "1ST FLOOR", "LEVEL 1"),
+    ("L2", "2F", "F2", "SECOND", "SECOND FLOOR", "2ND", "2ND FLOOR", "LEVEL 2"),
+    ("L3", "3F", "F3", "THIRD", "THIRD FLOOR", "3RD", "3RD FLOOR", "LEVEL 3"),
+    ("L4", "4F", "F4", "FOURTH", "FOURTH FLOOR", "4TH", "4TH FLOOR", "LEVEL 4"),
+    ("L5", "5F", "F5", "FIFTH", "FIFTH FLOOR", "5TH", "5TH FLOOR", "LEVEL 5"),
+    ("L6", "6F", "F6", "SIXTH", "SIXTH FLOOR", "6TH", "6TH FLOOR", "LEVEL 6"),
+    ("MEZZ", "MEZZANINE"),
+    ("PH", "PENTHOUSE"),
+    ("RD", "ROOF DECK", "ROOF", "ROOF LINE", "ROOF BEAM", "RB"),
+)
+NUMERIC_LEVEL_RE = re.compile(r"^\s*([+-]?\d+(?:\.\d+)?)\s*(?:m)?\s*$", re.IGNORECASE)
+NTH_LEVEL_RE = re.compile(
+    r"^(?:L\s*(\d+)|(\d+)\s*F|F\s*(\d+)|LEVEL\s*(\d+)|(\d+)(?:ST|ND|RD|TH)(?:\s+FLOOR)?)$",
+    re.IGNORECASE,
+)
+
+
+def _canonical_floor_key(label: str) -> str | None:
+    norm = re.sub(r"\s+", " ", label.strip().upper())
+    if not norm:
+        return None
+    for idx, group in enumerate(FLOOR_ALIAS_GROUPS):
+        if norm in group:
+            return f"ALIAS_{idx}"
+    # Substring fallback for verbose architectural names like "FOURTH FLOOR FINISHED FLOOR LINE"
+    for idx, group in enumerate(FLOOR_ALIAS_GROUPS):
+        for alias in group:
+            if len(alias) >= 4 and re.search(rf"\b{re.escape(alias)}\b", norm):
+                return f"ALIAS_{idx}"
+    m = NTH_LEVEL_RE.match(norm)
+    if m:
+        num = next(g for g in m.groups() if g is not None)
+        return f"FLOOR_NUM_{int(num)}"
+    return None
+
+
+def _resolve_level_index(raw_level: str, levels: list[Level]) -> int | None:
+    """
+    Resolve a column/opening floor_level string against project.levels:
+      1. Case-insensitive trimmed match against level.id or level.name.
+      2. Common floor aliases (B1/BASEMENT, L1/1F/FIRST, L2/2F/SECOND, L3/3F/THIRD,
+         L4/4F/FOURTH, RD/ROOF DECK, plus generic L<n>/<n>F/LEVEL <n>).
+      3. Numeric string match (e.g. "14" or "14.0") within 0.05 m of level.elevation_m.
+    """
+    cleaned = raw_level.strip()
+    if not cleaned:
+        return None
+    upper = cleaned.upper()
+
+    # 1. Exact case-insensitive match against level.id and optional level.name
+    for idx, lv in enumerate(levels):
+        if lv.id.strip().upper() == upper:
+            return idx
+        lv_name = str(getattr(lv, "name", "") or "").strip()
+        if lv_name and lv_name.upper() == upper:
+            return idx
+
+    # 2. Common floor alias match
+    target_key = _canonical_floor_key(cleaned)
+    if target_key is not None:
+        for idx, lv in enumerate(levels):
+            if _canonical_floor_key(lv.id) == target_key:
+                return idx
+            lv_name = str(getattr(lv, "name", "") or "").strip()
+            if lv_name and _canonical_floor_key(lv_name) == target_key:
+                return idx
+
+    # 3. Numeric elevation match within 0.05 m
+    m_num = NUMERIC_LEVEL_RE.match(cleaned)
+    if m_num:
+        target_elev = float(m_num.group(1))
+        best_idx: int | None = None
+        best_diff = float("inf")
+        for idx, lv in enumerate(levels):
+            diff = abs(lv.elevation_m - target_elev)
+            if diff <= 0.05 + 1e-9 and diff < best_diff:
+                best_diff = diff
+                best_idx = idx
+        if best_idx is not None:
+            return best_idx
+
+    return None
 
 
 def _utc_now() -> str:
@@ -136,13 +224,22 @@ def _cluster_coords(values: list[float], tol: float) -> list[float]:
     return [round(sum(g) / len(g), 4) for g in groups]
 
 
-def _openings_for_level(openings: list[FloorOpening], level_id: str) -> list[FloorOpening]:
+def _openings_for_level(
+    openings: list[FloorOpening],
+    level_id: str,
+    levels: list[Level] | None = None,
+) -> list[FloorOpening]:
     lvl_upper = level_id.strip().upper()
-    return [
-        op
-        for op in openings
-        if not op.floor_level.strip() or op.floor_level.strip().upper() == lvl_upper
-    ]
+    target_idx = _resolve_level_index(level_id, levels) if levels else None
+    matched: list[FloorOpening] = []
+    for op in openings:
+        raw = op.floor_level.strip()
+        if not raw or raw.upper() == lvl_upper:
+            matched.append(op)
+        elif levels is not None and target_idx is not None:
+            if _resolve_level_index(raw, levels) == target_idx:
+                matched.append(op)
+    return matched
 
 
 def _side_is_connected(
@@ -209,8 +306,7 @@ def generate_structural_model(
         model.validation_issues = validate_structural_model(model)
         return model
 
-    level_idx_by_id = {lv.id: idx for idx, lv in enumerate(levels)}
-    level_idx_by_upper = {lv.id.strip().upper(): idx for idx, lv in enumerate(levels)}
+    available_levels_str = ", ".join(f"{lv.id} ({lv.elevation_m:g} m)" for lv in levels)
 
     nodes: list[AnalyticalNode] = []
     members: list[AnalyticalMember] = []
@@ -243,15 +339,16 @@ def generate_structural_model(
         if not fl:
             story_indices = list(range(len(levels) - 1))
         else:
-            idx = level_idx_by_id.get(fl)
-            if idx is None:
-                idx = level_idx_by_upper.get(fl.upper())
+            idx = _resolve_level_index(fl, levels)
             if idx is None:
                 info_issues.append(
                     GeometryCheckIssue(
                         severity="warning",
                         code="UNKNOWN_COLUMN_LEVEL",
-                        message=f"Column '{col.id}' references unknown floor_level '{col.floor_level}'; skipped.",
+                        message=(
+                            f"Column '{col.id}' references unknown floor_level '{col.floor_level}'; skipped. "
+                            f"Available project levels: [{available_levels_str}]."
+                        ),
                         floor_level=col.floor_level,
                         entity_ids=[col.id],
                     )
@@ -301,7 +398,11 @@ def generate_structural_model(
         if len(lv_nodes) < 2:
             continue
 
-        lv_openings = _openings_for_level(project.openings, lv.id) if (opts.skip_beams_through_openings and lv_idx > 0) else []
+        lv_openings = (
+            _openings_for_level(project.openings, lv.id, levels)
+            if (opts.skip_beams_through_openings and lv_idx > 0)
+            else []
+        )
         candidate_pairs: list[tuple[AnalyticalNode, AnalyticalNode, str]] = []
 
         # Group along Z (constant z_m -> X-direction beams)
@@ -376,7 +477,7 @@ def generate_structural_model(
 
             xs = _cluster_coords([n.x_m for n in lv_nodes], tol)
             zs = _cluster_coords([n.z_m for n in lv_nodes], tol)
-            lv_openings = _openings_for_level(project.openings, lv.id)
+            lv_openings = _openings_for_level(project.openings, lv.id, levels)
 
             def find_node(xv: float, zv: float) -> AnalyticalNode | None:
                 for n in lv_nodes:

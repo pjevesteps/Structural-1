@@ -118,7 +118,7 @@
 .pdf-region-card-main{min-width:0}
 .pdf-region-card-main strong{display:block;font-size:11px;color:#eaf0f6}
 .pdf-region-card-main small{display:block;font-size:10px;color:#8999ae;margin-top:2px}
-.region-level-input{width:62px;background:#111d2e;color:#eaf0f6;border:1px solid #304560;border-radius:6px;padding:4px 6px;font-size:10px}
+.region-level-input,.region-level-select{max-width:165px;background:#111d2e;color:#eaf0f6;border:1px solid #304560;border-radius:6px;padding:4px 6px;font-size:10px}
 .pdf-stage.mode-draw_region{cursor:crosshair}
 
 /* Precision Zoom/Pan Viewport, Unified Tracing Toolbar, and Openings */

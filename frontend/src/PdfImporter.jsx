@@ -90,6 +90,9 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
 
   const [imports, setImports] = useState([]);
   const [doc, setDoc] = useState(null);
+  const [projectLevels, setProjectLevels] = useState(() =>
+    Array.isArray(project?.levels) ? project.levels : []
+  );
   const [pageNum, setPageNum] = useState(1);
   // inspect | calibrate | draw_region | set_origin | trace_grid_x | trace_grid_y | stamp_master_grid | place_column | trace_opening
   const [mode, setMode] = useState("inspect");
@@ -175,8 +178,21 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
     }
   }
 
+  async function loadProjectLevels() {
+    try {
+      const fullProj = await apiJson(`/api/projects/${pid}`);
+      const lvls = Array.isArray(fullProj?.levels)
+        ? [...fullProj.levels].sort((a, b) => a.elevation_m - b.elevation_m)
+        : [];
+      setProjectLevels(lvls);
+    } catch {
+      // keep existing projectLevels if fetch fails
+    }
+  }
+
   useEffect(() => {
     loadImportsList();
+    loadProjectLevels();
   }, [project.project_id]);
 
   const activePage = useMemo(() => {
@@ -1356,6 +1372,11 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
         }
       );
       setDoc(res.document);
+      if (Array.isArray(res.project?.levels)) {
+        setProjectLevels([...res.project.levels].sort((a, b) => a.elevation_m - b.elevation_m));
+      } else {
+        loadProjectLevels();
+      }
       setNotice(res.notice);
       if (onTransferred) onTransferred(res);
     } catch (err) {
@@ -1963,13 +1984,29 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
                         placeholder="New region name (e.g. Second Floor Plan)"
                         style={{ minWidth: 210 }}
                       />
-                      <input
-                        type="text"
+                      <select
+                        className="pdf-select"
                         value={newRegionLevel}
                         onChange={(e) => setNewRegionLevel(e.target.value)}
-                        placeholder="Floor level (e.g. 2F)"
-                        style={{ width: 120 }}
-                      />
+                        disabled={busy}
+                        aria-label="New region floor level"
+                      >
+                        {projectLevels.length === 0 ? (
+                          <option value="">Extract levels on Elevation/Section first</option>
+                        ) : (
+                          <>
+                            <option value="">Select Level...</option>
+                            {projectLevels.map((lv) => {
+                              const lvLabel = lv.name || lv.id;
+                              return (
+                                <option key={lv.id} value={lv.id}>
+                                  {lvLabel} ({lv.elevation_m} m)
+                                </option>
+                              );
+                            })}
+                          </>
+                        )}
+                      </select>
                       <small className="pdf-hint">
                         {regionCorner1
                           ? "Corner 1 set — click opposite corner to save region."
@@ -1982,6 +2019,12 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
                     <div className="pdf-region-cards">
                       {pageRegions.map((reg) => {
                         const isAct = reg.region_id === activeRegionId;
+                        const currentLevel = reg.floor_level || "";
+                        const hasCurrentInList =
+                          !currentLevel ||
+                          projectLevels.some(
+                            (lv) => lv.id === currentLevel || lv.name === currentLevel
+                          );
                         return (
                           <div
                             key={reg.region_id}
@@ -1999,21 +2042,37 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
                               </small>
                             </div>
                             <div className="pdf-cand-actions">
-                              <input
-                                type="text"
-                                className="region-level-input"
-                                defaultValue={reg.floor_level || ""}
-                                placeholder="Level"
-                                title="Floor level tag (blur to save)"
+                              <select
+                                className="region-level-select"
+                                value={currentLevel}
+                                disabled={busy}
+                                title="Assign floor level from ProjectState.levels"
+                                aria-label={`Floor level for ${reg.name}`}
                                 onClick={(ev) => ev.stopPropagation()}
-                                onBlur={(ev) => {
-                                  if (ev.target.value !== (reg.floor_level || "")) {
-                                    handleUpdateRegionMeta(reg.region_id, {
-                                      floor_level: ev.target.value,
-                                    });
-                                  }
+                                onChange={(ev) => {
+                                  ev.stopPropagation();
+                                  handleUpdateRegionMeta(reg.region_id, {
+                                    floor_level: ev.target.value,
+                                  });
                                 }}
-                              />
+                              >
+                                {projectLevels.length === 0 ? (
+                                  <option value="">Extract levels on Elevation/Section first</option>
+                                ) : (
+                                  <option value="">-- Level --</option>
+                                )}
+                                {!hasCurrentInList && (
+                                  <option value={currentLevel}>{currentLevel} (unmatched)</option>
+                                )}
+                                {projectLevels.map((lv) => {
+                                  const lvLabel = lv.name || lv.id;
+                                  return (
+                                    <option key={lv.id} value={lv.id}>
+                                      {lvLabel} ({lv.elevation_m} m)
+                                    </option>
+                                  );
+                                })}
+                              </select>
                               <button
                                 type="button"
                                 className="mini-btn on-reject"

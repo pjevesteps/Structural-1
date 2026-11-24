@@ -5,6 +5,10 @@ All notable changes to **AI Structural Engineering Office** are documented in th
 ## [Unreleased]
 
 ### Added
+- **Level Dropdown & Flexible Level Matching (`frontend/src/PdfImporter.jsx`, `backend/app/geometry/generator.py`)**:
+  - Replaced free-text region `Level` inputs in `PdfImporter.jsx` with `<select>` dropdowns populated directly from `project.levels` (`"{id} ({elevation_m} m)"`), refreshed automatically after transferring levels, with a fallback prompt (`"Extract levels on Elevation/Section first"`) when no levels exist yet.
+  - Added `_resolve_level_index` in `backend/app/geometry/generator.py` supporting case-insensitive `id`/`name` matching, common floor aliases (`B1`/`BASEMENT`, `L1`/`1F`/`FIRST`, `L2`/`2F`/`SECOND`, `L3`/`3F`/`THIRD`, `L4`/`4F`/`FOURTH`, `RD`/`ROOF DECK`), and numeric elevation matching (`±0.05 m`, e.g. `"14"` -> `14.0 m`), plus actionable available-level lists in `UNKNOWN_COLUMN_LEVEL` warnings.
+  - Added unit test `test_flexible_column_level_and_numeric_elevation_matching` in `backend/tests/test_geometry_generator.py`.
 - **Manual Grid Undo/Redo & Clear Region Grids (`backend/app/pdf_importer/`, `frontend/src/PdfImporter.jsx`)**:
   - Added `DELETE /api/projects/{project_id}/pdf-imports/{doc_id}/regions/{region_id}/grids` (`clear_region_grids` in `service.py` + `router.py`) to atomically delete all `grid_x` / `grid_y` candidates in a region while preserving columns, openings, and other regions, logged as `region_grids_cleared` in `audit.jsonl`.
   - Added per-session `undoStack` / `redoStack` in `frontend/src/PdfImporter.jsx` tracking manual grid additions and deletions (`add_grid` / `delete_grid`), rolling `Next Grid Label` back/forward automatically, with compact **Undo** (`Ctrl+Z`) and **Redo** (`Ctrl+Y` / `Ctrl+Shift+Z`) controls and global keyboard shortcuts.

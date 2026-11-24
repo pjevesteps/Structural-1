@@ -308,3 +308,58 @@ def test_manual_member_support_approval_and_staad_export(isolated_env, tmp_path:
         legacy_demo = ProjectState.model_validate(legacy_raw)
         assert legacy_demo.structural_model.nodes == []
         assert legacy_demo.openings == []
+
+
+def test_flexible_column_level_and_numeric_elevation_matching():
+    """
+    Verify columns tagged with numeric elevations (e.g. "14" or "14.0") or common floor aliases
+    (e.g. "L4", "BASEMENT", "FIRST", "ROOF DECK") resolve cleanly against project.levels without
+    UNKNOWN_COLUMN_LEVEL warnings, while truly unknown labels include available levels in the warning.
+    """
+    project = ProjectState.model_validate(
+        {
+            "project_info": _base_project_info("FLEX-LVL"),
+            "levels": [
+                {"id": "B1", "elevation_m": -2.6},
+                {"id": "1F", "elevation_m": 0.0},
+                {"id": "2F", "elevation_m": 3.0},
+                {"id": "3F", "elevation_m": 6.0},
+                {"id": "4F", "elevation_m": 11.0},
+                {"id": "RD", "elevation_m": 14.0},
+            ],
+            "columns": [
+                # Exact + alias matches ("BASEMENT" -> B1, "FIRST" -> 1F, "L2" -> 2F, "L3" -> 3F, "L4" -> 4F)
+                {"id": "C_B", "grid": "A-1", "floor_level": "BASEMENT", "x_m": 0.0, "y_m": 0.0, "width_mm": 400, "depth_mm": 400},
+                {"id": "C_1", "grid": "A-1", "floor_level": "FIRST", "x_m": 0.0, "y_m": 0.0, "width_mm": 400, "depth_mm": 400},
+                {"id": "C_2", "grid": "A-1", "floor_level": "L2", "x_m": 0.0, "y_m": 0.0, "width_mm": 400, "depth_mm": 400},
+                {"id": "C_3", "grid": "A-1", "floor_level": "L3", "x_m": 0.0, "y_m": 0.0, "width_mm": 400, "depth_mm": 400},
+                {"id": "C_4", "grid": "A-1", "floor_level": "L4", "x_m": 0.0, "y_m": 0.0, "width_mm": 400, "depth_mm": 400},
+                # Numeric elevation match ("14" -> RD at 14.0 m -> top story 4F..RD; "11.0" -> 4F at 11.0 m)
+                {"id": "C_E14", "grid": "A-2", "floor_level": "14", "x_m": 6.0, "y_m": 0.0, "width_mm": 400, "depth_mm": 400},
+                {"id": "C_E11", "grid": "B-1", "floor_level": "11.0", "x_m": 0.0, "y_m": 5.0, "width_mm": 400, "depth_mm": 400},
+                {"id": "C_RD", "grid": "B-2", "floor_level": "ROOF DECK", "x_m": 6.0, "y_m": 5.0, "width_mm": 400, "depth_mm": 400},
+            ],
+        }
+    )
+
+    model = generate_structural_model(project)
+    unknown_issues = [iss for iss in model.validation_issues if iss.code == "UNKNOWN_COLUMN_LEVEL"]
+    assert unknown_issues == [], f"Unexpected UNKNOWN_COLUMN_LEVEL warnings: {unknown_issues}"
+
+    # Verify C_E14 ("14") and C_4 ("L4") created nodes at 4F (11.0 m) and RD (14.0 m)
+    node_elevs_at_a2 = sorted(n.y_m for n in model.nodes if abs(n.x_m - 6.0) < 0.05 and abs(n.z_m) < 0.05)
+    assert node_elevs_at_a2 == [11.0, 14.0]
+    node_elevs_at_a1 = sorted(n.y_m for n in model.nodes if abs(n.x_m) < 0.05 and abs(n.z_m) < 0.05)
+    assert node_elevs_at_a1 == [-2.6, 0.0, 3.0, 6.0, 11.0, 14.0]
+
+    # Verify a truly unknown level still emits UNKNOWN_COLUMN_LEVEL listing available project levels
+    bad_project = project.model_copy(deep=True)
+    bad_project.columns.append(
+        project.columns[0].model_copy(update={"id": "C_BAD", "floor_level": "HELIPAD"})
+    )
+    bad_model = generate_structural_model(bad_project)
+    bad_unknown = [iss for iss in bad_model.validation_issues if iss.code == "UNKNOWN_COLUMN_LEVEL"]
+    assert len(bad_unknown) == 1
+    assert "HELIPAD" in bad_unknown[0].message
+    assert "Available project levels" in bad_unknown[0].message
+    assert "4F" in bad_unknown[0].message and "RD" in bad_unknown[0].message
