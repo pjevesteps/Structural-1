@@ -28,7 +28,7 @@ Open the Vite URL printed in the terminal. API docs: http://localhost:8000/docs.
 
 ## Run Tests
 ```powershell
-.\.venv\Scripts\pytest.exe backend\tests\test_pdf_importer.py -v
+.\.venv\Scripts\pytest.exe -v
 ```
 
 ## Tablet Access
@@ -56,6 +56,15 @@ Connect tablet and PC to the same trusted Wi-Fi. Run `ipconfig` on Windows, then
 - Vector grid/column detection via PyMuPDF with OpenCV (`cv2`) raster fallback for scanned pages, plus an experimental VLM placeholder interface
 - Interactive SVG overlay (`frontend/src/PdfImporter.jsx`) for calibration, detected grids/columns, click-to-place manual columns, and accept/reject review
 - Controlled transfer: only engineer-approved elements are merged/transferred into `ProjectState`, and only after scale calibration is explicitly confirmed
+
+### Phase 3 — Structural Geometry Generation (Module 03)
+- Analytical 3D wireframe generation (`backend/app/geometry/generator.py`) from approved `ProjectState` grids, floor levels, columns, and floor openings:
+  - STAAD Y-up deduplicated nodes (`AnalyticalNode`), stepped-base column stacks, automatic lowest-node `FIXED` / `PINNED` supports
+  - Primary framing beams, base tie beams, and automatic skipping of beams crossing floor openings
+  - Rectangular slab panel detection (`SlabPanel`) with Sutherland-Hodgman polygon opening deduction and `one_way` / `two_way` / `void` classification
+- Structural integrity validator (`backend/app/geometry/validator.py`) catching duplicate nodes/members, zero-length members, missing supports, orphan nodes, transfer/floating columns, and long beam spans
+- Interactive Module 03 UI (`frontend/src/GeometryBuilder.jsx`): HTML5 Canvas 3D orbit/zoom wireframe, 2D SVG floor framing editor (`Inspect`, `Add Beam`, `Delete Member`, `Toggle Support`), integrity checklist, approval gate, and live `.std` preview drawer
+- Upgraded geometry-only STAAD.Pro `.std` exporter (`backend/app/staad.py`) emitting `JOINT COORDINATES`, `MEMBER INCIDENCES`, `START GROUP DEFINITION` (`_COLUMNS`, `_BEAMS`, `_TIE_BEAMS`, per-level groups), and `SUPPORTS`
 
 ## API
 
@@ -98,6 +107,14 @@ Connect tablet and PC to the same trusted Wi-Fi. Run `ipconfig` on Windows, then
 - `PATCH /api/projects/{project_id}/pdf-imports/{doc_id}/candidates/{candidate_id}` — Accept, reject, or edit a candidate
 - `POST /api/projects/{project_id}/pdf-imports/{doc_id}/candidates/bulk-review` — Bulk accept/reject candidates
 - `POST /api/projects/{project_id}/pdf-imports/{doc_id}/transfer` — Transfer approved elements to `ProjectState` (requires confirmed scale)
+
+### Phase 3 Structural Geometry Endpoints (`/api/projects/{project_id}/geometry`)
+- `POST /api/projects/{project_id}/geometry/generate` — Generate analytical nodes, members, slab panels, and run integrity checks
+- `POST /api/projects/{project_id}/geometry/validate` — Re-run structural geometry integrity validation
+- `POST /api/projects/{project_id}/geometry/members` — Manually add a beam/column between existing nodes or split existing members for secondary/trimmer beams
+- `DELETE /api/projects/{project_id}/geometry/members/{member_id}` — Delete an analytical member and re-validate
+- `PATCH /api/projects/{project_id}/geometry/nodes/{node_id}/support` — Toggle node support (`NONE`, `FIXED`, `PINNED`) and re-validate
+- `POST /api/projects/{project_id}/geometry/approve` — Mark geometry approved for downstream load/STAAD modules (blocked if any `error` issues exist)
 
 ## Documentation & History
 See [CHANGELOG.md](CHANGELOG.md) for a chronological record of changes.

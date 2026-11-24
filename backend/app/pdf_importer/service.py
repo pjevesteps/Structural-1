@@ -1875,9 +1875,11 @@ def transfer_approved(
 
     for c in approved_cols:
         assert c.x_m is not None and c.y_m is not None
+        reg = _find_region(state, c.region_id)
         col_map[c.column_id] = Column(
             id=c.column_id,
             grid=c.grid,
+            floor_level=reg.floor_level if (reg and reg.floor_level) else "",
             x_m=round(c.x_m, 4),
             y_m=round(c.y_m, 4),
             width_mm=c.width_mm,

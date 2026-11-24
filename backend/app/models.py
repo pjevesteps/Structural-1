@@ -1,10 +1,12 @@
 from typing import Literal
 from pydantic import BaseModel, Field, ConfigDict, model_validator
 
+
 class MaterialProperties(BaseModel):
     fc_mpa: float = Field(gt=0)
     fy_mpa: float = Field(gt=0)
     concrete_density_kn_m3: float = Field(gt=0)
+
 
 class ProjectInfo(BaseModel):
     project_id: str = Field(min_length=1, max_length=80)
@@ -13,25 +15,31 @@ class ProjectInfo(BaseModel):
     design_code: str = "To be confirmed by engineer"
     materials: MaterialProperties
 
+
 class Level(BaseModel):
     id: str = Field(min_length=1)
     elevation_m: float
+
 
 class GridLine(BaseModel):
     label: str
     coord_m: float
 
+
 class Grids(BaseModel):
     x_grids: list[GridLine] = Field(default_factory=list)
     y_grids: list[GridLine] = Field(default_factory=list)
 
+
 class Column(BaseModel):
     id: str
     grid: str = ""
+    floor_level: str = ""
     x_m: float
     y_m: float
     width_mm: float = Field(gt=0)
     depth_mm: float = Field(gt=0)
+
 
 class Beam(BaseModel):
     id: str
@@ -42,6 +50,7 @@ class Beam(BaseModel):
     depth_mm: float = Field(gt=0)
     span_m: float | None = Field(default=None, gt=0)
 
+
 class FloorOpening(BaseModel):
     id: str
     label: str
@@ -49,6 +58,74 @@ class FloorOpening(BaseModel):
     floor_level: str = ""
     polygon_m: list[list[float]] = Field(min_length=3)
     area_sqm: float = Field(gt=0)
+
+
+class AnalyticalNode(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    node_id: int = Field(ge=1)
+    x_m: float
+    y_m: float  # STAAD Y-up elevation
+    z_m: float  # plan Y
+    floor_level: str
+    grid_ref: str = ""
+    is_support: bool = False
+    support_type: Literal["NONE", "FIXED", "PINNED"] = "NONE"
+
+
+class AnalyticalMember(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    member_id: int = Field(ge=1)
+    start_node: int = Field(ge=1)
+    end_node: int = Field(ge=1)
+    member_type: Literal["column", "primary_beam", "secondary_beam", "tie_beam", "trimmer_beam"]
+    floor_level: str
+    grid_ref: str = ""
+    length_m: float = Field(ge=0.0)
+    manual_override: bool = False
+
+
+class SlabPanel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    panel_id: str
+    floor_level: str
+    polygon_m: list[list[float]] = Field(min_length=3)
+    lx_m: float = Field(gt=0)
+    ly_m: float = Field(gt=0)
+    gross_area_sqm: float = Field(ge=0)
+    opening_deduction_sqm: float = Field(ge=0)
+    net_area_sqm: float = Field(ge=0)
+    slab_action: Literal["one_way", "two_way", "void"]
+
+
+class GeometryCheckIssue(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    severity: Literal["error", "warning", "info"]
+    code: str
+    message: str
+    floor_level: str = ""
+    entity_ids: list[str] = Field(default_factory=list)
+
+
+class GeometryGenerationOptions(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    snap_tolerance_m: float = Field(default=0.05, gt=0)
+    default_support_type: Literal["FIXED", "PINNED"] = "FIXED"
+    include_base_tie_beams: bool = True
+    max_beam_span_m: float = Field(default=12.0, gt=0)
+    skip_beams_through_openings: bool = True
+    auto_detect_slab_panels: bool = True
+
+
+class StructuralModelState(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    generated_at: str | None = None
+    options: GeometryGenerationOptions = Field(default_factory=GeometryGenerationOptions)
+    nodes: list[AnalyticalNode] = Field(default_factory=list)
+    members: list[AnalyticalMember] = Field(default_factory=list)
+    slab_panels: list[SlabPanel] = Field(default_factory=list)
+    validation_issues: list[GeometryCheckIssue] = Field(default_factory=list)
+    engineer_approved: bool = False
+
 
 class ProjectState(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -58,6 +135,7 @@ class ProjectState(BaseModel):
     columns: list[Column]
     beams: list[Beam] = Field(default_factory=list)
     openings: list[FloorOpening] = Field(default_factory=list)
+    structural_model: StructuralModelState = Field(default_factory=StructuralModelState)
 
     @model_validator(mode="after")
     def check_references(self):
