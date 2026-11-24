@@ -101,11 +101,11 @@ def _build_synthetic_multipage_pdf() -> bytes:
         cv2.line(raster, (gx, 80), (gx, 520), (40, 40, 40), 2)
     for gy in (180, 440):
         cv2.line(raster, (100, gy), (700, gy), (40, 40, 40), 2)
-    # Draw concrete gray-shaded column squares (24x24 px) at the 4 intersections
+    # Draw concrete gray-shaded column squares (20x20 source px -> ~31x31 rendered px at 150 DPI)
     for gy in (180, 440):
         for gx in (200, 560):
-            cv2.rectangle(raster, (gx - 12, gy - 12), (gx + 12, gy + 12), (128, 128, 128), -1)
-            cv2.rectangle(raster, (gx - 12, gy - 12), (gx + 12, gy + 12), (20, 20, 20), 1)
+            cv2.rectangle(raster, (gx - 10, gy - 10), (gx + 10, gy + 10), (128, 128, 128), -1)
+            cv2.rectangle(raster, (gx - 10, gy - 10), (gx + 10, gy + 10), (20, 20, 20), 1)
 
     ok, png_buf = cv2.imencode(".png", raster)
     assert ok
@@ -1206,6 +1206,15 @@ def test_shaded_hatched_column_scanner_filters_non_columns_and_preserves_grids(i
     sh.finish(color=(0.2, 0.2, 0.2), fill=(0.60, 0.60, 0.60), closePath=True, width=0.7)
 
     sh.commit()
+
+    # 3f. Dense dimension numbers and room labels placed right next to gray columns -> MUST ALL BE REJECTED
+    pg.insert_text(pymupdf.Point(155.0, 382.0), "9.75", fontsize=11)
+    pg.insert_text(pymupdf.Point(325.0, 382.0), "3.60", fontsize=11)
+    pg.insert_text(pymupdf.Point(150.0, 340.0), "STORAGE", fontsize=10)
+    pg.insert_text(pymupdf.Point(250.0, 260.0), "PARKING AREA", fontsize=10)
+    pg.insert_text(pymupdf.Point(150.0, 210.0), "ALLEY", fontsize=10)
+    pg.insert_text(pymupdf.Point(240.0, 495.0), "BASEMENT FLOOR PLAN", fontsize=12)
+
     pdf_bytes = doc.tobytes()
     doc.close()
 

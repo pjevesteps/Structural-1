@@ -4,6 +4,13 @@ All notable changes to **AI Structural Engineering Office** are documented in th
 
 ## [Unreleased]
 
+### Fixed
+- **Phase 2 Shaded/Hatched Column Scanner — Zero Text/Dimension False Positives (`backend/app/pdf_importer/detector.py`)**:
+  - Removed the dark-pixel morphological closing pass that fused dimension numbers and room labels (`9.75`, `3.60`, `STORAGE`, `PARKING`, `BASEMENT`, `ALLEY`) into fake hatched boxes.
+  - Added embedded PDF text masking via `page.get_text("words")` (rejecting any candidate whose center falls inside a word box or whose padded overlap exceeds 25%) and bottom-12% title-block exclusion.
+  - Rebuilt the vector path to detect solid non-white/non-pure-black rectangular fills plus true closed 4-corner vector rectangles containing `>= 4` interior hatch strokes (never fusing free text strokes).
+  - Rebuilt the raster path strictly on mid-gray pixels (`60 <= gray <= 215`) with light `3×3` opening (no black pixels, no heavy closing) and uniform gray interior verification (`mid_gray >= 0.70`, `black <= 0.20`, `std_dev <= 35.0`, `solidity >= 0.88`, `rectangularity >= 0.78`), verified on real architectural Page 4 (`8` Basement + `24` First Floor columns, `0` text overlaps).
+
 ### Added
 - **Tuned Phase 2 Shaded & Hatched Column Scanner (`backend/app/pdf_importer/`, `frontend/src/PdfImporter.jsx`)**:
   - Extended `ExtractionOptions` and `ExtractRequest` in `schemas.py` with `detect_grids`, `detect_columns`, `column_fill_mode` (`"shaded_or_hatched"`, `"gray_shaded_only"`, `"any_filled"`), `min_column_size_m`, `max_column_size_m`, `column_max_aspect_ratio`, `column_min_rectangularity`, `column_min_fill_ratio`, `require_near_grid`, `column_probe_radius_px`, and `snap_columns_to_grids`.

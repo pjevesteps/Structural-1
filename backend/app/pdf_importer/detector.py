@@ -454,69 +454,126 @@ def _fill_brightness(fill) -> float:
     return 1.0
 
 
-def _verify_interior_shading_or_hatch(
+def _extract_text_word_boxes_px(
+    page: pymupdf.Page,
+    page_info: PageInfo,
+    pad_px: float = 3.0,
+) -> list[tuple[float, float, float, float, float, float, float, float]]:
+    """
+    Return all embedded PDF word bounding boxes in rendered pixel coordinates:
+    (raw_x0, raw_y0, raw_x1, raw_y1, pad_x0, pad_y0, pad_x1, pad_y1).
+    """
+    rot_mat = page.rotation_matrix
+    ox = float(page.rect.x0)
+    oy = float(page.rect.y0)
+    sx = float(page_info.width_px) / max(float(page.rect.width), 1.0)
+    sy = float(page_info.height_px) / max(float(page.rect.height), 1.0)
+    boxes: list[tuple[float, float, float, float, float, float, float, float]] = []
+    for w_item in page.get_text("words"):
+        txt = str(w_item[4]).strip()
+        if not txt:
+            continue
+        wr = pymupdf.Rect(w_item[:4]) * rot_mat
+        x0 = (float(wr.x0) - ox) * sx
+        y0 = (float(wr.y0) - oy) * sy
+        x1 = (float(wr.x1) - ox) * sx
+        y1 = (float(wr.y1) - oy) * sy
+        x0, x1 = min(x0, x1), max(x0, x1)
+        y0, y1 = min(y0, y1), max(y0, y1)
+        if x1 > x0 and y1 > y0:
+            p = pad_px if len(txt) >= 2 else min(pad_px, 1.0)
+            boxes.append((x0, y0, x1, y1, x0 - p, y0 - p, x1 + p, y1 + p))
+    return boxes
+
+
+def _overlaps_text_boxes(
+    x0: float,
+    y0: float,
+    x1: float,
+    y1: float,
+    text_boxes: list[tuple[float, float, float, float, float, float, float, float]],
+    max_overlap_ratio: float = 0.25,
+) -> bool:
+    """Return True if candidate center lies inside a text box or padded overlap exceeds max_overlap_ratio."""
+    if not text_boxes:
+        return False
+    cx = (x0 + x1) * 0.5
+    cy = (y0 + y1) * 0.5
+    cand_area = max((x1 - x0) * (y1 - y0), 1e-6)
+    for rx0, ry0, rx1, ry1, tx0, ty0, tx1, ty1 in text_boxes:
+        if rx0 <= cx <= rx1 and ry0 <= cy <= ry1:
+            return True
+        ix0 = max(x0, tx0)
+        iy0 = max(y0, ty0)
+        ix1 = min(x1, tx1)
+        iy1 = min(y1, ty1)
+        if ix1 > ix0 and iy1 > iy0:
+            inter = (ix1 - ix0) * (iy1 - iy0)
+            if inter / cand_area > max_overlap_ratio:
+                return True
+    return False
+
+
+def _verify_uniform_gray_interior(
+    full_img: np.ndarray,
+    x0: float,
+    y0: float,
+    x1: float,
+    y1: float,
+    inset_px: int = 1,
+    min_mid_gray_ratio: float = 0.70,
+    max_black_ratio: float = 0.20,
+    max_std_dev: float = 35.0,
+) -> bool:
+    """Strict uniform mid-gray interior check: kills text anti-aliasing and high-contrast furniture."""
+    h_full, w_full = full_img.shape[:2]
+    ix0 = max(0, int(round(x0)) + inset_px)
+    iy0 = max(0, int(round(y0)) + inset_px)
+    ix1 = min(w_full, int(round(x1)) - inset_px)
+    iy1 = min(h_full, int(round(y1)) - inset_px)
+    if ix1 - ix0 < 2 or iy1 - iy0 < 2:
+        return False
+    interior = full_img[iy0:iy1, ix0:ix1]
+    if interior.size < 4:
+        return False
+    mid_gray_ratio = float(np.mean((interior >= 60) & (interior <= 215)))
+    black_ratio = float(np.mean(interior < 50))
+    std_dev = float(np.std(interior))
+    return (
+        mid_gray_ratio >= min_mid_gray_ratio
+        and black_ratio <= max_black_ratio
+        and std_dev <= max_std_dev
+    )
+
+
+def _verify_vector_hatched_interior(
     full_img: np.ndarray,
     x0: float,
     y0: float,
     x1: float,
     y1: float,
     opts: ExtractionOptions,
-) -> tuple[bool, str, float]:
-    """
-    Strictly verify candidate interior shading/hatching on the un-morphed grayscale image.
-    Returns (accepted, fill_kind, confidence_bonus).
-    """
+) -> bool:
+    """Verify a closed 4-corner vector rectangle truly contains repeating hatch strokes (not hollow/pitch-black)."""
     h_full, w_full = full_img.shape[:2]
     bw = max(x1 - x0, 1.0)
     bh = max(y1 - y0, 1.0)
-    inset = max(1, int(min(bw, bh) * 0.15))
-
+    inset = max(1, int(min(bw, bh) * 0.12))
     ix0 = max(0, int(round(x0)) + inset)
     iy0 = max(0, int(round(y0)) + inset)
     ix1 = min(w_full, int(round(x1)) - inset)
     iy1 = min(h_full, int(round(y1)) - inset)
     if ix1 - ix0 < 2 or iy1 - iy0 < 2:
-        return False, "", 0.0
-
+        return False
     interior = full_img[iy0:iy1, ix0:ix1]
     if interior.size < 4:
-        return False, "", 0.0
+        return False
 
     non_white_ratio = float(np.mean(interior < 235))
-    mean_gray = float(np.mean(interior))
     solid_black_ratio = float(np.mean(interior < 35))
-    mid_gray_ratio = float(np.mean((interior >= 45) & (interior <= 225)))
+    if non_white_ratio < opts.column_min_fill_ratio or solid_black_ratio > 0.85:
+        return False
 
-    if non_white_ratio < opts.column_min_fill_ratio:
-        return False, "", 0.0
-
-    mode = opts.column_fill_mode
-    if mode == "any_filled":
-        return True, "filled", 0.04
-
-    if mode == "gray_shaded_only":
-        iqr = float(np.percentile(interior, 75) - np.percentile(interior, 25))
-        if (
-            solid_black_ratio < 0.50
-            and 45.0 <= mean_gray <= 225.0
-            and non_white_ratio >= 0.80
-            and mid_gray_ratio >= 0.55
-            and iqr <= 28.0
-        ):
-            return True, "gray_shaded", 0.06
-        return False, "", 0.0
-
-    # Default mode: "shaded_or_hatched"
-    # Reject solid pitch-black icons (e.g. stove/appliance symbols)
-    if solid_black_ratio > 0.85:
-        return False, "", 0.0
-
-    # 1. Gray-shaded interior
-    if solid_black_ratio < 0.60 and non_white_ratio >= 0.65 and mid_gray_ratio >= 0.35:
-        return True, "gray_shaded", 0.06
-
-    # 2. Hatched interior (ANSI31 / diagonal / cross-hatched):
-    # Require repeating edge transitions spread across the interior rather than a single crossing line.
     gx = cv2.Sobel(interior, cv2.CV_32F, 1, 0, ksize=3)
     gy = cv2.Sobel(interior, cv2.CV_32F, 0, 1, ksize=3)
     mag = np.hypot(gx, gy)
@@ -534,11 +591,7 @@ def _verify_interior_shading_or_hatch(
             interior[mh:, mw:],
         )
         active_quads = sum(1 for q in quads if float(np.mean(q < 235)) >= 0.15)
-
-    if edge_density >= 0.16 and active_quads >= 3:
-        return True, "hatched", 0.04
-
-    return False, "", 0.0
+    return edge_density >= 0.16 and active_quads >= 3
 
 
 def _load_grayscale_image(
@@ -575,9 +628,13 @@ def detect_shaded_hatched_columns(
     use_vector: bool = True,
 ) -> list[ColumnCandidate]:
     """
-    Dedicated hybrid vector + raster detector for ONLY shaded or hatched square/rectangular columns.
-    Rejects hollow furniture/rooms, solid pitch-black icons (in shaded_or_hatched / gray_shaded_only),
-    circles/grid bubbles, long thin walls, large earth-backfill hatches, and tiny text artifacts.
+    Hybrid vector + strict mid-gray raster detector for shaded or hatched square/rectangular columns.
+    - Masks out all embedded PDF text word bounding boxes (never flags dimension numbers or room labels).
+    - Never uses morphological closing on dark pixels (which fuses text into fake boxes).
+    - Vector path detects solid non-white/non-black rectangular fills and closed 4-corner vector
+      rectangles containing interior parallel/cross hatch strokes.
+    - Raster path isolates strictly mid-gray pixels (60..215) with light 3x3 opening and uniform-gray
+      interior verification (mid_gray >= 0.70, black <= 0.20, std_dev <= 35.0).
     """
     opts = options if options is not None else ExtractionOptions()
     full_img = _load_grayscale_image(pdf_path, png_path, page_info)
@@ -589,6 +646,8 @@ def detect_shaded_hatched_columns(
     bx0, by0, bx1, by1 = bounds
     region_id = region.region_id if region is not None else None
     margin_ratio = opts.border_margin_ratio if region is None else 0.0
+    title_block_y = float(page_info.height_px) * 0.88
+    min_rect_ratio = max(float(opts.column_min_rectangularity), 0.78)
 
     # Resolve effective scale (pixels per meter)
     effective_ppm: float | None = None
@@ -603,8 +662,9 @@ def detect_shaded_hatched_columns(
         min_px = max(4.0, opts.min_column_size_m * effective_ppm)
         max_px = max(min_px + 4.0, opts.max_column_size_m * effective_ppm)
     else:
-        min_px = 6.0
-        max_px = 45.0
+        dpi_scale = float(page_info.dpi) / 150.0
+        min_px = 8.0 * dpi_scale
+        max_px = 36.0 * dpi_scale
 
     effective_origin: PointPx | None = origin_px
     if effective_origin is None:
@@ -613,63 +673,170 @@ def detect_shaded_hatched_columns(
         elif calibration is not None:
             effective_origin = calibration.origin_px
 
-    raw_candidates: list[dict] = []
+    text_boxes: list[tuple[float, float, float, float]] = []
+    verified: list[dict] = []
 
-    # --- 1. Vector solid-shaded rectangles (PyMuPDF) ---
-    if use_vector and pdf_path is not None and pdf_path.exists():
+    # --- 1. Embedded Text Masking + Primary Vector Path (PyMuPDF) ---
+    if pdf_path is not None and pdf_path.exists():
         doc = pymupdf.open(pdf_path)
         try:
             page = doc[page_info.page_number - 1]
-            rot_mat = page.rotation_matrix
-            ox = float(page.rect.x0)
-            oy = float(page.rect.y0)
-            sx = float(page_info.width_px) / max(float(page.rect.width), 1.0)
-            sy = float(page_info.height_px) / max(float(page.rect.height), 1.0)
+            text_boxes = _extract_text_word_boxes_px(page, page_info, pad_px=3.0)
 
-            for drawing in page.get_drawings():
-                fill = drawing.get("fill")
-                if fill is None:
-                    continue
-                if _fill_brightness(fill) >= 0.92:
-                    continue
-                items = drawing.get("items", [])
-                has_curve = any(it[0] == "c" for it in items)
-                has_explicit_rect = any(it[0] in ("re", "qu") for it in items)
-                if has_curve and not has_explicit_rect:
-                    continue
+            if use_vector:
+                rot_mat = page.rotation_matrix
+                ox = float(page.rect.x0)
+                oy = float(page.rect.y0)
+                sx = float(page_info.width_px) / max(float(page.rect.width), 1.0)
+                sy = float(page_info.height_px) / max(float(page.rect.height), 1.0)
 
-                rects, _ = _extract_rect_from_drawing(drawing, rot_mat, ox, oy, sx, sy)
-                for x0, y0, x1, y1 in rects:
-                    w = x1 - x0
-                    h = y1 - y0
-                    if not (min_px <= w <= max_px and min_px <= h <= max_px):
-                        continue
-                    aspect = max(w, h) / max(min(w, h), 1e-6)
-                    if aspect > opts.column_max_aspect_ratio:
-                        continue
-                    cx, cy = (x0 + x1) * 0.5, (y0 + y1) * 0.5
-                    if not (bx0 <= cx <= bx1 and by0 <= cy <= by1):
-                        continue
-                    if margin_ratio > 0.0 and _in_outer_border_margin("x", cx, y0, y1, bounds, margin_ratio):
-                        continue
-                    raw_candidates.append(
-                        {
-                            "cx": cx,
-                            "cy": cy,
-                            "w": w,
-                            "h": h,
-                            "x0": x0,
-                            "y0": y0,
-                            "x1": x1,
-                            "y1": y1,
-                            "source": "vector",
-                            "base_conf": 0.78,
-                        }
-                    )
+                closed_stroke_rects: list[tuple[float, float, float, float]] = []
+                short_segments: list[tuple[float, float, float, float, float]] = []
+
+                for drawing in page.get_drawings():
+                    fill = drawing.get("fill")
+                    items = drawing.get("items", [])
+                    has_curve = any(it[0] == "c" for it in items)
+                    has_explicit_rect = any(it[0] in ("re", "qu") for it in items)
+                    rects, line_segs = _extract_rect_from_drawing(drawing, rot_mat, ox, oy, sx, sy)
+
+                    # 1a. Solid filled rectangles (non-white, and non-pure-black unless any_filled)
+                    if fill is not None and not (has_curve and not has_explicit_rect):
+                        avg_rgb = _fill_brightness(fill)
+                        is_non_white = avg_rgb < 0.92
+                        is_non_black = avg_rgb >= 0.15
+                        fill_allowed = (
+                            is_non_white
+                            if opts.column_fill_mode == "any_filled"
+                            else (is_non_white and is_non_black)
+                        )
+                        if fill_allowed:
+                            for x0, y0, x1, y1 in rects:
+                                w = x1 - x0
+                                h = y1 - y0
+                                if not (min_px <= w <= max_px and min_px <= h <= max_px):
+                                    continue
+                                aspect = max(w, h) / max(min(w, h), 1e-6)
+                                if aspect > opts.column_max_aspect_ratio:
+                                    continue
+                                cx, cy = (x0 + x1) * 0.5, (y0 + y1) * 0.5
+                                if not (bx0 <= cx <= bx1 and by0 <= cy <= by1):
+                                    continue
+                                if cy >= title_block_y:
+                                    continue
+                                if margin_ratio > 0.0 and _in_outer_border_margin("x", cx, y0, y1, bounds, margin_ratio):
+                                    continue
+                                if _overlaps_text_boxes(x0, y0, x1, y1, text_boxes):
+                                    continue
+
+                                if opts.column_fill_mode == "any_filled":
+                                    inset = max(1, int(min(w, h) * 0.12))
+                                    ix0 = max(0, int(round(x0)) + inset)
+                                    iy0 = max(0, int(round(y0)) + inset)
+                                    ix1 = min(full_w, int(round(x1)) - inset)
+                                    iy1 = min(full_h, int(round(y1)) - inset)
+                                    if ix1 <= ix0 or iy1 <= iy0:
+                                        continue
+                                    if float(np.mean(full_img[iy0:iy1, ix0:ix1] < 235)) < opts.column_min_fill_ratio:
+                                        continue
+                                    fill_kind = "filled"
+                                else:
+                                    if not _verify_uniform_gray_interior(full_img, x0, y0, x1, y1):
+                                        continue
+                                    fill_kind = "gray_shaded"
+
+                                verified.append(
+                                    {
+                                        "cx": cx,
+                                        "cy": cy,
+                                        "w": w,
+                                        "h": h,
+                                        "x0": x0,
+                                        "y0": y0,
+                                        "x1": x1,
+                                        "y1": y1,
+                                        "source": "vector",
+                                        "fill_kind": fill_kind,
+                                        "base_conf": 0.83,
+                                    }
+                                )
+
+                    # 1b. Collect closed 4-corner vector rectangles & short segments for true vector hatches
+                    if opts.column_fill_mode == "shaded_or_hatched":
+                        if fill is None and not (has_curve and not has_explicit_rect):
+                            for x0, y0, x1, y1 in rects:
+                                w = x1 - x0
+                                h = y1 - y0
+                                if not (min_px <= w <= max_px and min_px <= h <= max_px):
+                                    continue
+                                aspect = max(w, h) / max(min(w, h), 1e-6)
+                                if aspect > opts.column_max_aspect_ratio:
+                                    continue
+                                cx, cy = (x0 + x1) * 0.5, (y0 + y1) * 0.5
+                                if not (bx0 <= cx <= bx1 and by0 <= cy <= by1) or cy >= title_block_y:
+                                    continue
+                                if margin_ratio > 0.0 and _in_outer_border_margin("x", cx, y0, y1, bounds, margin_ratio):
+                                    continue
+                                if _overlaps_text_boxes(x0, y0, x1, y1, text_boxes):
+                                    continue
+                                closed_stroke_rects.append((x0, y0, x1, y1))
+
+                        for lx1, ly1, lx2, ly2 in line_segs:
+                            seg_len = hypot(lx2 - lx1, ly2 - ly1)
+                            if 2.0 <= seg_len <= max_px * 1.55:
+                                mx = (lx1 + lx2) * 0.5
+                                my = (ly1 + ly2) * 0.5
+                                if bx0 <= mx <= bx1 and by0 <= my <= by1 and my < title_block_y:
+                                    short_segments.append((lx1, ly1, lx2, ly2, seg_len))
+
+                # Evaluate closed 4-corner vector rectangles that enclose >= 4 interior hatch strokes
+                if opts.column_fill_mode == "shaded_or_hatched" and closed_stroke_rects and short_segments:
+                    for x0, y0, x1, y1 in closed_stroke_rects:
+                        w = x1 - x0
+                        h = y1 - y0
+                        max_hatch_len = hypot(w, h) * 1.08
+                        tol = 1.5
+                        interior_strokes = 0
+                        for lx1, ly1, lx2, ly2, seg_len in short_segments:
+                            if seg_len > max_hatch_len:
+                                continue
+                            if (
+                                x0 - tol <= lx1 <= x1 + tol
+                                and y0 - tol <= ly1 <= y1 + tol
+                                and x0 - tol <= lx2 <= x1 + tol
+                                and y0 - tol <= ly2 <= y1 + tol
+                            ):
+                                # Exclude segments lying right on the rectangle's 4 outer border edges
+                                on_v_edge = (abs(lx1 - x0) <= 1.2 and abs(lx2 - x0) <= 1.2) or (
+                                    abs(lx1 - x1) <= 1.2 and abs(lx2 - x1) <= 1.2
+                                )
+                                on_h_edge = (abs(ly1 - y0) <= 1.2 and abs(ly2 - y0) <= 1.2) or (
+                                    abs(ly1 - y1) <= 1.2 and abs(ly2 - y1) <= 1.2
+                                )
+                                if not (on_v_edge or on_h_edge):
+                                    interior_strokes += 1
+                                    if interior_strokes >= 4:
+                                        break
+                        if interior_strokes >= 4 and _verify_vector_hatched_interior(full_img, x0, y0, x1, y1, opts):
+                            verified.append(
+                                {
+                                    "cx": (x0 + x1) * 0.5,
+                                    "cy": (y0 + y1) * 0.5,
+                                    "w": w,
+                                    "h": h,
+                                    "x0": x0,
+                                    "y0": y0,
+                                    "x1": x1,
+                                    "y1": y1,
+                                    "source": "vector",
+                                    "fill_kind": "hatched",
+                                    "base_conf": 0.82,
+                                }
+                            )
         finally:
             doc.close()
 
-    # --- 2. Raster shaded & hatched rectangle extraction (OpenCV) ---
+    # --- 2. Strict Mid-Gray Raster Path (no black pixels, no heavy closing that fuses text) ---
     rx0 = max(0, int(round(bx0)))
     ry0 = max(0, int(round(by0)))
     rx1 = min(full_w, int(round(bx1)))
@@ -678,111 +845,120 @@ def detect_shaded_hatched_columns(
     offset_x, offset_y = float(rx0), float(ry0)
 
     if crop.size > 0:
-        k_open_sz = 3 if min_px < 9.0 else 5
-        k_open = cv2.getStructuringElement(cv2.MORPH_RECT, (k_open_sz, k_open_sz))
-        k3 = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-
-        masks: list[tuple[str, np.ndarray]] = []
         if opts.column_fill_mode == "any_filled":
-            any_raw = (crop <= 225).astype(np.uint8) * 255
-            any_clean = cv2.morphologyEx(any_raw, cv2.MORPH_OPEN, k_open)
-            masks.append(("any_filled", any_clean))
+            mask_raw = (crop <= 215).astype(np.uint8) * 255
+            k_open = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+            mask = cv2.morphologyEx(mask_raw, cv2.MORPH_OPEN, k_open)
         else:
-            # Gray-shaded mask: bridge 1-2px crossing grid lines, then open thin lines away
-            gray_raw = ((crop >= 45) & (crop <= 225)).astype(np.uint8) * 255
-            gray_closed = cv2.morphologyEx(gray_raw, cv2.MORPH_CLOSE, k3)
-            gray_clean = cv2.morphologyEx(gray_closed, cv2.MORPH_OPEN, k_open)
-            masks.append(("gray", gray_clean))
+            # Strictly mid-gray pixels ONLY (60..215): physically excludes all black text, walls,
+            # outlines, and grid lines without any morphological closing!
+            mask_raw = ((crop >= 60) & (crop <= 215)).astype(np.uint8) * 255
+            k_open = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+            mask = cv2.morphologyEx(mask_raw, cv2.MORPH_OPEN, k_open)
 
-            if opts.column_fill_mode == "shaded_or_hatched":
-                non_white = (crop < 230).astype(np.uint8) * 255
-                for k_close_sz in (5, 7):
-                    k_close = cv2.getStructuringElement(cv2.MORPH_RECT, (k_close_sz, k_close_sz))
-                    fused = cv2.morphologyEx(non_white, cv2.MORPH_CLOSE, k_close)
-                    cleaned = cv2.morphologyEx(fused, cv2.MORPH_OPEN, k_open)
-                    masks.append((f"hatch_{k_close_sz}", cleaned))
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for cnt in contours:
+            area = float(cv2.contourArea(cnt))
+            if area < min_px * min_px * 0.65:
+                continue
 
-        for _, mask in masks:
-            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            for cnt in contours:
-                area = float(cv2.contourArea(cnt))
-                if area < min_px * min_px * 0.65:
-                    continue
+            bx, by, bw_box, bh_box = cv2.boundingRect(cnt)
+            bw_f, bh_f = float(bw_box), float(bh_box)
+            if not (min_px <= bw_f <= max_px and min_px <= bh_f <= max_px):
+                continue
 
-                (cx_l, cy_l), (rw, rh), _ = cv2.minAreaRect(cnt)
-                rw, rh = float(rw), float(rh)
-                if rw <= 0.0 or rh <= 0.0:
-                    continue
-                if not (min_px <= rw <= max_px and min_px <= rh <= max_px):
-                    continue
+            (cx_l, cy_l), (rw, rh), _ = cv2.minAreaRect(cnt)
+            rw, rh = float(rw), float(rh)
+            if rw <= 0.0 or rh <= 0.0:
+                continue
+            if not (min_px <= rw <= max_px and min_px <= rh <= max_px):
+                continue
 
-                aspect = max(rw, rh) / max(min(rw, rh), 1e-6)
-                if aspect > opts.column_max_aspect_ratio:
-                    continue
+            aspect = max(bw_f, bh_f) / max(min(bw_f, bh_f), 1e-6)
+            if aspect > opts.column_max_aspect_ratio:
+                continue
 
-                rectangularity = area / max(rw * rh, 1.0)
-                if rectangularity < opts.column_min_rectangularity:
-                    continue
+            rectangularity = area / max(bw_f * bh_f, 1.0)
+            min_area_rect_ratio = area / max(rw * rh, 1.0)
+            if max(rectangularity, min_area_rect_ratio) < min_rect_ratio:
+                continue
 
-                hull = cv2.convexHull(cnt)
-                hull_area = float(cv2.contourArea(hull))
-                solidity = area / max(hull_area, 1.0)
-                if solidity < 0.85:
-                    continue
+            hull = cv2.convexHull(cnt)
+            hull_area = float(cv2.contourArea(hull))
+            solidity = area / max(hull_area, 1.0)
+            if solidity < 0.88:
+                continue
 
-                peri = float(cv2.arcLength(cnt, True))
-                if peri <= 0.0:
-                    continue
-                approx = cv2.approxPolyDP(cnt, 0.025 * peri, True)
-                circularity = (4.0 * np.pi * area) / max(peri * peri, 1e-6)
-                # Prefer 4-corner quads; reject circles/hexagons/grid bubbles
-                if len(approx) > 5 or (circularity > 0.86 and len(approx) != 4):
-                    continue
+            peri = float(cv2.arcLength(cnt, True))
+            if peri <= 0.0:
+                continue
+            approx = cv2.approxPolyDP(cnt, 0.03 * peri, True)
+            circularity = (4.0 * np.pi * area) / max(peri * peri, 1e-6)
+            # Reject circles/hexagons/grid bubbles while tolerating tiny 1-2px corner notches on squares
+            if len(approx) > 6 or (circularity > 0.855 and len(approx) > 4):
+                continue
 
-                bx, by, bw_box, bh_box = cv2.boundingRect(cnt)
-                x0 = offset_x + float(bx)
-                y0 = offset_y + float(by)
-                x1 = x0 + float(bw_box)
-                y1 = y0 + float(bh_box)
-                cx = offset_x + float(cx_l)
-                cy = offset_y + float(cy_l)
-                if not (bx0 <= cx <= bx1 and by0 <= cy <= by1):
-                    continue
-                if margin_ratio > 0.0 and _in_outer_border_margin("x", cx, y0, y1, bounds, margin_ratio):
-                    continue
+            x0 = offset_x + float(bx)
+            y0 = offset_y + float(by)
+            x1 = x0 + bw_f
+            y1 = y0 + bh_f
+            cx = offset_x + float(cx_l)
+            cy = offset_y + float(cy_l)
+            if not (bx0 <= cx <= bx1 and by0 <= cy <= by1):
+                continue
+            if cy >= title_block_y:
+                continue
+            if margin_ratio > 0.0 and _in_outer_border_margin("x", cx, y0, y1, bounds, margin_ratio):
+                continue
+            if _overlaps_text_boxes(x0, y0, x1, y1, text_boxes):
+                continue
 
-                raw_candidates.append(
-                    {
-                        "cx": cx,
-                        "cy": cy,
-                        "w": float(bw_box),
-                        "h": float(bh_box),
-                        "x0": x0,
-                        "y0": y0,
-                        "x1": x1,
-                        "y1": y1,
-                        "source": "raster",
-                        "base_conf": 0.72,
-                    }
-                )
+            if opts.column_fill_mode == "any_filled":
+                inset = 1
+                ix0 = max(0, int(round(x0)) + inset)
+                iy0 = max(0, int(round(y0)) + inset)
+                ix1 = min(full_w, int(round(x1)) - inset)
+                iy1 = min(full_h, int(round(y1)) - inset)
+                if ix1 <= ix0 or iy1 <= iy0:
+                    continue
+                if float(np.mean(full_img[iy0:iy1, ix0:ix1] < 235)) < opts.column_min_fill_ratio:
+                    continue
+                fill_kind = "filled"
+            else:
+                if not _verify_uniform_gray_interior(
+                    full_img,
+                    x0,
+                    y0,
+                    x1,
+                    y1,
+                    inset_px=1,
+                    min_mid_gray_ratio=0.70,
+                    max_black_ratio=0.20,
+                    max_std_dev=35.0,
+                ):
+                    continue
+                fill_kind = "gray_shaded"
 
-    # --- 3. Strict Interior Shading / Hatch Verification on un-morphed grayscale crop ---
-    verified: list[dict] = []
-    for cand in raw_candidates:
-        ok, fill_kind, bonus = _verify_interior_shading_or_hatch(
-            full_img, cand["x0"], cand["y0"], cand["x1"], cand["y1"], opts
-        )
-        if not ok:
-            continue
-        item = dict(cand)
-        item["fill_kind"] = fill_kind
-        item["base_conf"] = min(0.83, item["base_conf"] + bonus)
-        verified.append(item)
+            verified.append(
+                {
+                    "cx": cx,
+                    "cy": cy,
+                    "w": bw_f,
+                    "h": bh_f,
+                    "x0": x0,
+                    "y0": y0,
+                    "x1": x1,
+                    "y1": y1,
+                    "source": "raster",
+                    "fill_kind": fill_kind,
+                    "base_conf": 0.78,
+                }
+            )
 
     if not verified:
         return []
 
-    # --- 4. Deduplicate overlapping vector + raster candidates ---
+    # --- 3. Deduplicate overlapping vector + raster candidates ---
     verified.sort(
         key=lambda c: (
             0 if c["source"] == "vector" else 1,
@@ -797,7 +973,7 @@ def detect_shaded_hatched_columns(
             iou = _box_iou(cand, existing)
             dist = hypot(cand["cx"] - existing["cx"], cand["cy"] - existing["cy"])
             min_side = min(min(cand["w"], cand["h"]), min(existing["w"], existing["h"]))
-            if iou > 0.4 or dist < max(min_side * 0.6, 6.0):
+            if iou > 0.35 or dist < max(min_side * 0.6, 6.0):
                 is_dup = True
                 break
         if not is_dup:
