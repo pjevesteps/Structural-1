@@ -1,6 +1,6 @@
 from enum import Enum
 from typing import Any, Literal
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, model_validator
 from ..models import ProjectState
 
 LengthUnit = Literal["mm", "cm", "m", "ft", "in"]
@@ -15,6 +15,7 @@ SheetType = Literal[
     "schedule_detail",
     "unknown",
 ]
+OpeningCategory = Literal["stairwell", "airwell", "shaft_other"]
 DetectionMethod = Literal["auto", "vector", "raster", "vlm"]
 CandidateSource = Literal["vector", "raster", "manual", "vlm"]
 
@@ -38,6 +39,19 @@ class PointPx(BaseModel):
     model_config = ConfigDict(extra="forbid")
     x_px: float
     y_px: float
+
+    @model_validator(mode="before")
+    @classmethod
+    def accept_xy_aliases(cls, value: Any):
+        if isinstance(value, dict) and "x" in value and "y" in value and "x_px" not in value and "y_px" not in value:
+            mapped = dict(value)
+            mapped["x_px"] = mapped.pop("x")
+            mapped["y_px"] = mapped.pop("y")
+            return mapped
+        return value
+
+
+Point2D = PointPx
 
 
 class PageInfo(BaseModel):
@@ -152,6 +166,7 @@ class GridCandidate(BaseModel):
     source: CandidateSource
     confidence: float = Field(ge=0.0, le=1.0, default=0.5)
     status: ReviewStatus = ReviewStatus.PENDING
+    engineer_approved: bool = False
     transferred: bool = False
     notes: str = ""
 
@@ -174,6 +189,7 @@ class ColumnCandidate(BaseModel):
     source: CandidateSource
     confidence: float = Field(ge=0.0, le=1.0, default=0.5)
     status: ReviewStatus = ReviewStatus.PENDING
+    engineer_approved: bool = False
     transferred: bool = False
     notes: str = ""
 
@@ -202,6 +218,63 @@ class LevelUpdateRequest(BaseModel):
     engineer_approved: bool | None = None
 
 
+class MasterGridLine(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    label: str = Field(min_length=1)
+    offset_m: float
+
+
+class MasterGridDefinition(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    source_region_id: str
+    source_page_number: int = Field(ge=1)
+    source_pixels_per_meter: float = Field(gt=0)
+    grid_x_m: list[MasterGridLine] = Field(default_factory=list)
+    grid_y_m: list[MasterGridLine] = Field(default_factory=list)
+
+
+class LockMasterGridRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    source_region_id: str
+
+
+class StampMasterGridRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    anchor_px: Point2D
+    clear_existing_grids: bool = True
+
+
+class DetectedOpening(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    opening_id: str
+    page_number: int = Field(ge=1)
+    region_id: str | None = None
+    floor_level: str = ""
+    category: OpeningCategory
+    label: str = Field(min_length=1)
+    polygon_px: list[Point2D] = Field(min_length=3)
+    review_status: ReviewStatus = ReviewStatus.APPROVED
+    engineer_approved: bool = True
+    transferred: bool = False
+
+
+class OpeningCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    page_number: int = Field(ge=1)
+    region_id: str | None = None
+    floor_level: str = ""
+    category: OpeningCategory
+    label: str = Field(min_length=1)
+    polygon_px: list[Point2D] = Field(min_length=3)
+    review_status: ReviewStatus = ReviewStatus.APPROVED
+    engineer_approved: bool = True
+
+
+class CopyOpeningsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    source_region_id: str
+
+
 class ExtractionOptions(BaseModel):
     model_config = ConfigDict(extra="forbid")
     border_margin_ratio: float = Field(default=0.04, ge=0.0, lt=0.45)
@@ -209,6 +282,7 @@ class ExtractionOptions(BaseModel):
     cluster_tolerance_px: float = Field(default=8.0, gt=0.0, le=100.0)
     merge_dashed_segments: bool = True
     detect_grid_labels: bool = True
+    require_grid_label: bool = True
 
 
 class ExtractRequest(BaseModel):
@@ -222,6 +296,7 @@ class ExtractRequest(BaseModel):
     cluster_tolerance_px: float | None = Field(default=None, gt=0.0, le=100.0)
     merge_dashed_segments: bool | None = None
     detect_grid_labels: bool | None = None
+    require_grid_label: bool | None = None
 
     def resolved_options(self) -> ExtractionOptions:
         base = self.options.model_dump() if self.options is not None else ExtractionOptions().model_dump()
@@ -231,6 +306,7 @@ class ExtractRequest(BaseModel):
             "cluster_tolerance_px",
             "merge_dashed_segments",
             "detect_grid_labels",
+            "require_grid_label",
         ):
             val = getattr(self, field_name)
             if val is not None:
@@ -261,6 +337,16 @@ class ManualGridRequest(BaseModel):
     coord_px: float
     status: ReviewStatus = ReviewStatus.APPROVED
     notes: str = ""
+
+
+class ManualGridTraceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    page_number: int = Field(ge=1)
+    region_id: str | None = None
+    element_type: Literal["grid_x", "grid_y"]
+    label: str = Field(min_length=1)
+    p1: Point2D
+    p2: Point2D
 
 
 class CandidateReviewUpdate(BaseModel):
@@ -307,6 +393,7 @@ class TransferRecord(BaseModel):
     y_grids_count: int = 0
     columns_count: int = 0
     levels_count: int = 0
+    openings_count: int = 0
 
 
 class ImportDocumentState(BaseModel):
@@ -321,10 +408,12 @@ class ImportDocumentState(BaseModel):
     page_count: int = Field(ge=1)
     pages: list[PageInfo]
     regions: list[PlanRegion] = Field(default_factory=list)
+    master_grid: MasterGridDefinition | None = None
     calibrations: dict[str, ScaleCalibration] = Field(default_factory=dict)
     grid_candidates: list[GridCandidate] = Field(default_factory=list)
     column_candidates: list[ColumnCandidate] = Field(default_factory=list)
     detected_levels: list[DetectedLevel] = Field(default_factory=list)
+    openings: list[DetectedOpening] = Field(default_factory=list)
     transfers: list[TransferRecord] = Field(default_factory=list)
 
 
@@ -344,6 +433,7 @@ class ImportDocumentSummary(BaseModel):
     approved_grids: int
     approved_columns: int
     approved_levels: int = 0
+    approved_openings: int = 0
     transfers_count: int
 
 
@@ -377,6 +467,15 @@ class ApplyMasterGridResponse(BaseModel):
     notice: str
 
 
+class CopyOpeningsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    document: ImportDocumentState
+    source_region_id: str
+    target_region_id: str
+    copied_openings: int
+    notice: str
+
+
 class TransferResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
     project_id: str
@@ -384,7 +483,9 @@ class TransferResponse(BaseModel):
     transferred_x_grids: int
     transferred_y_grids: int
     transferred_columns: int
+    transferred_openings: int = 0
     total_project_columns: int
+    total_project_openings: int = 0
     notice: str
     project: ProjectState
     document: ImportDocumentState

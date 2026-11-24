@@ -4,6 +4,20 @@ All notable changes to **AI Structural Engineering Office** are documented in th
 
 ## [Unreleased]
 
+### Added
+- **Precision Zoom/Pan Tracing, Master Grid Stamp, Polygon Floor Openings & Floor-to-Floor Levels**:
+  - `FloorOpening` model and `openings: list[FloorOpening]` on `ProjectState` (`backend/app/models.py`), backward-compatible with existing `data/projects/*.json` files under `extra="forbid"`.
+  - `require_grid_label: bool = True` on `ExtractionOptions` supporting prime grid labels (`1'`) and deduplicating identical-label grids per region without synthesizing fallback labels for unlabeled walls/dimension chains.
+  - Manual grid tracing (`POST /elements/manual-grid`), element deletion (`DELETE /elements/{element_id}`), and level deletion (`DELETE /levels/{level_id}`).
+  - Document-level `MasterGridDefinition` (`POST /master-grid` to lock meter offsets from a calibrated region, `POST /regions/{target_region_id}/stamp-master-grid` to stamp clean approved grids onto any floor region at a clicked `anchor_px` without auto-line scanning).
+  - Polygon floor openings (`DetectedOpening`, `POST /openings`, `DELETE /openings/{opening_id}`, `POST /regions/{target_region_id}/copy-openings`, and shoelace `area_sqm` calculation on transfer into `ProjectState.openings`).
+  - Frontend precision canvas in `frontend/src/PdfImporter.jsx`: cursor-centered mouse-wheel zoom (`0.5x–8x`), `- / 100% / + / Fit` controls, drag-to-pan (`Inspect` drag, `Space+drag`, middle-mouse drag), inverse-zoom SVG overlays, auto-incrementing manual grid tracing, **Lock as Master Grid** & **Stamp Master Grid**, 18px intersection-snapped column placement (`Shift` for off-grid), polygon opening tracing (`Stairwell`, `Airwell / Air Vent`, `Shaft / Other`) + **Copy Openings From...**, editable floor-to-floor `ΔH` levels panel, and compact Delete (`×`) controls.
+  - Added 3 unit tests in `backend/tests/test_pdf_importer.py` (`test_labeled_grids_only_drops_unlabeled_walls`, `test_floor_to_floor_elevation_filtering_only`, `test_manual_grid_master_grid_stamp_and_polygon_openings`).
+
+### Changed
+- Restricted dual-plan center viewport divider detection in `inspector.py` to `46%–56%` page width spanning `>= 80%` of active drawing height.
+- Restricted `extract_levels_from_elevation_or_section` in `detector.py` strictly to structural floor/roof framing levels (filtering out ceiling, firewall, parapet, NGL, curbs/micro-steps `< 1.50 m`) with floor-to-floor `story_height_m`.
+
 ### Fixed
 - **Real-World AutoCAD Architectural PDF Support (`inspector.py`, `detector.py`)**:
   - Transformed PyMuPDF text and vector drawing coordinates through `page.rotation_matrix` so rotated landscape sheets (e.g. `rotation=270`) align pixel-for-pixel with rendered PNGs.

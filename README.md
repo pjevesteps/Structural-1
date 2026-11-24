@@ -82,7 +82,15 @@ Connect tablet and PC to the same trusted Wi-Fi. Run `ipconfig` on Windows, then
 - `POST /api/projects/{project_id}/pdf-imports/{doc_id}/pages/{page_number}/extract` — Run vector, raster, auto, or VLM placeholder detection (with optional `ExtractionOptions` and `region_id`)
 - `POST /api/projects/{project_id}/pdf-imports/{doc_id}/pages/{page_number}/extract-levels` — Extract floor levels & story heights from elevation/section sheets
 - `PATCH /api/projects/{project_id}/pdf-imports/{doc_id}/levels/{level_id}` — Edit or approve/reject a detected floor level
+- `DELETE /api/projects/{project_id}/pdf-imports/{doc_id}/levels/{level_id}` — Remove an unwanted floor level
 - `POST /api/projects/{project_id}/pdf-imports/{doc_id}/transfer-levels` — Transfer engineer-approved floor levels into `ProjectState.levels`
+- `POST /api/projects/{project_id}/pdf-imports/{doc_id}/elements/manual-grid` — Manually trace a snapped vertical (`grid_x`) or horizontal (`grid_y`) grid line
+- `DELETE /api/projects/{project_id}/pdf-imports/{doc_id}/elements/{element_id}` — Delete a staged grid or column
+- `POST /api/projects/{project_id}/pdf-imports/{doc_id}/master-grid` — Lock approved region grids & `(0,0)` origin as the document Master Grid in meters
+- `POST /api/projects/{project_id}/pdf-imports/{doc_id}/regions/{target_region_id}/stamp-master-grid` — Stamp the locked Master Grid onto a target floor region at `anchor_px`
+- `POST /api/projects/{project_id}/pdf-imports/{doc_id}/openings` — Create a polygon floor opening (`stairwell`, `airwell`, `shaft_other`)
+- `DELETE /api/projects/{project_id}/pdf-imports/{doc_id}/openings/{opening_id}` — Delete a staged floor opening
+- `POST /api/projects/{project_id}/pdf-imports/{doc_id}/regions/{target_region_id}/copy-openings` — Copy openings across floor regions aligned by `(0,0)` origin
 - `PATCH /api/projects/{project_id}/pdf-imports/{doc_id}/regions/{region_id}` — Update floor plan region metadata or anchor `origin_px`
 - `POST /api/projects/{project_id}/pdf-imports/{doc_id}/regions/{target_region_id}/apply-master-grid` — Copy approved master grids into a target floor region and probe intersection columns
 - `POST /api/projects/{project_id}/pdf-imports/{doc_id}/candidates/columns` — Manually place a column candidate

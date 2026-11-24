@@ -8,18 +8,24 @@ from .schemas import (
     AuditEntry,
     BulkReviewRequest,
     CandidateReviewUpdate,
+    CopyOpeningsRequest,
+    CopyOpeningsResponse,
     ExtractRequest,
     ExtractionResponse,
     ImportDocumentState,
     ImportDocumentSummary,
     LevelExtractionResponse,
     LevelUpdateRequest,
+    LockMasterGridRequest,
     ManualColumnRequest,
     ManualGridRequest,
+    ManualGridTraceRequest,
+    OpeningCreateRequest,
     PageUpdateRequest,
     RegionCreateRequest,
     RegionUpdateRequest,
     ScaleCalibrationRequest,
+    StampMasterGridRequest,
     TransferLevelsRequest,
     TransferLevelsResponse,
     TransferRequest,
@@ -159,6 +165,14 @@ def update_detected_level(
         raise _handle_error(exc)
 
 
+@router.delete("/{doc_id}/levels/{level_id}", response_model=ImportDocumentState)
+def delete_detected_level(project_id: str, doc_id: str, level_id: str):
+    try:
+        return service.delete_level(project_id, doc_id, level_id)
+    except Exception as exc:
+        raise _handle_error(exc)
+
+
 @router.post("/{doc_id}/transfer-levels", response_model=TransferLevelsResponse)
 def transfer_approved_levels(
     project_id: str,
@@ -168,6 +182,38 @@ def transfer_approved_levels(
     try:
         req = payload if payload is not None else TransferLevelsRequest()
         return service.transfer_levels(project_id, doc_id, req)
+    except Exception as exc:
+        raise _handle_error(exc)
+
+
+@router.post("/{doc_id}/elements/manual-grid", response_model=ImportDocumentState)
+def add_manual_traced_grid_element(
+    project_id: str,
+    doc_id: str,
+    payload: ManualGridTraceRequest,
+):
+    try:
+        return service.add_manual_traced_grid(project_id, doc_id, payload)
+    except Exception as exc:
+        raise _handle_error(exc)
+
+
+@router.delete("/{doc_id}/elements/{element_id}", response_model=ImportDocumentState)
+def delete_staged_element(project_id: str, doc_id: str, element_id: str):
+    try:
+        return service.delete_element(project_id, doc_id, element_id)
+    except Exception as exc:
+        raise _handle_error(exc)
+
+
+@router.post("/{doc_id}/master-grid", response_model=ImportDocumentState)
+def lock_document_master_grid(
+    project_id: str,
+    doc_id: str,
+    payload: LockMasterGridRequest,
+):
+    try:
+        return service.lock_master_grid(project_id, doc_id, payload)
     except Exception as exc:
         raise _handle_error(exc)
 
@@ -210,6 +256,22 @@ def delete_plan_region(
 
 
 @router.post(
+    "/{doc_id}/regions/{target_region_id}/stamp-master-grid",
+    response_model=ImportDocumentState,
+)
+def stamp_master_grid_to_region(
+    project_id: str,
+    doc_id: str,
+    target_region_id: str,
+    payload: StampMasterGridRequest,
+):
+    try:
+        return service.stamp_master_grid(project_id, doc_id, target_region_id, payload)
+    except Exception as exc:
+        raise _handle_error(exc)
+
+
+@router.post(
     "/{doc_id}/regions/{target_region_id}/apply-master-grid",
     response_model=ApplyMasterGridResponse,
 )
@@ -221,6 +283,42 @@ def apply_master_grid_to_region(
 ):
     try:
         return service.apply_master_grid(project_id, doc_id, target_region_id, payload)
+    except Exception as exc:
+        raise _handle_error(exc)
+
+
+@router.post("/{doc_id}/openings", response_model=ImportDocumentState)
+def create_polygon_opening(
+    project_id: str,
+    doc_id: str,
+    payload: OpeningCreateRequest,
+):
+    try:
+        return service.create_opening(project_id, doc_id, payload)
+    except Exception as exc:
+        raise _handle_error(exc)
+
+
+@router.delete("/{doc_id}/openings/{opening_id}", response_model=ImportDocumentState)
+def delete_polygon_opening(project_id: str, doc_id: str, opening_id: str):
+    try:
+        return service.delete_opening(project_id, doc_id, opening_id)
+    except Exception as exc:
+        raise _handle_error(exc)
+
+
+@router.post(
+    "/{doc_id}/regions/{target_region_id}/copy-openings",
+    response_model=CopyOpeningsResponse,
+)
+def copy_region_openings(
+    project_id: str,
+    doc_id: str,
+    target_region_id: str,
+    payload: CopyOpeningsRequest,
+):
+    try:
+        return service.copy_openings(project_id, doc_id, target_region_id, payload)
     except Exception as exc:
         raise _handle_error(exc)
 

@@ -827,3 +827,282 @@ def test_spaced_text_page_override_and_region_crud(isolated_env):
     )
     assert dl.status_code == 200
     assert not any(r["region_id"] == created_reg["region_id"] for r in dl.json()["regions"])
+
+
+def test_labeled_grids_only_drops_unlabeled_walls(isolated_env):
+    """require_grid_label=True drops unlabeled walls/dimension lines while preserving labeled grids (A, 1')."""
+    client, _ = isolated_env
+    pid = "LABELED-ONLY"
+    assert client.post("/api/projects", json=_make_sample_project(pid)).status_code == 200
+
+    doc = pymupdf.open()
+    pg = doc.new_page(width=600, height=450)
+    sh = pg.new_shape()
+
+    # Labeled vertical grid "A" at x=160 pt
+    sh.draw_line(pymupdf.Point(160.0, 80.0), pymupdf.Point(160.0, 380.0))
+    sh.finish(color=(0.2, 0.2, 0.2), width=0.8)
+    pg.insert_text(pymupdf.Point(157.0, 68.0), "A", fontsize=11)
+
+    # Unlabeled interior wall vertical line at x=280 pt (NO label -> must be dropped!)
+    sh.draw_line(pymupdf.Point(280.0, 80.0), pymupdf.Point(280.0, 380.0))
+    sh.finish(color=(0.2, 0.2, 0.2), width=0.8)
+
+    # Labeled horizontal grid with prime "1'" at y=300 pt
+    sh.draw_line(pymupdf.Point(90.0, 300.0), pymupdf.Point(510.0, 300.0))
+    sh.finish(color=(0.2, 0.2, 0.2), width=0.8)
+    pg.insert_text(pymupdf.Point(68.0, 304.0), "1'", fontsize=11)
+
+    # Unlabeled horizontal dimension chain line at y=160 pt (NO label -> must be dropped!)
+    sh.draw_line(pymupdf.Point(90.0, 160.0), pymupdf.Point(510.0, 160.0))
+    sh.finish(color=(0.2, 0.2, 0.2), width=0.8)
+
+    sh.commit()
+    pdf_bytes = doc.tobytes()
+    doc.close()
+
+    up = client.post(
+        f"/api/projects/{pid}/pdf-imports",
+        files={"file": ("labeled_only.pdf", pdf_bytes, "application/pdf")},
+    )
+    assert up.status_code == 200
+    doc_id = up.json()["doc_id"]
+
+    # Default require_grid_label=True -> keeps ONLY "A" and "1'"
+    ext_strict = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/pages/1/extract",
+        json={"method": "vector", "options": {"require_grid_label": True}},
+    )
+    assert ext_strict.status_code == 200
+    assert ext_strict.json()["grids_detected"] == 2
+    labels = sorted(g["label"] for g in ext_strict.json()["document"]["grid_candidates"])
+    assert labels == ["1'", "A"]
+
+    # When require_grid_label=False -> keeps all 4 lines
+    ext_all = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/pages/1/extract",
+        json={"method": "vector", "options": {"require_grid_label": False}},
+    )
+    assert ext_all.status_code == 200
+    assert ext_all.json()["grids_detected"] == 4
+
+
+def test_floor_to_floor_elevation_filtering_only(isolated_env):
+    """
+    Elevation extraction drops NATURAL GRADE LINE, fourth floor ceiling line, FIREWALL A/B,
+    and micro-step slivers < 1.50 m, keeping ONLY structural floor-to-floor levels and computing
+    accurate story_height_m across skipped non-floor lines.
+    """
+    client, _ = isolated_env
+    pid = "FLOOR-ONLY-ELEV"
+    assert client.post("/api/projects", json=_make_sample_project(pid)).status_code == 200
+
+    doc = pymupdf.open()
+    pg = doc.new_page(width=800, height=560)
+    pg.insert_text(pymupdf.Point(300, 505), "LEFT ELEVATION", fontsize=13)
+    sh = pg.new_shape()
+
+    # Mix of structural floor levels + non-floor architectural datums
+    rows = [
+        (430.0, "BASEMENT FLOOR FINISHED LINE", "0.00 m"),
+        (375.0, "NATURAL GRADE LINE", "2.60 m"),             # MUST BE DROPPED
+        (360.0, "FIRST FLOOR FINISHED FLOOR LINE", "2.80 m"),
+        (290.0, "SECOND FLOOR FINISHED FLOOR LINE", "5.80 m"),
+        (225.0, "fourth floor ceiling line", "11.00 m"),      # MUST BE DROPPED
+        (190.0, "ROOF DECK FINISHED FLOOR LINE", "8.60 m"),
+        (140.0, "FIREWALL A", "11.40 m"),                     # MUST BE DROPPED
+        (115.0, "FIREWALL B", "12.00 m"),                     # MUST BE DROPPED
+    ]
+    for y, lbl, elev in rows:
+        sh.draw_line(pymupdf.Point(150.0, y), pymupdf.Point(650.0, y))
+        sh.finish(color=(0.2, 0.2, 0.2), width=0.9)
+        pg.insert_text(pymupdf.Point(30.0, y - 4.0), lbl, fontsize=9)
+        pg.insert_text(pymupdf.Point(665.0, y - 4.0), elev, fontsize=9)
+    sh.commit()
+    pdf_bytes = doc.tobytes()
+    doc.close()
+
+    up = client.post(
+        f"/api/projects/{pid}/pdf-imports",
+        files={"file": ("elev_filter.pdf", pdf_bytes, "application/pdf")},
+    )
+    assert up.status_code == 200
+    doc_id = up.json()["doc_id"]
+
+    ext = client.post(f"/api/projects/{pid}/pdf-imports/{doc_id}/pages/1/extract-levels")
+    assert ext.status_code == 200, ext.text
+    lvls = sorted(ext.json()["document"]["detected_levels"], key=lambda l: l["elevation_m"])
+
+    # Only the 4 structural floor levels remain
+    assert len(lvls) == 4
+    names_upper = [l["name"].upper() for l in lvls]
+    assert not any("NATURAL GRADE" in n or "CEILING" in n or "FIREWALL" in n for n in names_upper)
+    assert [l["elevation_m"] for l in lvls] == [0.0, 2.8, 5.8, 8.6]
+    assert lvls[0]["story_height_m"] is None
+    assert abs(lvls[1]["story_height_m"] - 2.8) < 1e-4
+    assert abs(lvls[2]["story_height_m"] - 3.0) < 1e-4
+    assert abs(lvls[3]["story_height_m"] - 2.8) < 1e-4
+
+
+def test_manual_grid_master_grid_stamp_and_polygon_openings(isolated_env):
+    """
+    Test:
+      1. Manual grid tracing + deleting an element
+      2. Locking Master Grid in meters from Left region and stamping onto Right region at new anchor_px
+      3. Non-rectangular polygon opening creation, copying to Right region, and transferring to
+         ProjectState.openings with accurate shoelace area_sqm and strict ProjectState validation.
+    """
+    client, data_root = isolated_env
+    pid = "MASTER-OPN"
+    assert client.post("/api/projects", json=_make_sample_project(pid)).status_code == 200
+
+    pdf_bytes = _build_architectural_multipage_set_pdf()
+    up = client.post(
+        f"/api/projects/{pid}/pdf-imports",
+        files={"file": ("arch_master.pdf", pdf_bytes, "application/pdf")},
+    )
+    assert up.status_code == 200
+    doc_state = up.json()
+    doc_id = doc_state["doc_id"]
+
+    p2 = doc_state["pages"][1]
+    sx = p2["width_px"] / p2["width_pt"]
+    sy = p2["height_px"] / p2["height_pt"]
+    # Calibrate Page 2: 180 pt = 6.0 m -> 30 pt/m (confirmed)
+    cal = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/pages/2/calibrate",
+        json={
+            "p1": {"x_px": 90.0 * sx, "y_px": 350.0 * sy},
+            "p2": {"x_px": 270.0 * sx, "y_px": 350.0 * sy},
+            "known_distance": 6.0,
+            "unit": "m",
+            "confirmed": True,
+        },
+    )
+    assert cal.status_code == 200
+
+    p2_regions = [r for r in cal.json()["regions"] if r["page_number"] == 2]
+    left_reg, right_reg = p2_regions[0], p2_regions[1]
+
+    # Set Left region origin at Grid A-1' (90, 350 pt) and floor_level
+    assert (
+        client.patch(
+            f"/api/projects/{pid}/pdf-imports/{doc_id}/regions/{left_reg['region_id']}",
+            json={"origin_px": {"x_px": 90.0 * sx, "y_px": 350.0 * sy}, "floor_level": "B1"},
+        ).status_code
+        == 200
+    )
+    assert (
+        client.patch(
+            f"/api/projects/{pid}/pdf-imports/{doc_id}/regions/{right_reg['region_id']}",
+            json={"floor_level": "1F"},
+        ).status_code
+        == 200
+    )
+
+    # 1. Manually trace grids A (x=0m), B (x=6m), 1' (y=0m), 2 (y=4m -> 350 - 120 = 230 pt) + a stray grid to delete
+    for etype, label, p1_pt, p2_pt in [
+        ("grid_x", "A", (90.0, 90.0), (90.0, 400.0)),
+        ("grid_x", "B", (270.0, 90.0), (270.0, 400.0)),
+        ("grid_y", "1'", (50.0, 350.0), (340.0, 350.0)),
+        ("grid_y", "2", (50.0, 230.0), (340.0, 230.0)),
+        ("grid_x", "TEMP", (180.0, 90.0), (180.0, 400.0)),
+    ]:
+        r = client.post(
+            f"/api/projects/{pid}/pdf-imports/{doc_id}/elements/manual-grid",
+            json={
+                "page_number": 2,
+                "region_id": left_reg["region_id"],
+                "element_type": etype,
+                "label": label,
+                "p1": {"x_px": p1_pt[0] * sx, "y_px": p1_pt[1] * sy},
+                "p2": {"x_px": p2_pt[0] * sx, "y_px": p2_pt[1] * sy},
+            },
+        )
+        assert r.status_code == 200, r.text
+
+    temp_grid = [g for g in r.json()["grid_candidates"] if g["label"] == "TEMP"][0]
+    del_res = client.delete(f"/api/projects/{pid}/pdf-imports/{doc_id}/elements/{temp_grid['id']}")
+    assert del_res.status_code == 200
+    assert not any(g["label"] == "TEMP" for g in del_res.json()["grid_candidates"])
+
+    # 2. Lock Master Grid from Left region and stamp onto Right region at anchor (490, 350 pt)
+    lock_res = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/master-grid",
+        json={"source_region_id": left_reg["region_id"]},
+    )
+    assert lock_res.status_code == 200, lock_res.text
+    mg = lock_res.json()["master_grid"]
+    assert [(g["label"], round(g["offset_m"], 2)) for g in mg["grid_x_m"]] == [("A", 0.0), ("B", 6.0)]
+    assert [(g["label"], round(g["offset_m"], 2)) for g in mg["grid_y_m"]] == [("1'", 0.0), ("2", 4.0)]
+
+    stamp_res = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/regions/{right_reg['region_id']}/stamp-master-grid",
+        json={
+            "anchor_px": {"x_px": 490.0 * sx, "y_px": 350.0 * sy},
+            "clear_existing_grids": True,
+        },
+    )
+    assert stamp_res.status_code == 200, stamp_res.text
+    right_grids = [
+        g for g in stamp_res.json()["grid_candidates"] if g["region_id"] == right_reg["region_id"]
+    ]
+    assert len(right_grids) == 4
+    rx_map = {g["label"]: g["coord_m"] for g in right_grids if g["axis"] == "x"}
+    ry_map = {g["label"]: g["coord_m"] for g in right_grids if g["axis"] == "y"}
+    assert abs(rx_map["A"] - 0.0) < 0.02
+    assert abs(rx_map["B"] - 6.0) < 0.02
+    assert abs(ry_map["1'"] - 0.0) < 0.02
+    assert abs(ry_map["2"] - 4.0) < 0.02
+
+    # 3. Trace non-rectangular L-shaped stairwell polygon in Left region:
+    #    Meters relative to (90, 350 pt) at 30 pt/m:
+    #    (0,0) -> (4,0) -> (4,2) -> (2,2) -> (2,4) -> (0,4)
+    #    Exact area = 4*2 + 2*2 = 12.0 sqm!
+    poly_m_expected = [(0.0, 0.0), (4.0, 0.0), (4.0, 2.0), (2.0, 2.0), (2.0, 4.0), (0.0, 4.0)]
+    poly_px = [
+        {"x_px": (90.0 + xm * 30.0) * sx, "y_px": (350.0 - ym * 30.0) * sy}
+        for xm, ym in poly_m_expected
+    ]
+    op_res = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/openings",
+        json={
+            "page_number": 2,
+            "region_id": left_reg["region_id"],
+            "floor_level": "B1",
+            "category": "stairwell",
+            "label": "STAIR-L",
+            "polygon_px": poly_px,
+        },
+    )
+    assert op_res.status_code == 200, op_res.text
+    assert len(op_res.json()["openings"]) == 1
+
+    # Copy openings from Left region into Right region
+    cp_res = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/regions/{right_reg['region_id']}/copy-openings",
+        json={"source_region_id": left_reg["region_id"]},
+    )
+    assert cp_res.status_code == 200, cp_res.text
+    assert cp_res.json()["copied_openings"] == 1
+
+    # Transfer Right region grids + copied opening to ProjectState
+    tx_res = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/transfer",
+        json={"page_number": 2, "region_id": right_reg["region_id"], "merge_mode": "merge"},
+    )
+    assert tx_res.status_code == 200, tx_res.text
+    tx = tx_res.json()
+    assert tx["transferred_openings"] == 1
+    assert tx["total_project_openings"] == 1
+
+    # Reload ProjectState from JSON storage and verify exact area_sqm=12.0 and strict validation
+    reloaded = ProjectState.model_validate(
+        json.loads((data_root / "projects" / f"{pid}.json").read_text(encoding="utf-8"))
+    )
+    assert len(reloaded.openings) == 1
+    opn = reloaded.openings[0]
+    assert opn.label == "STAIR-L"
+    assert opn.category == "stairwell"
+    assert opn.floor_level == "1F"
+    assert abs(opn.area_sqm - 12.0) < 0.05

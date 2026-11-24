@@ -383,7 +383,10 @@ def _detect_center_viewport_divider_x_vector(
     width_px: int,
     height_px: int,
 ) -> float | None:
-    """Detect a vertical center viewport divider from vector drawings (respecting page rotation)."""
+    """
+    Search strictly between 46% and 56% of page width for a true vertical frame divider
+    spanning >= 80% of the active drawing height (above bottom 12% title block).
+    """
     rot_mat = page.rotation_matrix
     ox = float(page.rect.x0)
     oy = float(page.rect.y0)
@@ -392,9 +395,9 @@ def _detect_center_viewport_divider_x_vector(
 
     top_y = height_px * 0.03
     usable_h = height_px * 0.88
-    min_x = width_px * 0.42
-    max_x = width_px * 0.58
-    min_div_span = (usable_h - top_y) * 0.50
+    min_x = width_px * 0.46
+    max_x = width_px * 0.56
+    min_div_span = (usable_h - top_y) * 0.80
 
     vert_segments: list[tuple[float, float, float]] = []
     for drawing in page.get_drawings():
@@ -443,10 +446,10 @@ def _detect_center_viewport_divider_x_vector(
 
 def _detect_center_viewport_divider_x_raster(png_path: Path) -> float | None:
     """
-    Scan rendered grayscale PNG columns between 42% and 58% of image width
-    (strictly above bottom 12% title block and below top 3% border).
-    If any narrow vertical band (3px window) has dark pixels covering >= 60% of the
-    active drawing height, return that band's X pixel coordinate.
+    Scan rendered grayscale PNG columns strictly between 46% and 56% of image width
+    (above bottom 12% title block and below top 3% border).
+    Require a vertical frame divider spanning >= 80% of the active drawing height so
+    interior walls or Grid E lines that stop short of the outer frame never cause a split.
     """
     if not png_path.exists():
         return None
@@ -456,13 +459,12 @@ def _detect_center_viewport_divider_x_raster(png_path: Path) -> float | None:
     ih, iw = img.shape[:2]
     y0 = int(ih * 0.03)
     y1 = int(ih * 0.88)
-    x0 = int(iw * 0.42)
-    x1 = int(iw * 0.58)
+    x0 = int(iw * 0.46)
+    x1 = int(iw * 0.56)
     if y1 <= y0 or x1 <= x0:
         return None
 
     dark = img[y0:y1, x0:x1] < 200
-    # Use a 3-pixel horizontal dilation so anti-aliased or 1-2px slightly jittered dividers register cleanly
     if dark.shape[1] >= 3:
         band_dark = dark.copy()
         band_dark[:, 1:] |= dark[:, :-1]
@@ -472,7 +474,7 @@ def _detect_center_viewport_divider_x_raster(png_path: Path) -> float | None:
 
     col_coverage = band_dark.mean(axis=0)
     best_idx = int(np.argmax(col_coverage))
-    if float(col_coverage[best_idx]) >= 0.60:
+    if float(col_coverage[best_idx]) >= 0.80:
         return float(x0 + best_idx)
     return None
 

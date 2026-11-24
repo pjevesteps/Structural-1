@@ -1,3 +1,4 @@
+from typing import Literal
 from pydantic import BaseModel, Field, ConfigDict, model_validator
 
 class MaterialProperties(BaseModel):
@@ -41,6 +42,14 @@ class Beam(BaseModel):
     depth_mm: float = Field(gt=0)
     span_m: float | None = Field(default=None, gt=0)
 
+class FloorOpening(BaseModel):
+    id: str
+    label: str
+    category: Literal["stairwell", "airwell", "shaft_other"]
+    floor_level: str = ""
+    polygon_m: list[list[float]] = Field(min_length=3)
+    area_sqm: float = Field(gt=0)
+
 class ProjectState(BaseModel):
     model_config = ConfigDict(extra="forbid")
     project_info: ProjectInfo
@@ -48,6 +57,7 @@ class ProjectState(BaseModel):
     grids: Grids = Field(default_factory=Grids)
     columns: list[Column]
     beams: list[Beam] = Field(default_factory=list)
+    openings: list[FloorOpening] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def check_references(self):

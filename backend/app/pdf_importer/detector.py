@@ -21,29 +21,52 @@ from .schemas import (
     ScaleCalibration,
 )
 
-LABEL_PATTERN = re.compile(r"^[A-Za-z0-9]{1,3}$")
+LABEL_PATTERN = re.compile(r"^[A-Za-z0-9]{1,3}'?$")
 
-LEVEL_KEYWORDS = (
-    "BASEMENT",
+NON_FLOOR_DATUM_EXCLUDE = (
+    "CEILING",
+    "FIREWALL",
+    "PARAPET",
     "NATURAL GRADE",
     "NGL",
+    "GRADE LINE",
+    "ROAD",
+    "SIDEWALK",
+    "SILL",
+    "LINTEL",
+    "COPING",
+    "RIDGE",
+    "EAVE",
+    "BUILDING HEIGHT",
+    "SCALE",
+)
+
+STRUCTURAL_FLOOR_KEYWORDS = (
+    "BASEMENT",
     "GROUND FLOOR",
     "FIRST FLOOR",
+    "1ST FLOOR",
     "SECOND FLOOR",
+    "2ND FLOOR",
     "THIRD FLOOR",
+    "3RD FLOOR",
     "FOURTH FLOOR",
+    "4TH FLOOR",
     "FIFTH FLOOR",
+    "5TH FLOOR",
     "SIXTH FLOOR",
+    "6TH FLOOR",
+    "MEZZANINE",
+    "PENTHOUSE",
     "ROOF DECK",
     "ROOF LINE",
     "ROOF BEAM",
-    "FIREWALL",
-    "PARAPET",
-    "APEX",
     "FINISHED FLOOR",
+    "FLOOR FINISHED",
     "FFL",
-    "LEVEL",
 )
+NTH_FLOOR_RE = re.compile(r"\b\d+(?:ST|ND|RD|TH)\s+FLOOR\b", re.IGNORECASE)
+MIN_STORY_STEP_M = 1.50
 
 ELEV_VALUE_RE = re.compile(
     r"(?:(?:EL\.?|ELEV\.?|FFL\.?)\s*)?([+-]?\s*\d+(?:\.\d+)?)\s*(?:m|M|mts?\.?|meters?)\b",
@@ -54,9 +77,10 @@ ELEV_PREFIX_ONLY_RE = re.compile(
     re.IGNORECASE,
 )
 LEVEL_TAG_RE = re.compile(
-    r"\b(LEVEL\s*\d+|BASEMENT(?:\s*\d+)?|NATURAL\s+GRADE|GROUND\s+FLOOR|"
-    r"FIRST\s+FLOOR|SECOND\s+FLOOR|THIRD\s+FLOOR|FOURTH\s+FLOOR|FIFTH\s+FLOOR|"
-    r"ROOF\s+DECK|ROOF\s+LINE|FIREWALL)\b",
+    r"\b(LEVEL\s*\d+|BASEMENT(?:\s*\d+)?|GROUND\s+FLOOR|"
+    r"FIRST\s+FLOOR|1ST\s+FLOOR|SECOND\s+FLOOR|2ND\s+FLOOR|THIRD\s+FLOOR|3RD\s+FLOOR|"
+    r"FOURTH\s+FLOOR|4TH\s+FLOOR|FIFTH\s+FLOOR|5TH\s+FLOOR|\d+(?:ST|ND|RD|TH)\s+FLOOR|"
+    r"MEZZANINE|PENTHOUSE|ROOF\s+DECK|ROOF\s+LINE|ROOF\s+BEAM)\b",
     re.IGNORECASE,
 )
 
@@ -239,9 +263,9 @@ def _find_grid_label(
     span_max: float,
     words: list[tuple[int, float, float, str]],
     used_word_indices: set[int],
-    endpoint_radius_px: float = 48.0,
+    endpoint_radius_px: float = 65.0,
 ) -> str | None:
-    """Match a short (1-3 char alphanumeric) grid label near either endpoint of a grid line."""
+    """Match a short (1-3 char alphanumeric, optional prime like 1') grid label near either endpoint."""
     best_idx: int | None = None
     best_label: str | None = None
     best_score = float("inf")
@@ -464,8 +488,8 @@ def detect_vector_elements(
                             horiz_segs.append((yc, clipped[0], clipped[1]))
 
         words: list[tuple[int, float, float, str]] = []
-        if opts.detect_grid_labels:
-            pad = 50.0
+        if opts.detect_grid_labels or opts.require_grid_label:
+            pad = 70.0
             for idx_w, w_item in enumerate(page.get_text("words")):
                 wr = pymupdf.Rect(w_item[:4]) * rot_mat
                 text = w_item[4]
@@ -477,7 +501,7 @@ def detect_vector_elements(
         vert_clusters = _cluster_1d(vert_segs, tol=opts.cluster_tolerance_px)
         horiz_clusters = _cluster_1d(horiz_segs, tol=opts.cluster_tolerance_px)
 
-        grids: list[GridCandidate] = []
+        raw_grids: list[tuple[float, float, GridCandidate]] = []
         used_word_indices: set[int] = set()
         used_x_labels: set[str] = set()
         x_idx = 0
@@ -489,10 +513,12 @@ def detect_vector_elements(
 
             label = (
                 _find_grid_label("x", cl["coord"], cl["min_span"], cl["max_span"], words, used_word_indices)
-                if opts.detect_grid_labels
+                if (opts.detect_grid_labels or opts.require_grid_label)
                 else None
             )
-            if not label or label in used_x_labels:
+            if not label:
+                if opts.require_grid_label:
+                    continue
                 x_idx += 1
                 label = str(x_idx)
                 while label in used_x_labels:
@@ -505,22 +531,27 @@ def detect_vector_elements(
                 coord_m, _ = px_to_plan_m(cl["coord"], cl["min_span"], calibration)
 
             is_solid = cl["max_single"] >= min_v_span * 0.75
-            grids.append(
-                GridCandidate(
-                    id=_new_id("grid"),
-                    page_number=page_info.page_number,
-                    region_id=region_id,
-                    axis="x",
-                    label=label,
-                    x1_px=round(cl["coord"], 2),
-                    y1_px=round(cl["min_span"], 2),
-                    x2_px=round(cl["coord"], 2),
-                    y2_px=round(cl["max_span"], 2),
-                    coord_px=round(cl["coord"], 2),
-                    coord_m=coord_m,
-                    source="vector",
-                    confidence=0.92 if is_solid else 0.85,
-                    status=ReviewStatus.PENDING,
+            conf = 0.92 if is_solid else 0.85
+            raw_grids.append(
+                (
+                    conf,
+                    cl["span"],
+                    GridCandidate(
+                        id=_new_id("grid"),
+                        page_number=page_info.page_number,
+                        region_id=region_id,
+                        axis="x",
+                        label=label,
+                        x1_px=round(cl["coord"], 2),
+                        y1_px=round(cl["min_span"], 2),
+                        x2_px=round(cl["coord"], 2),
+                        y2_px=round(cl["max_span"], 2),
+                        coord_px=round(cl["coord"], 2),
+                        coord_m=coord_m,
+                        source="vector",
+                        confidence=conf,
+                        status=ReviewStatus.PENDING,
+                    ),
                 )
             )
 
@@ -534,10 +565,12 @@ def detect_vector_elements(
 
             label = (
                 _find_grid_label("y", cl["coord"], cl["min_span"], cl["max_span"], words, used_word_indices)
-                if opts.detect_grid_labels
+                if (opts.detect_grid_labels or opts.require_grid_label)
                 else None
             )
-            if not label or label in used_y_labels:
+            if not label:
+                if opts.require_grid_label:
+                    continue
                 label = _index_to_letters(y_idx)
                 y_idx += 1
                 while label in used_y_labels:
@@ -550,24 +583,39 @@ def detect_vector_elements(
                 _, coord_m = px_to_plan_m(cl["min_span"], cl["coord"], calibration)
 
             is_solid = cl["max_single"] >= min_h_span * 0.75
-            grids.append(
-                GridCandidate(
-                    id=_new_id("grid"),
-                    page_number=page_info.page_number,
-                    region_id=region_id,
-                    axis="y",
-                    label=label,
-                    x1_px=round(cl["min_span"], 2),
-                    y1_px=round(cl["coord"], 2),
-                    x2_px=round(cl["max_span"], 2),
-                    y2_px=round(cl["coord"], 2),
-                    coord_px=round(cl["coord"], 2),
-                    coord_m=coord_m,
-                    source="vector",
-                    confidence=0.92 if is_solid else 0.85,
-                    status=ReviewStatus.PENDING,
+            conf = 0.92 if is_solid else 0.85
+            raw_grids.append(
+                (
+                    conf,
+                    cl["span"],
+                    GridCandidate(
+                        id=_new_id("grid"),
+                        page_number=page_info.page_number,
+                        region_id=region_id,
+                        axis="y",
+                        label=label,
+                        x1_px=round(cl["min_span"], 2),
+                        y1_px=round(cl["coord"], 2),
+                        x2_px=round(cl["max_span"], 2),
+                        y2_px=round(cl["coord"], 2),
+                        coord_px=round(cl["coord"], 2),
+                        coord_m=coord_m,
+                        source="vector",
+                        confidence=conf,
+                        status=ReviewStatus.PENDING,
+                    ),
                 )
             )
+
+        # Deduplicate grids with identical (axis, label) inside the same region by keeping highest confidence/span
+        best_by_key: dict[tuple[str, str], tuple[float, float, GridCandidate]] = {}
+        for conf, span, g in raw_grids:
+            key = (g.axis, g.label.upper())
+            existing = best_by_key.get(key)
+            if existing is None or (conf, span) > (existing[0], existing[1]):
+                best_by_key[key] = (conf, span, g)
+        grids = [item[2] for item in best_by_key.values()]
+        grids.sort(key=lambda g: (0 if g.axis == "x" else 1, g.coord_px if g.axis == "x" else -g.coord_px))
 
         deduped = _deduplicate_boxes(raw_boxes)
         deduped.sort(key=lambda b: (-round(b["cy"] / 10.0), b["cx"]))
@@ -937,10 +985,16 @@ def _parse_elevation_m(text: str) -> float | None:
     return None
 
 
-def _contains_level_keyword(upper_text: str) -> bool:
-    if "CEILING" in upper_text or "SCALE" in upper_text:
+def _is_excluded_non_floor_datum(upper_text: str) -> bool:
+    return any(ex in upper_text for ex in NON_FLOOR_DATUM_EXCLUDE)
+
+
+def _is_structural_floor_label(upper_text: str) -> bool:
+    if _is_excluded_non_floor_datum(upper_text):
         return False
-    return any(kw in upper_text for kw in LEVEL_KEYWORDS)
+    if any(kw in upper_text for kw in STRUCTURAL_FLOOR_KEYWORDS):
+        return True
+    return bool(NTH_FLOOR_RE.search(upper_text))
 
 
 def _normalize_level_tag(name: str) -> str:
@@ -957,9 +1011,11 @@ def extract_levels_from_elevation_or_section(
     page_info: PageInfo,
 ) -> tuple[list[DetectedLevel], list[str]]:
     """
-    Extract floor level datum lines (>= 45% width above bottom title block), match left-side
-    level keywords and right-side elevation values, compute story heights, and flag warnings
-    for duplicate level tags or inconsistent elevations.
+    Extract ONLY structural floor-to-floor & roof framing levels from elevation/section sheets:
+      - Ignores ceiling, firewall, parapet, natural grade/NGL, road, sidewalk, sill, lintel,
+        coping, ridge, eave, building height, and scale text.
+      - Filters micro-step non-story slivers (< 1.50 m gap from an adjacent structural floor).
+      - Sorts kept levels ascending by elevation_m and computes floor-to-floor story_height_m.
     """
     page_w = float(page_info.width_px)
     page_h = float(page_info.height_px)
@@ -999,6 +1055,11 @@ def extract_levels_from_elevation_or_section(
         for block in text_dict.get("blocks", []):
             if block.get("type") != 0:
                 continue
+            block_full_upper = " ".join(
+                str(s.get("text", "")).strip()
+                for ln in block.get("lines", [])
+                for s in ln.get("spans", [])
+            ).upper()
             for line in block.get("lines", []):
                 spans = line.get("spans", [])
                 raw = " ".join(str(s.get("text", "")).strip() for s in spans if str(s.get("text", "")).strip())
@@ -1019,6 +1080,7 @@ def extract_levels_from_elevation_or_section(
                     {
                         "text": text,
                         "upper": text.upper(),
+                        "block_upper": block_full_upper,
                         "x0": x0,
                         "y0": y0,
                         "x1": x1,
@@ -1030,7 +1092,16 @@ def extract_levels_from_elevation_or_section(
     finally:
         doc.close()
 
-    # Fallback to OpenCV horizontal lines if vector segments did not yield datum lines
+    # Mark lines stacked immediately adjacent to a "CEILING" line (e.g. "fourth floor" + "ceiling line")
+    ceiling_lines = [t for t in text_lines if "CEILING" in t["upper"]]
+    for t in text_lines:
+        t["is_ceiling_part"] = ("CEILING" in t["upper"]) or ("CEILING" in t["block_upper"])
+        if not t["is_ceiling_part"]:
+            for cln in ceiling_lines:
+                if abs(t["cy"] - cln["cy"]) <= 24.0 and abs(t["cx"] - cln["cx"]) <= page_w * 0.10:
+                    t["is_ceiling_part"] = True
+                    break
+
     datum_clusters = [
         cl
         for cl in _cluster_1d(horiz_segs, tol=6.0)
@@ -1060,12 +1131,13 @@ def extract_levels_from_elevation_or_section(
                 if cl["span"] >= min_datum_span
             ]
 
-    # Sort datum lines from bottom of sheet to top (descending y_px)
     datum_clusters.sort(key=lambda c: -c["coord"])
 
-    # Partition text lines into keyword lines (left) and elevation lines (right)
-    left_keyword_lines = [
-        t for t in text_lines if _contains_level_keyword(t["upper"]) and t["cx"] <= page_w * 0.58
+    left_all_lines = [t for t in text_lines if t["cx"] <= page_w * 0.58]
+    left_structural_lines = [
+        t
+        for t in left_all_lines
+        if not t["is_ceiling_part"] and _is_structural_floor_label(t["upper"])
     ]
     right_elev_lines = [
         (t, val)
@@ -1073,50 +1145,69 @@ def extract_levels_from_elevation_or_section(
         if (val := _parse_elevation_m(t["text"])) is not None
     ]
 
-    levels: list[DetectedLevel] = []
+    candidates: list[DetectedLevel] = []
     global_warnings: list[str] = []
-    y_match_tol = max(page_h * 0.04, 34.0)
+    y_match_tol = max(page_h * 0.032, 28.0)
 
-    # Match each datum line to nearest left-side level keyword text and right-side elevation value
     for cl in datum_clusters:
         dy_coord = cl["coord"]
-        nearby_kw = [t for t in left_keyword_lines if abs(t["cy"] - dy_coord) <= y_match_tol]
-        # Prefer right-side elevation values first, then any side near this datum line
+
+        # Check if the nearest left-side label on this datum line is explicitly a non-floor datum
+        nearby_left_all = [t for t in left_all_lines if abs(t["cy"] - dy_coord) <= y_match_tol]
+        nearby_struct = [t for t in left_structural_lines if abs(t["cy"] - dy_coord) <= y_match_tol]
+
+        # Must match a structural floor/roof framing label (never keep unlabeled or excluded datums)
+        if not nearby_struct:
+            continue
+
+        # If a non-ceiling excluded datum (e.g. NATURAL GRADE LINE / FIREWALL) sits right on this
+        # datum line while the nearest structural label is far away (> 20 px), skip this datum line.
+        closest_struct_dist = min(abs(t["cy"] - dy_coord) for t in nearby_struct)
+        excluded_closer = [
+            t
+            for t in nearby_left_all
+            if (not t["is_ceiling_part"])
+            and _is_excluded_non_floor_datum(t["upper"])
+            and closest_struct_dist > 20.0
+            and abs(t["cy"] - dy_coord) + 2.0 < closest_struct_dist
+        ]
+        if excluded_closer:
+            continue
+
+        nearby_struct.sort(key=lambda t: (abs(t["cy"] - dy_coord), t["y0"]))
+        chosen_kw: list[dict] = []
+        for t in nearby_struct:
+            if not chosen_kw:
+                chosen_kw.append(t)
+            elif abs(t["cy"] - chosen_kw[0]["cy"]) <= 20.0 and abs(t["x0"] - chosen_kw[0]["x0"]) <= page_w * 0.18:
+                chosen_kw.append(t)
+        chosen_kw.sort(key=lambda t: (t["y0"], t["x0"]))
+        name = " ".join(t["text"] for t in chosen_kw).strip()
+        name_clean = re.sub(r"\s*[+-]?\d+(?:\.\d+)?\s*(?:m|M|mts?\.?)\b.*$", "", name).strip(" -:|") or name
+        if _is_excluded_non_floor_datum(name_clean.upper()):
+            continue
+
         nearby_elev_right = [
-            (t, v) for t, v in right_elev_lines if abs(t["cy"] - dy_coord) <= y_match_tol and t["cx"] >= page_w * 0.45
+            (t, v)
+            for t, v in right_elev_lines
+            if abs(t["cy"] - dy_coord) <= y_match_tol and t["cx"] >= page_w * 0.45
         ]
         nearby_elev_any = [
             (t, v) for t, v in right_elev_lines if abs(t["cy"] - dy_coord) <= y_match_tol
         ]
-
-        if not nearby_kw and not nearby_elev_any:
-            continue
-
-        # Build level name by combining closely stacked keyword lines on the left side
-        nearby_kw.sort(key=lambda t: (abs(t["cy"] - dy_coord), t["y0"]))
-        chosen_kw: list[dict] = []
-        for t in nearby_kw:
-            if not chosen_kw:
-                chosen_kw.append(t)
-            elif abs(t["cy"] - chosen_kw[0]["cy"]) <= 22.0 and abs(t["x0"] - chosen_kw[0]["x0"]) <= page_w * 0.20:
-                chosen_kw.append(t)
-        chosen_kw.sort(key=lambda t: (t["y0"], t["x0"]))
-        name = " ".join(t["text"] for t in chosen_kw).strip() if chosen_kw else f"LEVEL @ y={round(dy_coord)}"
-        # Strip trailing elevation string if embedded in the same text block
-        name_clean = re.sub(r"\s*[+-]?\d+(?:\.\d+)?\s*(?:m|M|mts?\.?)\b.*$", "", name).strip(" -:|") or name
-
         elev_candidates = nearby_elev_right if nearby_elev_right else nearby_elev_any
         elev_candidates.sort(key=lambda item: abs(item[0]["cy"] - dy_coord))
+
         item_warnings: list[str] = []
         if elev_candidates:
             elevation_m = round(elev_candidates[0][1], 4)
-            conf = 0.90 if chosen_kw else 0.75
+            conf = 0.92
         else:
             elevation_m = 0.0
             conf = 0.55
             item_warnings.append("No elevation value matched near datum line; verify elevation_m.")
 
-        levels.append(
+        candidates.append(
             DetectedLevel(
                 level_id=_new_id("lvl"),
                 name=name_clean,
@@ -1131,7 +1222,27 @@ def extract_levels_from_elevation_or_section(
             )
         )
 
-    # Check duplicate level tags/names across detected levels
+    # Sort ascending by elevation_m (tie-break bottom-to-top by descending y_px)
+    candidates.sort(key=lambda l: (l.elevation_m, -l.y_px))
+
+    # Filter out micro-step non-story slivers (gap < 1.50 m from adjacent kept structural floor)
+    levels: list[DetectedLevel] = []
+    for cand in candidates:
+        if not levels:
+            levels.append(cand)
+            continue
+        gap = cand.elevation_m - levels[-1].elevation_m
+        if gap < MIN_STORY_STEP_M:
+            # Prefer higher-confidence or primary "FLOOR"/"ROOF DECK" label over a secondary sliver
+            prev = levels[-1]
+            cand_prio = (cand.confidence, 1 if ("FLOOR" in cand.name.upper() or "ROOF DECK" in cand.name.upper()) else 0)
+            prev_prio = (prev.confidence, 1 if ("FLOOR" in prev.name.upper() or "ROOF DECK" in prev.name.upper()) else 0)
+            if cand_prio > prev_prio:
+                levels[-1] = cand
+            continue
+        levels.append(cand)
+
+    # Check duplicate level tags across kept structural floor levels
     tag_counts: dict[str, int] = {}
     for lvl in levels:
         tag = _normalize_level_tag(lvl.name)
@@ -1145,28 +1256,19 @@ def extract_levels_from_elevation_or_section(
             if msg not in global_warnings:
                 global_warnings.append(msg)
 
-    # Compute story heights between adjacent levels (ordered bottom-to-top by y_px descending)
-    for idx in range(1, len(levels)):
-        prev_lvl = levels[idx - 1]
-        curr_lvl = levels[idx]
-        diff = round(curr_lvl.elevation_m - prev_lvl.elevation_m, 4)
-        curr_lvl.story_height_m = diff
-
-        if diff <= 0.0:
-            msg = (
-                f"Inconsistent elevation difference ({diff:+.2f} m) between "
-                f"'{prev_lvl.name}' ({prev_lvl.elevation_m} m) and '{curr_lvl.name}' ({curr_lvl.elevation_m} m)."
-            )
-            if msg not in curr_lvl.warnings:
-                curr_lvl.warnings.append(msg)
-            if msg not in global_warnings:
-                global_warnings.append(msg)
-        elif diff > 10.0:
-            msg = f"Unusually large story height ({diff:.2f} m) above '{prev_lvl.name}' — verify elevations."
-            if msg not in curr_lvl.warnings:
-                curr_lvl.warnings.append(msg)
-            if msg not in global_warnings:
-                global_warnings.append(msg)
+    # Strictly compute floor-to-floor story_height_m between consecutive kept structural levels
+    for idx, lvl in enumerate(levels):
+        if idx == 0:
+            lvl.story_height_m = None
+        else:
+            diff = round(lvl.elevation_m - levels[idx - 1].elevation_m, 4)
+            lvl.story_height_m = diff
+            if diff > 10.0:
+                msg = f"Unusually large story height ({diff:.2f} m) above '{levels[idx - 1].name}' — verify elevations."
+                if msg not in lvl.warnings:
+                    lvl.warnings.append(msg)
+                if msg not in global_warnings:
+                    global_warnings.append(msg)
 
     return levels, global_warnings
 
