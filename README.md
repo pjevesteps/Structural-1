@@ -1,9 +1,11 @@
-# AI Structural Engineering Office — Starter
+# AI Structural Engineering Office
 
-Local-first starter: React/Vite frontend + FastAPI backend + Pydantic JSON contract.
+Local-first structural engineering workspace: React/Vite frontend + FastAPI backend + strict Pydantic JSON contract (`ProjectState`, `extra="forbid"`).
+
+Repository: https://github.com/pjevesteps/Structural-1
 
 ## Safety
-This is software infrastructure, not validated structural analysis or code-compliant design. The `.std` output is geometry-only. Simulation returns a NOT_ANALYZED status and no fabricated forces or drift. Engineer review and independent verification are mandatory.
+This is software infrastructure, not validated structural analysis or code-compliant design. The `.std` output is geometry-only. Simulation returns a `NOT_ANALYZED` status with no fabricated forces or drift. Experimental VLM detection is a placeholder interface only and never fabricates elements. Engineer review, confirmed scale calibration, and independent verification are mandatory.
 
 ## Run on Windows
 Requirements: Python 3.10+, Node.js 20+, npm.
@@ -24,18 +26,64 @@ npm run dev -- --host 0.0.0.0
 ```
 Open the Vite URL printed in the terminal. API docs: http://localhost:8000/docs.
 
-## Tablet access
+## Run Tests
+```powershell
+.\.venv\Scripts\pytest.exe backend\tests\test_pdf_importer.py -v
+```
+
+## Tablet Access
 Connect tablet and PC to the same trusted Wi-Fi. Run `ipconfig` on Windows, then open `http://PC-IP:5173` on the tablet. If prompted, allow the app only on a private network. Do not expose the development server to the public internet.
 
 ## Included
-- Project schema validation and reference checks
-- JSON project storage
-- CAD plan X/Y + elevation -> STAAD X/Y/Z coordinate mapping
-- Geometry-only `.std` preview
-- Explicit placeholder simulation endpoint
-- Responsive dashboard
+
+### Phase 1 — Core Workspace & Geometry Foundation
+- Strict `ProjectState` Pydantic schema validation (`extra="forbid"`) and reference checks
+- JSON project storage in `data/projects/{project_id}.json`
+- CAD plan X/Y + elevation -> STAAD global X/Y-up/Z coordinate mapping (`backend/app/geometry.py`)
+- Geometry-only `.std` preview export (`backend/app/staad.py`)
+- Explicit placeholder simulation endpoint (`NOT_ANALYZED`)
+- Responsive dark-theme dashboard (`frontend/src/App.jsx`)
+
+### Phase 2 — PDF Plan Importer
+- Multi-page PDF upload with file size and `%PDF-` header validation
+- Immutable import storage under `data/imports/{project_id}/{doc_id}/`:
+  - `original.pdf` (immutable uploaded source)
+  - `pages/page_NNN.png` (PyMuPDF rendered page previews)
+  - `state.json` (staged calibrations, candidates, and transfer history)
+  - `audit.jsonl` (append-only audit trail)
+- Page classification (`vector`, `scanned`, `hybrid`) via PyMuPDF
+- Interactive 2-point scale calibration (`mm`, `cm`, `m`, `ft`, `in`) converting pixel coordinates to plan meters (`x_m`, `y_m`)
+- Vector grid/column detection via PyMuPDF with OpenCV (`cv2`) raster fallback for scanned pages, plus an experimental VLM placeholder interface
+- Interactive SVG overlay (`frontend/src/PdfImporter.jsx`) for calibration, detected grids/columns, click-to-place manual columns, and accept/reject review
+- Controlled transfer: only engineer-approved elements are merged/transferred into `ProjectState`, and only after scale calibration is explicitly confirmed
 
 ## API
-`GET /api/health`, `GET /api/projects`, `POST /api/projects`, `GET /api/projects/{id}`, `POST /api/projects/{id}/validate`, `POST /api/projects/{id}/staad-preview`, `POST /api/projects/{id}/simulate`.
+
+### Phase 1 Endpoints
+- `GET /api/health`
+- `GET /api/projects`
+- `POST /api/projects`
+- `GET /api/projects/{project_id}`
+- `POST /api/projects/{project_id}/validate`
+- `POST /api/projects/{project_id}/staad-preview`
+- `POST /api/projects/{project_id}/simulate`
+
+### Phase 2 PDF Importer Endpoints (`/api/projects/{project_id}/pdf-imports`)
+- `POST /api/projects/{project_id}/pdf-imports` — Upload multi-page PDF plan
+- `GET /api/projects/{project_id}/pdf-imports` — List PDF imports for project
+- `GET /api/projects/{project_id}/pdf-imports/{doc_id}` — Get staged import state
+- `GET /api/projects/{project_id}/pdf-imports/{doc_id}/audit` — Read audit trail (`audit.jsonl`)
+- `GET /api/projects/{project_id}/pdf-imports/{doc_id}/pages/{page_number}/image` — Rendered page PNG
+- `POST /api/projects/{project_id}/pdf-imports/{doc_id}/pages/{page_number}/calibrate` — Set 2-point scale calibration
+- `POST /api/projects/{project_id}/pdf-imports/{doc_id}/pages/{page_number}/confirm-calibration` — Confirm scale calibration
+- `POST /api/projects/{project_id}/pdf-imports/{doc_id}/pages/{page_number}/extract` — Run vector, raster, auto, or VLM placeholder detection
+- `POST /api/projects/{project_id}/pdf-imports/{doc_id}/candidates/columns` — Manually place a column candidate
+- `POST /api/projects/{project_id}/pdf-imports/{doc_id}/candidates/grids` — Manually place a grid candidate
+- `PATCH /api/projects/{project_id}/pdf-imports/{doc_id}/candidates/{candidate_id}` — Accept, reject, or edit a candidate
+- `POST /api/projects/{project_id}/pdf-imports/{doc_id}/candidates/bulk-review` — Bulk accept/reject candidates
+- `POST /api/projects/{project_id}/pdf-imports/{doc_id}/transfer` — Transfer approved elements to `ProjectState` (requires confirmed scale)
+
+## Documentation & History
+See [CHANGELOG.md](CHANGELOG.md) for a chronological record of changes.
 
 Next: DXF import, reviewed load assignment, validated STAAD/OpenSTAAD adapter, result extraction, independent design checks, report and drawing generation.
