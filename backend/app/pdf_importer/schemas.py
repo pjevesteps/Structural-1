@@ -18,6 +18,7 @@ SheetType = Literal[
 OpeningCategory = Literal["stairwell", "airwell", "shaft_other"]
 DetectionMethod = Literal["auto", "vector", "raster", "vlm"]
 CandidateSource = Literal["vector", "raster", "manual", "vlm"]
+ColumnFillMode = Literal["shaded_or_hatched", "gray_shaded_only", "any_filled"]
 
 
 class ReviewStatus(str, Enum):
@@ -283,6 +284,17 @@ class ExtractionOptions(BaseModel):
     merge_dashed_segments: bool = True
     detect_grid_labels: bool = True
     require_grid_label: bool = True
+    detect_grids: bool = True
+    detect_columns: bool = True
+    column_fill_mode: ColumnFillMode = "shaded_or_hatched"
+    min_column_size_m: float = Field(default=0.18, gt=0.0, le=5.0)
+    max_column_size_m: float = Field(default=1.10, gt=0.0, le=10.0)
+    column_max_aspect_ratio: float = Field(default=2.5, ge=1.0, le=10.0)
+    column_min_rectangularity: float = Field(default=0.78, gt=0.0, le=1.0)
+    column_min_fill_ratio: float = Field(default=0.35, ge=0.0, le=1.0)
+    require_near_grid: bool = False
+    column_probe_radius_px: float = Field(default=24.0, gt=0.0, le=200.0)
+    snap_columns_to_grids: bool = True
 
 
 class ExtractRequest(BaseModel):
@@ -297,6 +309,17 @@ class ExtractRequest(BaseModel):
     merge_dashed_segments: bool | None = None
     detect_grid_labels: bool | None = None
     require_grid_label: bool | None = None
+    detect_grids: bool | None = None
+    detect_columns: bool | None = None
+    column_fill_mode: ColumnFillMode | None = None
+    min_column_size_m: float | None = Field(default=None, gt=0.0, le=5.0)
+    max_column_size_m: float | None = Field(default=None, gt=0.0, le=10.0)
+    column_max_aspect_ratio: float | None = Field(default=None, ge=1.0, le=10.0)
+    column_min_rectangularity: float | None = Field(default=None, gt=0.0, le=1.0)
+    column_min_fill_ratio: float | None = Field(default=None, ge=0.0, le=1.0)
+    require_near_grid: bool | None = None
+    column_probe_radius_px: float | None = Field(default=None, gt=0.0, le=200.0)
+    snap_columns_to_grids: bool | None = None
 
     def resolved_options(self) -> ExtractionOptions:
         base = self.options.model_dump() if self.options is not None else ExtractionOptions().model_dump()
@@ -307,6 +330,17 @@ class ExtractRequest(BaseModel):
             "merge_dashed_segments",
             "detect_grid_labels",
             "require_grid_label",
+            "detect_grids",
+            "detect_columns",
+            "column_fill_mode",
+            "min_column_size_m",
+            "max_column_size_m",
+            "column_max_aspect_ratio",
+            "column_min_rectangularity",
+            "column_min_fill_ratio",
+            "require_near_grid",
+            "column_probe_radius_px",
+            "snap_columns_to_grids",
         ):
             val = getattr(self, field_name)
             if val is not None:

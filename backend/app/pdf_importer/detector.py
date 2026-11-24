@@ -17,6 +17,7 @@ from .schemas import (
     GridCandidate,
     PageInfo,
     PlanRegion,
+    PointPx,
     ReviewStatus,
     ScaleCalibration,
 )
@@ -118,11 +119,17 @@ def _estimate_column_dims_mm(
     width_px: float,
     height_px: float,
     calibration: ScaleCalibration | None,
+    pixels_per_meter: float | None = None,
 ) -> tuple[float, float]:
-    if calibration is None:
+    ppm = (
+        calibration.pixels_per_m
+        if calibration is not None
+        else (pixels_per_meter if (pixels_per_meter is not None and pixels_per_meter > 0) else None)
+    )
+    if ppm is None or ppm <= 0:
         return 400.0, 400.0
-    w_mm = width_px * calibration.meters_per_px * 1000.0
-    d_mm = height_px * calibration.meters_per_px * 1000.0
+    w_mm = (width_px / ppm) * 1000.0
+    d_mm = (height_px / ppm) * 1000.0
     if 120.0 <= w_mm <= 3000.0 and 120.0 <= d_mm <= 3000.0:
         return _round_mm(w_mm), _round_mm(d_mm)
     return 400.0, 400.0
@@ -406,14 +413,495 @@ def _extract_rect_from_drawing(
     return rects, line_segs
 
 
+def _format_grid_ref(x_label: str, y_label: str) -> str:
+    """Format intersection grid reference putting alphabetic axis first when mixed (e.g. A-1, A-1', B-3)."""
+    x_alpha = bool(re.match(r"^[A-Za-z]+'?$", x_label.strip()))
+    y_alpha = bool(re.match(r"^[A-Za-z]+'?$", y_label.strip()))
+    if x_alpha and not y_alpha:
+        return f"{x_label}-{y_label}"
+    return f"{y_label}-{x_label}"
+
+
+def _box_iou(a: dict, b: dict) -> float:
+    ix0 = max(a["x0"], b["x0"])
+    iy0 = max(a["y0"], b["y0"])
+    ix1 = min(a["x1"], b["x1"])
+    iy1 = min(a["y1"], b["y1"])
+    iw = max(0.0, ix1 - ix0)
+    ih = max(0.0, iy1 - iy0)
+    inter = iw * ih
+    if inter <= 0.0:
+        return 0.0
+    area_a = max((a["x1"] - a["x0"]) * (a["y1"] - a["y0"]), 1e-6)
+    area_b = max((b["x1"] - b["x0"]) * (b["y1"] - b["y0"]), 1e-6)
+    return inter / max(area_a + area_b - inter, 1e-6)
+
+
+def _fill_brightness(fill) -> float:
+    """Return approximate luminance in [0.0, 1.0] for a PyMuPDF drawing fill tuple."""
+    if fill is None:
+        return 1.0
+    if isinstance(fill, (int, float)):
+        return float(fill)
+    vals = [float(v) for v in fill]
+    if len(vals) == 1:
+        return vals[0]
+    if len(vals) == 3:
+        return (vals[0] + vals[1] + vals[2]) / 3.0
+    if len(vals) >= 4:
+        c, m, y, k = vals[0], vals[1], vals[2], vals[3]
+        return (1.0 - (c + m + y) / 3.0) * (1.0 - k)
+    return 1.0
+
+
+def _verify_interior_shading_or_hatch(
+    full_img: np.ndarray,
+    x0: float,
+    y0: float,
+    x1: float,
+    y1: float,
+    opts: ExtractionOptions,
+) -> tuple[bool, str, float]:
+    """
+    Strictly verify candidate interior shading/hatching on the un-morphed grayscale image.
+    Returns (accepted, fill_kind, confidence_bonus).
+    """
+    h_full, w_full = full_img.shape[:2]
+    bw = max(x1 - x0, 1.0)
+    bh = max(y1 - y0, 1.0)
+    inset = max(1, int(min(bw, bh) * 0.15))
+
+    ix0 = max(0, int(round(x0)) + inset)
+    iy0 = max(0, int(round(y0)) + inset)
+    ix1 = min(w_full, int(round(x1)) - inset)
+    iy1 = min(h_full, int(round(y1)) - inset)
+    if ix1 - ix0 < 2 or iy1 - iy0 < 2:
+        return False, "", 0.0
+
+    interior = full_img[iy0:iy1, ix0:ix1]
+    if interior.size < 4:
+        return False, "", 0.0
+
+    non_white_ratio = float(np.mean(interior < 235))
+    mean_gray = float(np.mean(interior))
+    solid_black_ratio = float(np.mean(interior < 35))
+    mid_gray_ratio = float(np.mean((interior >= 45) & (interior <= 225)))
+
+    if non_white_ratio < opts.column_min_fill_ratio:
+        return False, "", 0.0
+
+    mode = opts.column_fill_mode
+    if mode == "any_filled":
+        return True, "filled", 0.04
+
+    if mode == "gray_shaded_only":
+        iqr = float(np.percentile(interior, 75) - np.percentile(interior, 25))
+        if (
+            solid_black_ratio < 0.50
+            and 45.0 <= mean_gray <= 225.0
+            and non_white_ratio >= 0.80
+            and mid_gray_ratio >= 0.55
+            and iqr <= 28.0
+        ):
+            return True, "gray_shaded", 0.06
+        return False, "", 0.0
+
+    # Default mode: "shaded_or_hatched"
+    # Reject solid pitch-black icons (e.g. stove/appliance symbols)
+    if solid_black_ratio > 0.85:
+        return False, "", 0.0
+
+    # 1. Gray-shaded interior
+    if solid_black_ratio < 0.60 and non_white_ratio >= 0.65 and mid_gray_ratio >= 0.35:
+        return True, "gray_shaded", 0.06
+
+    # 2. Hatched interior (ANSI31 / diagonal / cross-hatched):
+    # Require repeating edge transitions spread across the interior rather than a single crossing line.
+    gx = cv2.Sobel(interior, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(interior, cv2.CV_32F, 0, 1, ksize=3)
+    mag = np.hypot(gx, gy)
+    canny = cv2.Canny(interior, 40, 120)
+    edge_density = max(float(np.mean(canny > 0)), float(np.mean(mag > 55.0)))
+
+    ih, iw = interior.shape[:2]
+    active_quads = 4
+    if ih >= 4 and iw >= 4:
+        mh, mw = ih // 2, iw // 2
+        quads = (
+            interior[:mh, :mw],
+            interior[:mh, mw:],
+            interior[mh:, :mw],
+            interior[mh:, mw:],
+        )
+        active_quads = sum(1 for q in quads if float(np.mean(q < 235)) >= 0.15)
+
+    if edge_density >= 0.16 and active_quads >= 3:
+        return True, "hatched", 0.04
+
+    return False, "", 0.0
+
+
+def _load_grayscale_image(
+    pdf_path: Path | None,
+    png_path: Path | None,
+    page_info: PageInfo,
+) -> np.ndarray | None:
+    if png_path is not None and png_path.exists():
+        img = cv2.imread(str(png_path), cv2.IMREAD_GRAYSCALE)
+        if img is not None:
+            return img
+    if pdf_path is not None and pdf_path.exists():
+        doc = pymupdf.open(pdf_path)
+        try:
+            page = doc[page_info.page_number - 1]
+            pix = page.get_pixmap(dpi=page_info.dpi, colorspace=pymupdf.csGRAY)
+            arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width).copy()
+            return arr
+        finally:
+            doc.close()
+    return None
+
+
+def detect_shaded_hatched_columns(
+    pdf_path: Path | None,
+    png_path: Path | None,
+    page_info: PageInfo,
+    calibration: ScaleCalibration | None = None,
+    options: ExtractionOptions | None = None,
+    region: PlanRegion | None = None,
+    grids: list[GridCandidate] | None = None,
+    pixels_per_meter: float | None = None,
+    origin_px: PointPx | None = None,
+    use_vector: bool = True,
+) -> list[ColumnCandidate]:
+    """
+    Dedicated hybrid vector + raster detector for ONLY shaded or hatched square/rectangular columns.
+    Rejects hollow furniture/rooms, solid pitch-black icons (in shaded_or_hatched / gray_shaded_only),
+    circles/grid bubbles, long thin walls, large earth-backfill hatches, and tiny text artifacts.
+    """
+    opts = options if options is not None else ExtractionOptions()
+    full_img = _load_grayscale_image(pdf_path, png_path, page_info)
+    if full_img is None:
+        return []
+
+    full_h, full_w = full_img.shape[:2]
+    bounds = _region_bounds(page_info, region)
+    bx0, by0, bx1, by1 = bounds
+    region_id = region.region_id if region is not None else None
+    margin_ratio = opts.border_margin_ratio if region is None else 0.0
+
+    # Resolve effective scale (pixels per meter)
+    effective_ppm: float | None = None
+    if calibration is not None and calibration.confirmed:
+        effective_ppm = calibration.pixels_per_m
+    elif pixels_per_meter is not None and pixels_per_meter > 0:
+        effective_ppm = pixels_per_meter
+    elif calibration is not None:
+        effective_ppm = calibration.pixels_per_m
+
+    if effective_ppm is not None and effective_ppm > 0:
+        min_px = max(4.0, opts.min_column_size_m * effective_ppm)
+        max_px = max(min_px + 4.0, opts.max_column_size_m * effective_ppm)
+    else:
+        min_px = 6.0
+        max_px = 45.0
+
+    effective_origin: PointPx | None = origin_px
+    if effective_origin is None:
+        if region is not None and region.origin_px is not None:
+            effective_origin = region.origin_px
+        elif calibration is not None:
+            effective_origin = calibration.origin_px
+
+    raw_candidates: list[dict] = []
+
+    # --- 1. Vector solid-shaded rectangles (PyMuPDF) ---
+    if use_vector and pdf_path is not None and pdf_path.exists():
+        doc = pymupdf.open(pdf_path)
+        try:
+            page = doc[page_info.page_number - 1]
+            rot_mat = page.rotation_matrix
+            ox = float(page.rect.x0)
+            oy = float(page.rect.y0)
+            sx = float(page_info.width_px) / max(float(page.rect.width), 1.0)
+            sy = float(page_info.height_px) / max(float(page.rect.height), 1.0)
+
+            for drawing in page.get_drawings():
+                fill = drawing.get("fill")
+                if fill is None:
+                    continue
+                if _fill_brightness(fill) >= 0.92:
+                    continue
+                items = drawing.get("items", [])
+                has_curve = any(it[0] == "c" for it in items)
+                has_explicit_rect = any(it[0] in ("re", "qu") for it in items)
+                if has_curve and not has_explicit_rect:
+                    continue
+
+                rects, _ = _extract_rect_from_drawing(drawing, rot_mat, ox, oy, sx, sy)
+                for x0, y0, x1, y1 in rects:
+                    w = x1 - x0
+                    h = y1 - y0
+                    if not (min_px <= w <= max_px and min_px <= h <= max_px):
+                        continue
+                    aspect = max(w, h) / max(min(w, h), 1e-6)
+                    if aspect > opts.column_max_aspect_ratio:
+                        continue
+                    cx, cy = (x0 + x1) * 0.5, (y0 + y1) * 0.5
+                    if not (bx0 <= cx <= bx1 and by0 <= cy <= by1):
+                        continue
+                    if margin_ratio > 0.0 and _in_outer_border_margin("x", cx, y0, y1, bounds, margin_ratio):
+                        continue
+                    raw_candidates.append(
+                        {
+                            "cx": cx,
+                            "cy": cy,
+                            "w": w,
+                            "h": h,
+                            "x0": x0,
+                            "y0": y0,
+                            "x1": x1,
+                            "y1": y1,
+                            "source": "vector",
+                            "base_conf": 0.78,
+                        }
+                    )
+        finally:
+            doc.close()
+
+    # --- 2. Raster shaded & hatched rectangle extraction (OpenCV) ---
+    rx0 = max(0, int(round(bx0)))
+    ry0 = max(0, int(round(by0)))
+    rx1 = min(full_w, int(round(bx1)))
+    ry1 = min(full_h, int(round(by1)))
+    crop = full_img[ry0:ry1, rx0:rx1]
+    offset_x, offset_y = float(rx0), float(ry0)
+
+    if crop.size > 0:
+        k_open_sz = 3 if min_px < 9.0 else 5
+        k_open = cv2.getStructuringElement(cv2.MORPH_RECT, (k_open_sz, k_open_sz))
+        k3 = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+
+        masks: list[tuple[str, np.ndarray]] = []
+        if opts.column_fill_mode == "any_filled":
+            any_raw = (crop <= 225).astype(np.uint8) * 255
+            any_clean = cv2.morphologyEx(any_raw, cv2.MORPH_OPEN, k_open)
+            masks.append(("any_filled", any_clean))
+        else:
+            # Gray-shaded mask: bridge 1-2px crossing grid lines, then open thin lines away
+            gray_raw = ((crop >= 45) & (crop <= 225)).astype(np.uint8) * 255
+            gray_closed = cv2.morphologyEx(gray_raw, cv2.MORPH_CLOSE, k3)
+            gray_clean = cv2.morphologyEx(gray_closed, cv2.MORPH_OPEN, k_open)
+            masks.append(("gray", gray_clean))
+
+            if opts.column_fill_mode == "shaded_or_hatched":
+                non_white = (crop < 230).astype(np.uint8) * 255
+                for k_close_sz in (5, 7):
+                    k_close = cv2.getStructuringElement(cv2.MORPH_RECT, (k_close_sz, k_close_sz))
+                    fused = cv2.morphologyEx(non_white, cv2.MORPH_CLOSE, k_close)
+                    cleaned = cv2.morphologyEx(fused, cv2.MORPH_OPEN, k_open)
+                    masks.append((f"hatch_{k_close_sz}", cleaned))
+
+        for _, mask in masks:
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            for cnt in contours:
+                area = float(cv2.contourArea(cnt))
+                if area < min_px * min_px * 0.65:
+                    continue
+
+                (cx_l, cy_l), (rw, rh), _ = cv2.minAreaRect(cnt)
+                rw, rh = float(rw), float(rh)
+                if rw <= 0.0 or rh <= 0.0:
+                    continue
+                if not (min_px <= rw <= max_px and min_px <= rh <= max_px):
+                    continue
+
+                aspect = max(rw, rh) / max(min(rw, rh), 1e-6)
+                if aspect > opts.column_max_aspect_ratio:
+                    continue
+
+                rectangularity = area / max(rw * rh, 1.0)
+                if rectangularity < opts.column_min_rectangularity:
+                    continue
+
+                hull = cv2.convexHull(cnt)
+                hull_area = float(cv2.contourArea(hull))
+                solidity = area / max(hull_area, 1.0)
+                if solidity < 0.85:
+                    continue
+
+                peri = float(cv2.arcLength(cnt, True))
+                if peri <= 0.0:
+                    continue
+                approx = cv2.approxPolyDP(cnt, 0.025 * peri, True)
+                circularity = (4.0 * np.pi * area) / max(peri * peri, 1e-6)
+                # Prefer 4-corner quads; reject circles/hexagons/grid bubbles
+                if len(approx) > 5 or (circularity > 0.86 and len(approx) != 4):
+                    continue
+
+                bx, by, bw_box, bh_box = cv2.boundingRect(cnt)
+                x0 = offset_x + float(bx)
+                y0 = offset_y + float(by)
+                x1 = x0 + float(bw_box)
+                y1 = y0 + float(bh_box)
+                cx = offset_x + float(cx_l)
+                cy = offset_y + float(cy_l)
+                if not (bx0 <= cx <= bx1 and by0 <= cy <= by1):
+                    continue
+                if margin_ratio > 0.0 and _in_outer_border_margin("x", cx, y0, y1, bounds, margin_ratio):
+                    continue
+
+                raw_candidates.append(
+                    {
+                        "cx": cx,
+                        "cy": cy,
+                        "w": float(bw_box),
+                        "h": float(bh_box),
+                        "x0": x0,
+                        "y0": y0,
+                        "x1": x1,
+                        "y1": y1,
+                        "source": "raster",
+                        "base_conf": 0.72,
+                    }
+                )
+
+    # --- 3. Strict Interior Shading / Hatch Verification on un-morphed grayscale crop ---
+    verified: list[dict] = []
+    for cand in raw_candidates:
+        ok, fill_kind, bonus = _verify_interior_shading_or_hatch(
+            full_img, cand["x0"], cand["y0"], cand["x1"], cand["y1"], opts
+        )
+        if not ok:
+            continue
+        item = dict(cand)
+        item["fill_kind"] = fill_kind
+        item["base_conf"] = min(0.83, item["base_conf"] + bonus)
+        verified.append(item)
+
+    if not verified:
+        return []
+
+    # --- 4. Deduplicate overlapping vector + raster candidates ---
+    verified.sort(
+        key=lambda c: (
+            0 if c["source"] == "vector" else 1,
+            -c["base_conf"],
+            -(c["w"] * c["h"]),
+        )
+    )
+    merged: list[dict] = []
+    for cand in verified:
+        is_dup = False
+        for existing in merged:
+            iou = _box_iou(cand, existing)
+            dist = hypot(cand["cx"] - existing["cx"], cand["cy"] - existing["cy"])
+            min_side = min(min(cand["w"], cand["h"]), min(existing["w"], existing["h"]))
+            if iou > 0.4 or dist < max(min_side * 0.6, 6.0):
+                is_dup = True
+                break
+        if not is_dup:
+            merged.append(cand)
+
+    merged.sort(key=lambda b: (-round(b["cy"] / 10.0), b["cx"]))
+
+    # --- 5. Grid Alignment, Confidence Boost, Optional Snapping & Filtering ---
+    active_grids = [g for g in (grids or []) if g.status != ReviewStatus.REJECTED]
+    x_grids = [g for g in active_grids if g.axis == "x"]
+    y_grids = [g for g in active_grids if g.axis == "y"]
+    probe_r = float(opts.column_probe_radius_px)
+
+    columns: list[ColumnCandidate] = []
+    for cand in merged:
+        cx = cand["cx"]
+        cy = cand["cy"]
+        w = cand["w"]
+        h = cand["h"]
+        base_conf = cand["base_conf"]
+
+        best_pair: tuple[GridCandidate, GridCandidate] | None = None
+        best_inter_dist = float("inf")
+        for gx in x_grids:
+            for gy in y_grids:
+                d = hypot(cx - gx.coord_px, cy - gy.coord_px)
+                if d <= probe_r and d < best_inter_dist:
+                    best_inter_dist = d
+                    best_pair = (gx, gy)
+
+        grid_ref = ""
+        conf = base_conf
+        near_grid = False
+
+        if best_pair is not None:
+            gx, gy = best_pair
+            near_grid = True
+            grid_ref = _format_grid_ref(gx.label, gy.label)
+            conf = min(0.98, round(base_conf + 0.15, 2))
+            if opts.snap_columns_to_grids:
+                cx = gx.coord_px
+                cy = gy.coord_px
+        else:
+            nearest_x = min(x_grids, key=lambda g: abs(g.coord_px - cx), default=None)
+            nearest_y = min(y_grids, key=lambda g: abs(g.coord_px - cy), default=None)
+            x_hit = nearest_x if (nearest_x is not None and abs(nearest_x.coord_px - cx) <= probe_r) else None
+            y_hit = nearest_y if (nearest_y is not None and abs(nearest_y.coord_px - cy) <= probe_r) else None
+            if x_hit is not None or y_hit is not None:
+                near_grid = True
+                if y_hit is not None:
+                    grid_ref = y_hit.label
+                elif x_hit is not None:
+                    grid_ref = x_hit.label
+                conf = min(0.92, round(base_conf + 0.05, 2))
+
+        if opts.require_near_grid and not near_grid:
+            continue
+
+        x_m: float | None = None
+        y_m: float | None = None
+        if effective_ppm is not None and effective_ppm > 0 and effective_origin is not None:
+            x_m = round((cx - effective_origin.x_px) / effective_ppm, 4)
+            y_m = round((effective_origin.y_px - cy) / effective_ppm, 4)
+        elif calibration is not None:
+            x_m, y_m = px_to_plan_m(cx, cy, calibration)
+
+        w_mm, d_mm = _estimate_column_dims_mm(w, h, calibration, pixels_per_meter=effective_ppm)
+        columns.append(
+            ColumnCandidate(
+                id=_new_id("col"),
+                page_number=page_info.page_number,
+                region_id=region_id,
+                column_id=f"C{len(columns) + 1}",
+                grid=grid_ref,
+                x_px=round(cx, 2),
+                y_px=round(cy, 2),
+                width_px=round(w, 2),
+                height_px=round(h, 2),
+                x_m=x_m,
+                y_m=y_m,
+                width_mm=w_mm,
+                depth_mm=d_mm,
+                source="vector" if cand["source"] == "vector" else "raster",
+                confidence=round(conf, 2),
+                status=ReviewStatus.PENDING,
+                notes=f"Detected {cand['fill_kind']} column ({round(w)}x{round(h)} px)",
+            )
+        )
+
+    return columns
+
+
 def detect_vector_elements(
     pdf_path: Path,
     page_info: PageInfo,
     calibration: ScaleCalibration | None = None,
     options: ExtractionOptions | None = None,
     region: PlanRegion | None = None,
+    png_path: Path | None = None,
+    existing_grids: list[GridCandidate] | None = None,
+    pixels_per_meter: float | None = None,
+    origin_px: PointPx | None = None,
 ) -> DetectionOutput:
-    """Extract grid lines (including merged dashed segments + endpoint labels) and columns via PyMuPDF."""
+    """Extract grid lines (including merged dashed segments + endpoint labels) and shaded/hatched columns."""
     opts = options if options is not None else ExtractionOptions()
     bounds = _region_bounds(page_info, region)
     bx0, by0, bx1, by1 = bounds
@@ -421,256 +909,224 @@ def detect_vector_elements(
     bh = max(by1 - by0, 1.0)
     region_id = region.region_id if region is not None else None
 
-    doc = pymupdf.open(pdf_path)
-    try:
-        page = doc[page_info.page_number - 1]
-        rot_mat = page.rotation_matrix
-        ox = float(page.rect.x0)
-        oy = float(page.rect.y0)
-        sx = float(page_info.width_px) / max(float(page.rect.width), 1.0)
-        sy = float(page_info.height_px) / max(float(page.rect.height), 1.0)
+    grids: list[GridCandidate] = []
+    if opts.detect_grids:
+        doc = pymupdf.open(pdf_path)
+        try:
+            page = doc[page_info.page_number - 1]
+            rot_mat = page.rotation_matrix
+            ox = float(page.rect.x0)
+            oy = float(page.rect.y0)
+            sx = float(page_info.width_px) / max(float(page.rect.width), 1.0)
+            sy = float(page_info.height_px) / max(float(page.rect.height), 1.0)
 
-        min_dim = min(bw, bh)
-        min_v_span = bh * opts.min_span_ratio
-        min_h_span = bw * opts.min_span_ratio
-        min_col_px = 5.0
-        max_col_px = min_dim * 0.14
-        min_seg_len = 2.5 if opts.merge_dashed_segments else 8.0
+            min_v_span = bh * opts.min_span_ratio
+            min_h_span = bw * opts.min_span_ratio
+            min_seg_len = 2.5 if opts.merge_dashed_segments else 8.0
 
-        vert_segs: list[tuple[float, float, float]] = []
-        horiz_segs: list[tuple[float, float, float]] = []
-        raw_boxes: list[dict] = []
+            vert_segs: list[tuple[float, float, float]] = []
+            horiz_segs: list[tuple[float, float, float]] = []
 
-        for drawing in page.get_drawings():
-            is_filled = drawing.get("fill") is not None
-            rects, line_segs = _extract_rect_from_drawing(drawing, rot_mat, ox, oy, sx, sy)
+            for drawing in page.get_drawings():
+                rects, line_segs = _extract_rect_from_drawing(drawing, rot_mat, ox, oy, sx, sy)
 
-            for x0, y0, x1, y1 in rects:
-                w = x1 - x0
-                h = y1 - y0
-                if w <= 3.5 and h >= min_seg_len:
-                    xc = (x0 + x1) * 0.5
-                    clipped = _clip_segment_to_bounds("x", xc, y0, y1, bounds)
-                    if clipped and not _in_outer_border_margin("x", xc, clipped[0], clipped[1], bounds, opts.border_margin_ratio):
-                        vert_segs.append((xc, clipped[0], clipped[1]))
-                elif h <= 3.5 and w >= min_seg_len:
-                    yc = (y0 + y1) * 0.5
-                    clipped = _clip_segment_to_bounds("y", yc, x0, x1, bounds)
-                    if clipped and not _in_outer_border_margin("y", yc, clipped[0], clipped[1], bounds, opts.border_margin_ratio):
-                        horiz_segs.append((yc, clipped[0], clipped[1]))
-                elif min_col_px <= w <= max_col_px and min_col_px <= h <= max_col_px:
-                    cx, cy = (x0 + x1) * 0.5, (y0 + y1) * 0.5
-                    if not (bx0 <= cx <= bx1 and by0 <= cy <= by1):
-                        continue
-                    if _in_outer_border_margin("x", cx, y0, y1, bounds, opts.border_margin_ratio):
-                        continue
-                    ratio = w / max(h, 1e-6)
-                    if 0.25 <= ratio <= 4.0:
-                        raw_boxes.append({"cx": cx, "cy": cy, "w": w, "h": h, "filled": is_filled})
-
-            for x1, y1, x2, y2 in line_segs:
-                dx = abs(x2 - x1)
-                dy = abs(y2 - y1)
-                length = hypot(dx, dy)
-                if length < min_seg_len:
-                    continue
-                if dx <= max(2.0, length * 0.025):
-                    xc = (x1 + x2) * 0.5
-                    clipped = _clip_segment_to_bounds("x", xc, y1, y2, bounds)
-                    if clipped and (clipped[1] - clipped[0]) >= min_seg_len:
-                        if not _in_outer_border_margin("x", xc, clipped[0], clipped[1], bounds, opts.border_margin_ratio):
+                for x0, y0, x1, y1 in rects:
+                    w = x1 - x0
+                    h = y1 - y0
+                    if w <= 3.5 and h >= min_seg_len:
+                        xc = (x0 + x1) * 0.5
+                        clipped = _clip_segment_to_bounds("x", xc, y0, y1, bounds)
+                        if clipped and not _in_outer_border_margin("x", xc, clipped[0], clipped[1], bounds, opts.border_margin_ratio):
                             vert_segs.append((xc, clipped[0], clipped[1]))
-                elif dy <= max(2.0, length * 0.025):
-                    yc = (y1 + y2) * 0.5
-                    clipped = _clip_segment_to_bounds("y", yc, x1, x2, bounds)
-                    if clipped and (clipped[1] - clipped[0]) >= min_seg_len:
-                        if not _in_outer_border_margin("y", yc, clipped[0], clipped[1], bounds, opts.border_margin_ratio):
+                    elif h <= 3.5 and w >= min_seg_len:
+                        yc = (y0 + y1) * 0.5
+                        clipped = _clip_segment_to_bounds("y", yc, x0, x1, bounds)
+                        if clipped and not _in_outer_border_margin("y", yc, clipped[0], clipped[1], bounds, opts.border_margin_ratio):
                             horiz_segs.append((yc, clipped[0], clipped[1]))
 
-        words: list[tuple[int, float, float, str]] = []
-        if opts.detect_grid_labels or opts.require_grid_label:
-            pad = 70.0
-            for idx_w, w_item in enumerate(page.get_text("words")):
-                wr = pymupdf.Rect(w_item[:4]) * rot_mat
-                text = w_item[4]
-                wx = ((float(wr.x0) + float(wr.x1)) * 0.5 - ox) * sx
-                wy = ((float(wr.y0) + float(wr.y1)) * 0.5 - oy) * sy
-                if bx0 - pad <= wx <= bx1 + pad and by0 - pad <= wy <= by1 + pad:
-                    words.append((idx_w, wx, wy, str(text)))
+                for x1, y1, x2, y2 in line_segs:
+                    dx = abs(x2 - x1)
+                    dy = abs(y2 - y1)
+                    length = hypot(dx, dy)
+                    if length < min_seg_len:
+                        continue
+                    if dx <= max(2.0, length * 0.025):
+                        xc = (x1 + x2) * 0.5
+                        clipped = _clip_segment_to_bounds("x", xc, y1, y2, bounds)
+                        if clipped and (clipped[1] - clipped[0]) >= min_seg_len:
+                            if not _in_outer_border_margin("x", xc, clipped[0], clipped[1], bounds, opts.border_margin_ratio):
+                                vert_segs.append((xc, clipped[0], clipped[1]))
+                    elif dy <= max(2.0, length * 0.025):
+                        yc = (y1 + y2) * 0.5
+                        clipped = _clip_segment_to_bounds("y", yc, x1, x2, bounds)
+                        if clipped and (clipped[1] - clipped[0]) >= min_seg_len:
+                            if not _in_outer_border_margin("y", yc, clipped[0], clipped[1], bounds, opts.border_margin_ratio):
+                                horiz_segs.append((yc, clipped[0], clipped[1]))
 
-        vert_clusters = _cluster_1d(vert_segs, tol=opts.cluster_tolerance_px)
-        horiz_clusters = _cluster_1d(horiz_segs, tol=opts.cluster_tolerance_px)
+            words: list[tuple[int, float, float, str]] = []
+            if opts.detect_grid_labels or opts.require_grid_label:
+                pad = 70.0
+                for idx_w, w_item in enumerate(page.get_text("words")):
+                    wr = pymupdf.Rect(w_item[:4]) * rot_mat
+                    text = w_item[4]
+                    wx = ((float(wr.x0) + float(wr.x1)) * 0.5 - ox) * sx
+                    wy = ((float(wr.y0) + float(wr.y1)) * 0.5 - oy) * sy
+                    if bx0 - pad <= wx <= bx1 + pad and by0 - pad <= wy <= by1 + pad:
+                        words.append((idx_w, wx, wy, str(text)))
 
-        raw_grids: list[tuple[float, float, GridCandidate]] = []
-        used_word_indices: set[int] = set()
-        used_x_labels: set[str] = set()
-        x_idx = 0
-        for cl in sorted(vert_clusters, key=lambda c: c["coord"]):
-            if not _cluster_qualifies_as_grid(cl, min_v_span, opts.merge_dashed_segments):
-                continue
-            if _in_outer_border_margin("x", cl["coord"], cl["min_span"], cl["max_span"], bounds, opts.border_margin_ratio):
-                continue
+            vert_clusters = _cluster_1d(vert_segs, tol=opts.cluster_tolerance_px)
+            horiz_clusters = _cluster_1d(horiz_segs, tol=opts.cluster_tolerance_px)
 
-            label = (
-                _find_grid_label("x", cl["coord"], cl["min_span"], cl["max_span"], words, used_word_indices)
-                if (opts.detect_grid_labels or opts.require_grid_label)
-                else None
-            )
-            if not label:
-                if opts.require_grid_label:
+            raw_grids: list[tuple[float, float, GridCandidate]] = []
+            used_word_indices: set[int] = set()
+            used_x_labels: set[str] = set()
+            x_idx = 0
+            for cl in sorted(vert_clusters, key=lambda c: c["coord"]):
+                if not _cluster_qualifies_as_grid(cl, min_v_span, opts.merge_dashed_segments):
                     continue
-                x_idx += 1
-                label = str(x_idx)
-                while label in used_x_labels:
+                if _in_outer_border_margin("x", cl["coord"], cl["min_span"], cl["max_span"], bounds, opts.border_margin_ratio):
+                    continue
+
+                label = (
+                    _find_grid_label("x", cl["coord"], cl["min_span"], cl["max_span"], words, used_word_indices)
+                    if (opts.detect_grid_labels or opts.require_grid_label)
+                    else None
+                )
+                if not label:
+                    if opts.require_grid_label:
+                        continue
                     x_idx += 1
                     label = str(x_idx)
-            used_x_labels.add(label)
+                    while label in used_x_labels:
+                        x_idx += 1
+                        label = str(x_idx)
+                used_x_labels.add(label)
 
-            coord_m = None
-            if calibration is not None:
-                coord_m, _ = px_to_plan_m(cl["coord"], cl["min_span"], calibration)
+                coord_m = None
+                if calibration is not None:
+                    coord_m, _ = px_to_plan_m(cl["coord"], cl["min_span"], calibration)
 
-            is_solid = cl["max_single"] >= min_v_span * 0.75
-            conf = 0.92 if is_solid else 0.85
-            raw_grids.append(
-                (
-                    conf,
-                    cl["span"],
-                    GridCandidate(
-                        id=_new_id("grid"),
-                        page_number=page_info.page_number,
-                        region_id=region_id,
-                        axis="x",
-                        label=label,
-                        x1_px=round(cl["coord"], 2),
-                        y1_px=round(cl["min_span"], 2),
-                        x2_px=round(cl["coord"], 2),
-                        y2_px=round(cl["max_span"], 2),
-                        coord_px=round(cl["coord"], 2),
-                        coord_m=coord_m,
-                        source="vector",
-                        confidence=conf,
-                        status=ReviewStatus.PENDING,
-                    ),
+                is_solid = cl["max_single"] >= min_v_span * 0.75
+                conf = 0.92 if is_solid else 0.85
+                raw_grids.append(
+                    (
+                        conf,
+                        cl["span"],
+                        GridCandidate(
+                            id=_new_id("grid"),
+                            page_number=page_info.page_number,
+                            region_id=region_id,
+                            axis="x",
+                            label=label,
+                            x1_px=round(cl["coord"], 2),
+                            y1_px=round(cl["min_span"], 2),
+                            x2_px=round(cl["coord"], 2),
+                            y2_px=round(cl["max_span"], 2),
+                            coord_px=round(cl["coord"], 2),
+                            coord_m=coord_m,
+                            source="vector",
+                            confidence=conf,
+                            status=ReviewStatus.PENDING,
+                        ),
+                    )
                 )
-            )
 
-        used_y_labels: set[str] = set()
-        y_idx = 0
-        for cl in sorted(horiz_clusters, key=lambda c: -c["coord"]):
-            if not _cluster_qualifies_as_grid(cl, min_h_span, opts.merge_dashed_segments):
-                continue
-            if _in_outer_border_margin("y", cl["coord"], cl["min_span"], cl["max_span"], bounds, opts.border_margin_ratio):
-                continue
-
-            label = (
-                _find_grid_label("y", cl["coord"], cl["min_span"], cl["max_span"], words, used_word_indices)
-                if (opts.detect_grid_labels or opts.require_grid_label)
-                else None
-            )
-            if not label:
-                if opts.require_grid_label:
+            used_y_labels: set[str] = set()
+            y_idx = 0
+            for cl in sorted(horiz_clusters, key=lambda c: -c["coord"]):
+                if not _cluster_qualifies_as_grid(cl, min_h_span, opts.merge_dashed_segments):
                     continue
-                label = _index_to_letters(y_idx)
-                y_idx += 1
-                while label in used_y_labels:
+                if _in_outer_border_margin("y", cl["coord"], cl["min_span"], cl["max_span"], bounds, opts.border_margin_ratio):
+                    continue
+
+                label = (
+                    _find_grid_label("y", cl["coord"], cl["min_span"], cl["max_span"], words, used_word_indices)
+                    if (opts.detect_grid_labels or opts.require_grid_label)
+                    else None
+                )
+                if not label:
+                    if opts.require_grid_label:
+                        continue
                     label = _index_to_letters(y_idx)
                     y_idx += 1
-            used_y_labels.add(label)
+                    while label in used_y_labels:
+                        label = _index_to_letters(y_idx)
+                        y_idx += 1
+                used_y_labels.add(label)
 
-            coord_m = None
-            if calibration is not None:
-                _, coord_m = px_to_plan_m(cl["min_span"], cl["coord"], calibration)
+                coord_m = None
+                if calibration is not None:
+                    _, coord_m = px_to_plan_m(cl["min_span"], cl["coord"], calibration)
 
-            is_solid = cl["max_single"] >= min_h_span * 0.75
-            conf = 0.92 if is_solid else 0.85
-            raw_grids.append(
-                (
-                    conf,
-                    cl["span"],
-                    GridCandidate(
-                        id=_new_id("grid"),
-                        page_number=page_info.page_number,
-                        region_id=region_id,
-                        axis="y",
-                        label=label,
-                        x1_px=round(cl["min_span"], 2),
-                        y1_px=round(cl["coord"], 2),
-                        x2_px=round(cl["max_span"], 2),
-                        y2_px=round(cl["coord"], 2),
-                        coord_px=round(cl["coord"], 2),
-                        coord_m=coord_m,
-                        source="vector",
-                        confidence=conf,
-                        status=ReviewStatus.PENDING,
-                    ),
+                is_solid = cl["max_single"] >= min_h_span * 0.75
+                conf = 0.92 if is_solid else 0.85
+                raw_grids.append(
+                    (
+                        conf,
+                        cl["span"],
+                        GridCandidate(
+                            id=_new_id("grid"),
+                            page_number=page_info.page_number,
+                            region_id=region_id,
+                            axis="y",
+                            label=label,
+                            x1_px=round(cl["min_span"], 2),
+                            y1_px=round(cl["coord"], 2),
+                            x2_px=round(cl["max_span"], 2),
+                            y2_px=round(cl["coord"], 2),
+                            coord_px=round(cl["coord"], 2),
+                            coord_m=coord_m,
+                            source="vector",
+                            confidence=conf,
+                            status=ReviewStatus.PENDING,
+                        ),
+                    )
                 )
-            )
 
-        # Deduplicate grids with identical (axis, label) inside the same region by keeping highest confidence/span
-        best_by_key: dict[tuple[str, str], tuple[float, float, GridCandidate]] = {}
-        for conf, span, g in raw_grids:
-            key = (g.axis, g.label.upper())
-            existing = best_by_key.get(key)
-            if existing is None or (conf, span) > (existing[0], existing[1]):
-                best_by_key[key] = (conf, span, g)
-        grids = [item[2] for item in best_by_key.values()]
-        grids.sort(key=lambda g: (0 if g.axis == "x" else 1, g.coord_px if g.axis == "x" else -g.coord_px))
+            best_by_key: dict[tuple[str, str], tuple[float, float, GridCandidate]] = {}
+            for conf, span, g in raw_grids:
+                key = (g.axis, g.label.upper())
+                existing = best_by_key.get(key)
+                if existing is None or (conf, span) > (existing[0], existing[1]):
+                    best_by_key[key] = (conf, span, g)
+            grids = [item[2] for item in best_by_key.values()]
+            grids.sort(key=lambda g: (0 if g.axis == "x" else 1, g.coord_px if g.axis == "x" else -g.coord_px))
+        finally:
+            doc.close()
 
-        deduped = _deduplicate_boxes(raw_boxes)
-        deduped.sort(key=lambda b: (-round(b["cy"] / 10.0), b["cx"]))
-
-        columns: list[ColumnCandidate] = []
-        for idx, box in enumerate(deduped, start=1):
-            tol = max(max(box["w"], box["h"]) * 0.9, 14.0)
-            grid_ref, on_intersection = _assign_grid_ref(box["cx"], box["cy"], grids, tol)
-            x_m, y_m = (None, None)
-            if calibration is not None:
-                x_m, y_m = px_to_plan_m(box["cx"], box["cy"], calibration)
-            w_mm, d_mm = _estimate_column_dims_mm(box["w"], box["h"], calibration)
-
-            if box["filled"] and on_intersection:
-                conf = 0.93
-            elif on_intersection:
-                conf = 0.85
-            elif box["filled"]:
-                conf = 0.78
-            else:
-                conf = 0.65
-
-            columns.append(
-                ColumnCandidate(
-                    id=_new_id("col"),
-                    page_number=page_info.page_number,
-                    region_id=region_id,
-                    column_id=f"C{idx}",
-                    grid=grid_ref,
-                    x_px=round(box["cx"], 2),
-                    y_px=round(box["cy"], 2),
-                    width_px=round(box["w"], 2),
-                    height_px=round(box["h"], 2),
-                    x_m=x_m,
-                    y_m=y_m,
-                    width_mm=w_mm,
-                    depth_mm=d_mm,
-                    source="vector",
-                    confidence=conf,
-                    status=ReviewStatus.PENDING,
-                )
-            )
-
-        scope_label = f" in region '{region.name}'" if region is not None else ""
-        return DetectionOutput(
-            method_used="vector",
-            grids=grids,
-            columns=columns,
-            notice=(
-                f"Vector extraction{scope_label} found {len(grids)} grid line(s) and {len(columns)} column candidate(s). "
-                "Engineer review is required before transfer."
-            ),
+    snap_grids = grids if opts.detect_grids and grids else (existing_grids or [])
+    columns: list[ColumnCandidate] = []
+    if opts.detect_columns:
+        columns = detect_shaded_hatched_columns(
+            pdf_path=pdf_path,
+            png_path=png_path,
+            page_info=page_info,
+            calibration=calibration,
+            options=opts,
+            region=region,
+            grids=snap_grids,
+            pixels_per_meter=pixels_per_meter,
+            origin_px=origin_px,
+            use_vector=True,
         )
-    finally:
-        doc.close()
+
+    scope_label = f" in region '{region.name}'" if region is not None else ""
+    if not opts.detect_grids and opts.detect_columns:
+        notice = (
+            f"Shaded/hatched column scan{scope_label} ({opts.column_fill_mode}) found "
+            f"{len(columns)} column candidate(s); existing grids preserved."
+        )
+    else:
+        notice = (
+            f"Vector extraction{scope_label} found {len(grids)} grid line(s) and {len(columns)} column candidate(s). "
+            "Engineer review is required before transfer."
+        )
+    return DetectionOutput(
+        method_used="vector",
+        grids=grids,
+        columns=columns,
+        notice=notice,
+    )
 
 
 def detect_raster_elements(
@@ -679,8 +1135,11 @@ def detect_raster_elements(
     calibration: ScaleCalibration | None = None,
     options: ExtractionOptions | None = None,
     region: PlanRegion | None = None,
+    existing_grids: list[GridCandidate] | None = None,
+    pixels_per_meter: float | None = None,
+    origin_px: PointPx | None = None,
 ) -> DetectionOutput:
-    """OpenCV raster fallback detector with border margin exclusion and colinear dashed-segment merging."""
+    """OpenCV raster fallback detector with border margin exclusion, dashed-grid merging, and shaded/hatched column scanning."""
     opts = options if options is not None else ExtractionOptions()
     full_img = cv2.imread(str(png_path), cv2.IMREAD_GRAYSCALE)
     if full_img is None:
@@ -700,191 +1159,150 @@ def detect_raster_elements(
         offset_x, offset_y = 0.0, 0.0
         region_id = None
 
-    h_img, w_img = img.shape[:2]
-    bounds = (offset_x, offset_y, offset_x + float(w_img), offset_y + float(h_img))
-    min_dim = min(float(w_img), float(h_img))
-    min_v_span = float(h_img) * opts.min_span_ratio
-    min_h_span = float(w_img) * opts.min_span_ratio
-
-    blurred = cv2.GaussianBlur(img, (3, 3), 0)
-    edges = cv2.Canny(blurred, 50, 150, apertureSize=3)
-
-    if opts.merge_dashed_segments:
-        hough_min_len = max(12, int(min_dim * 0.018))
-        hough_threshold = 22
-        hough_max_gap = 22
-    else:
-        hough_min_len = max(int(min_dim * opts.min_span_ratio * 0.8), 60)
-        hough_threshold = 60
-        hough_max_gap = 18
-
-    raw_lines = cv2.HoughLinesP(
-        edges,
-        rho=1,
-        theta=np.pi / 180.0,
-        threshold=hough_threshold,
-        minLineLength=hough_min_len,
-        maxLineGap=hough_max_gap,
-    )
-
-    vert_segs: list[tuple[float, float, float]] = []
-    horiz_segs: list[tuple[float, float, float]] = []
-    if raw_lines is not None:
-        for line in np.asarray(raw_lines).reshape(-1, 4):
-            x1, y1, x2, y2 = [float(v) for v in line]
-            dx = abs(x2 - x1)
-            dy = abs(y2 - y1)
-            length = hypot(dx, dy)
-            if length < hough_min_len:
-                continue
-            gx1, gy1, gx2, gy2 = x1 + offset_x, y1 + offset_y, x2 + offset_x, y2 + offset_y
-            if dx <= max(3.0, length * 0.025):
-                xc = (gx1 + gx2) * 0.5
-                ys, ye = min(gy1, gy2), max(gy1, gy2)
-                if not _in_outer_border_margin("x", xc, ys, ye, bounds, opts.border_margin_ratio):
-                    vert_segs.append((xc, ys, ye))
-            elif dy <= max(3.0, length * 0.025):
-                yc = (gy1 + gy2) * 0.5
-                xs, xe = min(gx1, gx2), max(gx1, gx2)
-                if not _in_outer_border_margin("y", yc, xs, xe, bounds, opts.border_margin_ratio):
-                    horiz_segs.append((yc, xs, xe))
-
-    vert_clusters = _cluster_1d(vert_segs, tol=opts.cluster_tolerance_px)
-    horiz_clusters = _cluster_1d(horiz_segs, tol=opts.cluster_tolerance_px)
-
     grids: list[GridCandidate] = []
-    x_idx = 0
-    for cl in sorted(vert_clusters, key=lambda c: c["coord"]):
-        if not _cluster_qualifies_as_grid(cl, min_v_span, opts.merge_dashed_segments):
-            continue
-        if _in_outer_border_margin("x", cl["coord"], cl["min_span"], cl["max_span"], bounds, opts.border_margin_ratio):
-            continue
-        x_idx += 1
-        coord_m = None
-        if calibration is not None:
-            coord_m, _ = px_to_plan_m(cl["coord"], cl["min_span"], calibration)
-        grids.append(
-            GridCandidate(
-                id=_new_id("grid"),
-                page_number=page_info.page_number,
-                region_id=region_id,
-                axis="x",
-                label=str(x_idx),
-                x1_px=round(cl["coord"], 2),
-                y1_px=round(cl["min_span"], 2),
-                x2_px=round(cl["coord"], 2),
-                y2_px=round(cl["max_span"], 2),
-                coord_px=round(cl["coord"], 2),
-                coord_m=coord_m,
-                source="raster",
-                confidence=0.72,
-                status=ReviewStatus.PENDING,
-            )
+    if opts.detect_grids:
+        h_img, w_img = img.shape[:2]
+        bounds = (offset_x, offset_y, offset_x + float(w_img), offset_y + float(h_img))
+        min_dim = min(float(w_img), float(h_img))
+        min_v_span = float(h_img) * opts.min_span_ratio
+        min_h_span = float(w_img) * opts.min_span_ratio
+
+        blurred = cv2.GaussianBlur(img, (3, 3), 0)
+        edges = cv2.Canny(blurred, 50, 150, apertureSize=3)
+
+        if opts.merge_dashed_segments:
+            hough_min_len = max(12, int(min_dim * 0.018))
+            hough_threshold = 22
+            hough_max_gap = 22
+        else:
+            hough_min_len = max(int(min_dim * opts.min_span_ratio * 0.8), 60)
+            hough_threshold = 60
+            hough_max_gap = 18
+
+        raw_lines = cv2.HoughLinesP(
+            edges,
+            rho=1,
+            theta=np.pi / 180.0,
+            threshold=hough_threshold,
+            minLineLength=hough_min_len,
+            maxLineGap=hough_max_gap,
         )
 
-    y_idx = 0
-    for cl in sorted(horiz_clusters, key=lambda c: -c["coord"]):
-        if not _cluster_qualifies_as_grid(cl, min_h_span, opts.merge_dashed_segments):
-            continue
-        if _in_outer_border_margin("y", cl["coord"], cl["min_span"], cl["max_span"], bounds, opts.border_margin_ratio):
-            continue
-        label = _index_to_letters(y_idx)
-        y_idx += 1
-        coord_m = None
-        if calibration is not None:
-            _, coord_m = px_to_plan_m(cl["min_span"], cl["coord"], calibration)
-        grids.append(
-            GridCandidate(
-                id=_new_id("grid"),
-                page_number=page_info.page_number,
-                region_id=region_id,
-                axis="y",
-                label=label,
-                x1_px=round(cl["min_span"], 2),
-                y1_px=round(cl["coord"], 2),
-                x2_px=round(cl["max_span"], 2),
-                y2_px=round(cl["coord"], 2),
-                coord_px=round(cl["coord"], 2),
-                coord_m=coord_m,
-                source="raster",
-                confidence=0.72,
-                status=ReviewStatus.PENDING,
+        vert_segs: list[tuple[float, float, float]] = []
+        horiz_segs: list[tuple[float, float, float]] = []
+        if raw_lines is not None:
+            for line in np.asarray(raw_lines).reshape(-1, 4):
+                x1, y1, x2, y2 = [float(v) for v in line]
+                dx = abs(x2 - x1)
+                dy = abs(y2 - y1)
+                length = hypot(dx, dy)
+                if length < hough_min_len:
+                    continue
+                gx1, gy1, gx2, gy2 = x1 + offset_x, y1 + offset_y, x2 + offset_x, y2 + offset_y
+                if dx <= max(3.0, length * 0.025):
+                    xc = (gx1 + gx2) * 0.5
+                    ys, ye = min(gy1, gy2), max(gy1, gy2)
+                    if not _in_outer_border_margin("x", xc, ys, ye, bounds, opts.border_margin_ratio):
+                        vert_segs.append((xc, ys, ye))
+                elif dy <= max(3.0, length * 0.025):
+                    yc = (gy1 + gy2) * 0.5
+                    xs, xe = min(gx1, gx2), max(gx1, gx2)
+                    if not _in_outer_border_margin("y", yc, xs, xe, bounds, opts.border_margin_ratio):
+                        horiz_segs.append((yc, xs, xe))
+
+        vert_clusters = _cluster_1d(vert_segs, tol=opts.cluster_tolerance_px)
+        horiz_clusters = _cluster_1d(horiz_segs, tol=opts.cluster_tolerance_px)
+
+        x_idx = 0
+        for cl in sorted(vert_clusters, key=lambda c: c["coord"]):
+            if not _cluster_qualifies_as_grid(cl, min_v_span, opts.merge_dashed_segments):
+                continue
+            if _in_outer_border_margin("x", cl["coord"], cl["min_span"], cl["max_span"], bounds, opts.border_margin_ratio):
+                continue
+            x_idx += 1
+            coord_m = None
+            if calibration is not None:
+                coord_m, _ = px_to_plan_m(cl["coord"], cl["min_span"], calibration)
+            grids.append(
+                GridCandidate(
+                    id=_new_id("grid"),
+                    page_number=page_info.page_number,
+                    region_id=region_id,
+                    axis="x",
+                    label=str(x_idx),
+                    x1_px=round(cl["coord"], 2),
+                    y1_px=round(cl["min_span"], 2),
+                    x2_px=round(cl["coord"], 2),
+                    y2_px=round(cl["max_span"], 2),
+                    coord_px=round(cl["coord"], 2),
+                    coord_m=coord_m,
+                    source="raster",
+                    confidence=0.72,
+                    status=ReviewStatus.PENDING,
+                )
             )
-        )
 
-    _, binary = cv2.threshold(img, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    min_col_px = 6.0
-    max_col_px = min_dim * 0.14
-    raw_boxes: list[dict] = []
+        y_idx = 0
+        for cl in sorted(horiz_clusters, key=lambda c: -c["coord"]):
+            if not _cluster_qualifies_as_grid(cl, min_h_span, opts.merge_dashed_segments):
+                continue
+            if _in_outer_border_margin("y", cl["coord"], cl["min_span"], cl["max_span"], bounds, opts.border_margin_ratio):
+                continue
+            label = _index_to_letters(y_idx)
+            y_idx += 1
+            coord_m = None
+            if calibration is not None:
+                _, coord_m = px_to_plan_m(cl["min_span"], cl["coord"], calibration)
+            grids.append(
+                GridCandidate(
+                    id=_new_id("grid"),
+                    page_number=page_info.page_number,
+                    region_id=region_id,
+                    axis="y",
+                    label=label,
+                    x1_px=round(cl["min_span"], 2),
+                    y1_px=round(cl["coord"], 2),
+                    x2_px=round(cl["max_span"], 2),
+                    y2_px=round(cl["coord"], 2),
+                    coord_px=round(cl["coord"], 2),
+                    coord_m=coord_m,
+                    source="raster",
+                    confidence=0.72,
+                    status=ReviewStatus.PENDING,
+                )
+            )
 
-    base_k = max(7, int(min_dim * 0.009) | 1)
-    for k_size in (base_k, max(5, base_k - 2)):
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k_size, k_size))
-        opened = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
-        contours, _ = cv2.findContours(opened, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-        for cnt in contours:
-            area = cv2.contourArea(cnt)
-            if area < min_col_px * min_col_px * 0.6:
-                continue
-            x, y, w, h = cv2.boundingRect(cnt)
-            wf, hf = float(w), float(h)
-            if not (min_col_px <= wf <= max_col_px and min_col_px <= hf <= max_col_px):
-                continue
-            cx, cy = offset_x + x + wf * 0.5, offset_y + y + hf * 0.5
-            if _in_outer_border_margin("x", cx, offset_y + float(y), offset_y + float(y + h), bounds, opts.border_margin_ratio):
-                continue
-            ratio = wf / max(hf, 1e-6)
-            if not (0.25 <= ratio <= 4.0):
-                continue
-            rectangularity = area / max(wf * hf, 1.0)
-            if rectangularity < 0.62:
-                continue
-            raw_boxes.append({"cx": cx, "cy": cy, "w": wf, "h": hf, "filled": True})
-        if raw_boxes:
-            break
-
-    deduped = _deduplicate_boxes(raw_boxes)
-    deduped.sort(key=lambda b: (-round(b["cy"] / 10.0), b["cx"]))
-
+    snap_grids = grids if opts.detect_grids and grids else (existing_grids or [])
     columns: list[ColumnCandidate] = []
-    for idx, box in enumerate(deduped, start=1):
-        tol = max(max(box["w"], box["h"]) * 1.1, 18.0)
-        grid_ref, on_intersection = _assign_grid_ref(box["cx"], box["cy"], grids, tol)
-        x_m, y_m = (None, None)
-        if calibration is not None:
-            x_m, y_m = px_to_plan_m(box["cx"], box["cy"], calibration)
-        w_mm, d_mm = _estimate_column_dims_mm(box["w"], box["h"], calibration)
-
-        columns.append(
-            ColumnCandidate(
-                id=_new_id("col"),
-                page_number=page_info.page_number,
-                region_id=region_id,
-                column_id=f"C{idx}",
-                grid=grid_ref,
-                x_px=round(box["cx"], 2),
-                y_px=round(box["cy"], 2),
-                width_px=round(box["w"], 2),
-                height_px=round(box["h"], 2),
-                x_m=x_m,
-                y_m=y_m,
-                width_mm=w_mm,
-                depth_mm=d_mm,
-                source="raster",
-                confidence=0.76 if on_intersection else 0.62,
-                status=ReviewStatus.PENDING,
-            )
+    if opts.detect_columns:
+        columns = detect_shaded_hatched_columns(
+            pdf_path=None,
+            png_path=png_path,
+            page_info=page_info,
+            calibration=calibration,
+            options=opts,
+            region=region,
+            grids=snap_grids,
+            pixels_per_meter=pixels_per_meter,
+            origin_px=origin_px,
+            use_vector=False,
         )
 
+    if not opts.detect_grids and opts.detect_columns:
+        notice = (
+            f"Raster shaded/hatched column scan ({opts.column_fill_mode}) found "
+            f"{len(columns)} column candidate(s); existing grids preserved."
+        )
+    else:
+        notice = (
+            f"OpenCV raster extraction found {len(grids)} grid line(s) and {len(columns)} column candidate(s). "
+            "Raster detections are approximate and require engineer verification."
+        )
     return DetectionOutput(
         method_used="raster",
         grids=grids,
         columns=columns,
-        notice=(
-            f"OpenCV raster extraction found {len(grids)} grid line(s) and {len(columns)} column candidate(s). "
-            "Raster detections are approximate and require engineer verification."
-        ),
+        notice=notice,
     )
 
 
@@ -897,7 +1315,7 @@ def probe_columns_at_grid_intersections(
     calibration: ScaleCalibration | None = None,
 ) -> list[ColumnCandidate]:
     """
-    Intersection-gated column probing inside `target_region` using propagated master grid lines.
+    Intersection-gated shaded/hatched column probing inside `target_region` using propagated master grid lines.
     Only keeps candidate columns near (x_grid, y_grid) intersections inside `target_region`.
     """
     x_grids = [g for g in target_grids if g.axis == "x"]
@@ -905,22 +1323,31 @@ def probe_columns_at_grid_intersections(
     if not x_grids or not y_grids:
         return []
 
-    raw_output = (
-        detect_vector_elements(pdf_path, page_info, calibration=calibration, region=target_region)
-        if page_info.classification in ("vector", "hybrid")
-        else detect_raster_elements(png_path, page_info, calibration=calibration, region=target_region)
+    probe_opts = ExtractionOptions(
+        detect_grids=False,
+        detect_columns=True,
+        require_near_grid=True,
+        snap_columns_to_grids=False,
     )
-    if not raw_output.columns and page_info.classification == "hybrid":
-        raw_output = detect_raster_elements(png_path, page_info, calibration=calibration, region=target_region)
+    detected = detect_shaded_hatched_columns(
+        pdf_path=pdf_path if page_info.classification in ("vector", "hybrid") else None,
+        png_path=png_path,
+        page_info=page_info,
+        calibration=calibration,
+        options=probe_opts,
+        region=target_region,
+        grids=target_grids,
+        use_vector=page_info.classification in ("vector", "hybrid"),
+    )
 
     bx0, by0, bx1, by1 = _region_bounds(page_info, target_region)
     probed: list[ColumnCandidate] = []
     matched_intersections: set[tuple[str, str]] = set()
 
-    for col in raw_output.columns:
+    for col in detected:
         if not (bx0 <= col.x_px <= bx1 and by0 <= col.y_px <= by1):
             continue
-        tol = max(max(col.width_px, col.height_px) * 1.15, 24.0)
+        tol = max(max(col.width_px, col.height_px) * 1.15, probe_opts.column_probe_radius_px)
         best_pair = None
         best_dist = float("inf")
         for gx in x_grids:
@@ -946,7 +1373,7 @@ def probe_columns_at_grid_intersections(
                 page_number=page_info.page_number,
                 region_id=target_region.region_id,
                 column_id=f"C{len(probed) + 1}",
-                grid=f"{gy.label}-{gx.label}",
+                grid=_format_grid_ref(gx.label, gy.label),
                 x_px=col.x_px,
                 y_px=col.y_px,
                 width_px=col.width_px,
@@ -1316,30 +1743,99 @@ def run_detection(
     method: DetectionMethod = "auto",
     options: ExtractionOptions | None = None,
     region: PlanRegion | None = None,
+    existing_grids: list[GridCandidate] | None = None,
+    pixels_per_meter: float | None = None,
+    origin_px: PointPx | None = None,
 ) -> DetectionOutput:
     """Dispatch page detection across vector (PyMuPDF), raster (OpenCV), and VLM placeholder."""
     opts = options if options is not None else ExtractionOptions()
     if method == "vlm":
         return ExperimentalVLMDetector().detect(png_path, page_info, calibration)
     if method == "vector":
-        return detect_vector_elements(pdf_path, page_info, calibration, options=opts, region=region)
+        return detect_vector_elements(
+            pdf_path,
+            page_info,
+            calibration,
+            options=opts,
+            region=region,
+            png_path=png_path,
+            existing_grids=existing_grids,
+            pixels_per_meter=pixels_per_meter,
+            origin_px=origin_px,
+        )
     if method == "raster":
-        return detect_raster_elements(png_path, page_info, calibration, options=opts, region=region)
+        return detect_raster_elements(
+            png_path,
+            page_info,
+            calibration,
+            options=opts,
+            region=region,
+            existing_grids=existing_grids,
+            pixels_per_meter=pixels_per_meter,
+            origin_px=origin_px,
+        )
 
     if page_info.classification == "vector":
-        result = detect_vector_elements(pdf_path, page_info, calibration, options=opts, region=region)
+        result = detect_vector_elements(
+            pdf_path,
+            page_info,
+            calibration,
+            options=opts,
+            region=region,
+            png_path=png_path,
+            existing_grids=existing_grids,
+            pixels_per_meter=pixels_per_meter,
+            origin_px=origin_px,
+        )
         if result.grids or result.columns:
             return result
-        fallback = detect_raster_elements(png_path, page_info, calibration, options=opts, region=region)
+        fallback = detect_raster_elements(
+            png_path,
+            page_info,
+            calibration,
+            options=opts,
+            region=region,
+            existing_grids=existing_grids,
+            pixels_per_meter=pixels_per_meter,
+            origin_px=origin_px,
+        )
         fallback.method_used = "raster_fallback"
         return fallback
 
     if page_info.classification == "hybrid":
-        vec = detect_vector_elements(pdf_path, page_info, calibration, options=opts, region=region)
+        vec = detect_vector_elements(
+            pdf_path,
+            page_info,
+            calibration,
+            options=opts,
+            region=region,
+            png_path=png_path,
+            existing_grids=existing_grids,
+            pixels_per_meter=pixels_per_meter,
+            origin_px=origin_px,
+        )
         if vec.grids or vec.columns:
             return vec
-        ras = detect_raster_elements(png_path, page_info, calibration, options=opts, region=region)
+        ras = detect_raster_elements(
+            png_path,
+            page_info,
+            calibration,
+            options=opts,
+            region=region,
+            existing_grids=existing_grids,
+            pixels_per_meter=pixels_per_meter,
+            origin_px=origin_px,
+        )
         ras.method_used = "raster_fallback"
         return ras
 
-    return detect_raster_elements(png_path, page_info, calibration, options=opts, region=region)
+    return detect_raster_elements(
+        png_path,
+        page_info,
+        calibration,
+        options=opts,
+        region=region,
+        existing_grids=existing_grids,
+        pixels_per_meter=pixels_per_meter,
+        origin_px=origin_px,
+    )

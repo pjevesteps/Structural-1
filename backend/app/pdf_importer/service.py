@@ -689,6 +689,25 @@ def extract_page(
     png_path = _pages_dir(project_id, doc_id) / page.image_filename
     options = req.resolved_options()
 
+    effective_ppm = (
+        cal.pixels_per_m
+        if cal is not None
+        else (state.master_grid.source_pixels_per_meter if state.master_grid is not None else None)
+    )
+    effective_origin = (
+        region.origin_px
+        if (region is not None and region.origin_px is not None)
+        else (cal.origin_px if cal is not None else None)
+    )
+
+    existing_region_grids = [
+        g
+        for g in state.grid_candidates
+        if g.page_number == page_number
+        and g.status != ReviewStatus.REJECTED
+        and (req.region_id is None or g.region_id == req.region_id or g.region_id is None)
+    ]
+
     output = run_detection(
         pdf_path=pdf_path,
         png_path=png_path,
@@ -697,29 +716,35 @@ def extract_page(
         method=req.method,
         options=options,
         region=region,
+        existing_grids=existing_region_grids,
+        pixels_per_meter=effective_ppm,
+        origin_px=effective_origin,
     )
 
     if req.replace_unreviewed:
-        state.grid_candidates = [
-            g
-            for g in state.grid_candidates
-            if not (
-                g.page_number == page_number
-                and g.source != "manual"
-                and g.status == ReviewStatus.PENDING
-                and (req.region_id is None or g.region_id == req.region_id)
-            )
-        ]
-        state.column_candidates = [
-            c
-            for c in state.column_candidates
-            if not (
-                c.page_number == page_number
-                and c.source != "manual"
-                and c.status == ReviewStatus.PENDING
-                and (req.region_id is None or c.region_id == req.region_id)
-            )
-        ]
+        if options.detect_grids:
+            state.grid_candidates = [
+                g
+                for g in state.grid_candidates
+                if not (
+                    g.page_number == page_number
+                    and g.source != "manual"
+                    and g.status == ReviewStatus.PENDING
+                    and (req.region_id is None or g.region_id == req.region_id)
+                )
+            ]
+        if options.detect_columns:
+            state.column_candidates = [
+                c
+                for c in state.column_candidates
+                if not (
+                    c.page_number == page_number
+                    and c.source != "manual"
+                    and not c.engineer_approved
+                    and c.status != ReviewStatus.APPROVED
+                    and (req.region_id is None or c.region_id == req.region_id)
+                )
+            ]
 
     existing_col_ids = {c.column_id for c in state.column_candidates}
     next_num = 1
@@ -730,8 +755,10 @@ def extract_page(
             col.column_id = f"C{next_num}"
         existing_col_ids.add(col.column_id)
 
-    state.grid_candidates.extend(output.grids)
-    state.column_candidates.extend(output.columns)
+    if options.detect_grids:
+        state.grid_candidates.extend(output.grids)
+    if options.detect_columns:
+        state.column_candidates.extend(output.columns)
     _recalculate_page_coordinates(state, page_number)
     _save_state(state)
 
@@ -745,8 +772,8 @@ def extract_page(
             "method_requested": req.method,
             "method_used": output.method_used,
             "options": options.model_dump(),
-            "grids_detected": len(output.grids),
-            "columns_detected": len(output.columns),
+            "grids_detected": len(output.grids) if options.detect_grids else 0,
+            "columns_detected": len(output.columns) if options.detect_columns else 0,
         },
     )
 
@@ -755,8 +782,8 @@ def extract_page(
         page_number=page_number,
         method_requested=req.method,
         method_used=output.method_used,
-        grids_detected=len(output.grids),
-        columns_detected=len(output.columns),
+        grids_detected=len(output.grids) if options.detect_grids else 0,
+        columns_detected=len(output.columns) if options.detect_columns else 0,
         notice=output.notice,
     )
 

@@ -74,6 +74,8 @@
 .pdf-settings-fields{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 12px;border-top:1px solid #223147;background:#0e1828}
 .pdf-field-chip{display:inline-flex;align-items:center;gap:6px;font-size:10px;color:#9baabe;font-weight:600;letter-spacing:.3px;text-transform:none}
 .pdf-field-chip input{width:64px;background:#111d2e;color:#eaf0f6;border:1px solid #304560;border-radius:6px;padding:5px 7px;font-size:11px}
+.pdf-compact-select{padding:5px 7px;font-size:11px}
+.pdf-settings-divider{width:100%;height:1px;background:#223147;margin:2px 0}
 .pdf-check-chip{display:inline-flex;align-items:center;gap:5px;font-size:10px;color:#c7d5e5;font-weight:600;letter-spacing:.2px;cursor:pointer}
 
 /* Architectural Set Page Navigator, Regions, and Elevation Levels */

@@ -5,6 +5,12 @@ All notable changes to **AI Structural Engineering Office** are documented in th
 ## [Unreleased]
 
 ### Added
+- **Tuned Phase 2 Shaded & Hatched Column Scanner (`backend/app/pdf_importer/`, `frontend/src/PdfImporter.jsx`)**:
+  - Extended `ExtractionOptions` and `ExtractRequest` in `schemas.py` with `detect_grids`, `detect_columns`, `column_fill_mode` (`"shaded_or_hatched"`, `"gray_shaded_only"`, `"any_filled"`), `min_column_size_m`, `max_column_size_m`, `column_max_aspect_ratio`, `column_min_rectangularity`, `column_min_fill_ratio`, `require_near_grid`, `column_probe_radius_px`, and `snap_columns_to_grids`.
+  - Added dedicated hybrid vector + raster `detect_shaded_hatched_columns` pipeline in `detector.py` with scale-aware pixel bounds, gray-shaded + morphological hatch-fusion masks, `minAreaRect`/solidity/`approxPolyDP` quad filtering, strict un-morphed interior shading/Sobel-Canny hatch verification (rejecting hollow furniture/rooms, pitch-black stove icons, circles/bubbles, long thin walls, and large L-shaped earth backfills), IoU deduplication, and grid intersection snapping/confidence boosting.
+  - Updated `service.py` so **Scan Columns Only** (`detect_grids=False, detect_columns=True`) preserves existing stamped/manual grids while clearing only unapproved auto-detected columns in the active region.
+  - Updated `frontend/src/PdfImporter.jsx` with a **Scan Columns Only** button, compact column tuning controls inside **Detection Settings**, and exact `width_px × height_px` outlined column rectangles with center crosshairs and grid labels on the SVG overlay.
+  - Added unit test `test_shaded_hatched_column_scanner_filters_non_columns_and_preserves_grids` in `backend/tests/test_pdf_importer.py`.
 - **Phase 3 — Module 03 · Structural Geometry Generation**:
   - **Analytical Geometry Schema (`backend/app/models.py`, `backend/app/schemas.py`)**: Added backward-compatible Pydantic models (`AnalyticalNode`, `AnalyticalMember`, `SlabPanel`, `GeometryCheckIssue`, `GeometryGenerationOptions`, `StructuralModelState`) attached to `ProjectState.structural_model` (respecting `extra="forbid"`), added optional `Column.floor_level: str = ""` preserved during PDF Importer transfers, and added `backend/app/schemas.py` re-exporting all models.
   - **Geometry Generation Engine & Validator (`backend/app/geometry/`)**: Replaced standalone `geometry.py` with a package preserving Phase 1 `plan_to_staad`, `build_node_map`, and `infer_span` while adding:

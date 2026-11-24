@@ -297,9 +297,14 @@ def test_manual_member_support_approval_and_staad_export(isolated_env, tmp_path:
     assert " PINNED\n" in text
     assert text.strip().endswith("FINISH")
 
-    # 6. Verify existing DEMO-001.json backward compatibility with extra="forbid"
+    # 6. Verify existing DEMO-001.json and legacy (pre-Phase 3) JSON backward compatibility with extra="forbid"
     demo_path = ROOT / "data" / "projects" / "DEMO-001.json"
     if demo_path.exists():
-        demo = ProjectState.model_validate(json.loads(demo_path.read_text(encoding="utf-8")))
-        assert demo.structural_model.nodes == []
-        assert demo.openings == []
+        raw_demo = json.loads(demo_path.read_text(encoding="utf-8"))
+        ProjectState.model_validate(raw_demo)
+        legacy_raw = dict(raw_demo)
+        legacy_raw.pop("structural_model", None)
+        legacy_raw.pop("openings", None)
+        legacy_demo = ProjectState.model_validate(legacy_raw)
+        assert legacy_demo.structural_model.nodes == []
+        assert legacy_demo.openings == []

@@ -53,7 +53,7 @@ Connect tablet and PC to the same trusted Wi-Fi. Run `ipconfig` on Windows, then
   - `audit.jsonl` (append-only audit trail)
 - Page classification (`vector`, `scanned`, `hybrid`) via PyMuPDF
 - Interactive 2-point scale calibration (`mm`, `cm`, `m`, `ft`, `in`) converting pixel coordinates to plan meters (`x_m`, `y_m`)
-- Vector grid/column detection via PyMuPDF with OpenCV (`cv2`) raster fallback for scanned pages, plus an experimental VLM placeholder interface
+- Vector grid/column detection via PyMuPDF with OpenCV (`cv2`) raster fallback, dedicated hybrid shaded/hatched square & rectangular column scanning (**Scan Columns Only** preserving stamped Master Grids, rejecting hollow shapes, circles, walls, pitch-black icons, and earth-backfill hatches), plus an experimental VLM placeholder interface
 - Interactive SVG overlay (`frontend/src/PdfImporter.jsx`) for calibration, detected grids/columns, click-to-place manual columns, and accept/reject review
 - Controlled transfer: only engineer-approved elements are merged/transferred into `ProjectState`, and only after scale calibration is explicitly confirmed
 

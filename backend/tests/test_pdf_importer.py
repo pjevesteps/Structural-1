@@ -84,13 +84,13 @@ def _build_synthetic_multipage_pdf() -> bytes:
         shape.finish(color=(0.2, 0.2, 0.2), width=0.8)
         page1.insert_text(pymupdf.Point(45.0, y + 4.0), label, fontsize=11)
 
-    # Filled column rectangles at every grid intersection
+    # Concrete gray-shaded column rectangles at every grid intersection
     col_half = 6.0  # 12 pt = 0.4 m = 400 mm at 30 pt/m
     for _, y in y_coords:
         for _, x in x_coords:
             rect = pymupdf.Rect(x - col_half, y - col_half, x + col_half, y + col_half)
             shape.draw_rect(rect)
-            shape.finish(color=(0, 0, 0), fill=(0, 0, 0), width=0.6)
+            shape.finish(color=(0.1, 0.1, 0.1), fill=(0.52, 0.52, 0.52), width=0.6)
 
     shape.commit()
 
@@ -101,10 +101,11 @@ def _build_synthetic_multipage_pdf() -> bytes:
         cv2.line(raster, (gx, 80), (gx, 520), (40, 40, 40), 2)
     for gy in (180, 440):
         cv2.line(raster, (100, gy), (700, gy), (40, 40, 40), 2)
-    # Draw solid black column squares (24x24 px) at the 4 intersections
+    # Draw concrete gray-shaded column squares (24x24 px) at the 4 intersections
     for gy in (180, 440):
         for gx in (200, 560):
-            cv2.rectangle(raster, (gx - 12, gy - 12), (gx + 12, gy + 12), (0, 0, 0), -1)
+            cv2.rectangle(raster, (gx - 12, gy - 12), (gx + 12, gy + 12), (128, 128, 128), -1)
+            cv2.rectangle(raster, (gx - 12, gy - 12), (gx + 12, gy + 12), (20, 20, 20), 1)
 
     ok, png_buf = cv2.imencode(".png", raster)
     assert ok
@@ -578,14 +579,14 @@ def _build_architectural_multipage_set_pdf() -> bytes:
     for y in (350.0, 190.0):
         for x in (90.0, 270.0):
             s2.draw_rect(pymupdf.Rect(x - 6, y - 6, x + 6, y + 6))
-            s2.finish(color=(0, 0, 0), fill=(0, 0, 0), width=0.6)
+            s2.finish(color=(0.1, 0.1, 0.1), fill=(0.52, 0.52, 0.52), width=0.6)
 
     # Right viewport: FIRST FLOOR PLAN (shifted by +400 pt in X, 0 in Y -> x=490, 670; y=350, 190)
     p2.insert_text(pymupdf.Point(500, 445), "FIRST FLOOR PLAN", fontsize=12)
     for y in (350.0, 190.0):
         for x in (490.0, 670.0):
             s2.draw_rect(pymupdf.Rect(x - 6, y - 6, x + 6, y + 6))
-            s2.finish(color=(0, 0, 0), fill=(0, 0, 0), width=0.6)
+            s2.finish(color=(0.1, 0.1, 0.1), fill=(0.52, 0.52, 0.52), width=0.6)
 
     s2.commit()
     p2.insert_text(pymupdf.Point(710, 520), "A4", fontsize=16)
@@ -1106,3 +1107,245 @@ def test_manual_grid_master_grid_stamp_and_polygon_openings(isolated_env):
     assert opn.category == "stairwell"
     assert opn.floor_level == "1F"
     assert abs(opn.area_sqm - 12.0) < 0.05
+
+
+def _draw_cross_hatched_rect(shape, x0: float, y0: float, x1: float, y1: float, step: float = 2.4):
+    """Draw a bordered rectangular column with dense 45° / 135° cross-hatch strokes inside."""
+    shape.draw_rect(pymupdf.Rect(x0, y0, x1, y1))
+    shape.finish(color=(0.1, 0.1, 0.1), width=0.8)
+    w = x1 - x0
+    h = y1 - y0
+    # 45-degree hatch lines (bottom-left to top-right)
+    d = step
+    while d < w + h:
+        px1 = x0 + max(0.0, d - h)
+        py1 = y0 + min(h, d)
+        px2 = x0 + min(w, d)
+        py2 = y0 + max(0.0, d - w)
+        shape.draw_line(pymupdf.Point(px1, py1), pymupdf.Point(px2, py2))
+        shape.finish(color=(0.15, 0.15, 0.15), width=0.55)
+        d += step
+    # 135-degree hatch lines (top-left to bottom-right)
+    d = step
+    while d < w + h:
+        px1 = x0 + max(0.0, d - h)
+        py1 = y1 - min(h, d)
+        px2 = x0 + min(w, d)
+        py2 = y1 - max(0.0, d - w)
+        shape.draw_line(pymupdf.Point(px1, py1), pymupdf.Point(px2, py2))
+        shape.finish(color=(0.15, 0.15, 0.15), width=0.55)
+        d += step
+
+
+def test_shaded_hatched_column_scanner_filters_non_columns_and_preserves_grids(isolated_env):
+    """
+    Verify tuned shaded/hatched column scanner:
+      1. Gray-shaded square columns (0.40 m x 0.40 m) and cross-hatched rectangular columns
+         (0.30 m x 0.60 m) ARE detected.
+      2. Hollow furniture/room rectangles, solid pitch-black stove icon, circular tag,
+         long thin wall (0.20 m x 4.00 m), and large gray L-shaped earth backfill (3.0 m x 4.0 m)
+         are ALL REJECTED under column_fill_mode="shaded_or_hatched".
+      3. detect_grids=False, detect_columns=True preserves existing stamped/manual grids while
+         detecting only the shaded/hatched columns and snapping on-grid hits.
+    """
+    client, _ = isolated_env
+    pid = "COL-SCAN"
+    assert client.post("/api/projects", json=_make_sample_project(pid)).status_code == 200
+
+    # Scale: 30 pt = 1.0 m
+    pt_per_m = 30.0
+    doc = pymupdf.open()
+    pg = doc.new_page(width=760, height=540)
+    sh = pg.new_shape()
+
+    # Grid intersection centers (in pt): A=120, B=300; 1'=380, 2=220
+    # 1. Two gray-shaded square columns (0.40 m x 0.40 m = 12 x 12 pt) at A-1' and B-1'
+    gray_centers_pt = [(120.0, 380.0), (300.0, 380.0)]
+    for cx, cy in gray_centers_pt:
+        hw = 0.40 * pt_per_m * 0.5  # 6 pt
+        sh.draw_rect(pymupdf.Rect(cx - hw, cy - hw, cx + hw, cy + hw))
+        sh.finish(color=(0.1, 0.1, 0.1), fill=(0.55, 0.55, 0.55), width=0.7)
+
+    # 2. Two cross-hatched rectangular columns (0.30 m x 0.60 m = 9 x 18 pt):
+    #    one on-grid at A-2 (120, 220) and one off-grid along a skewed wall at (420, 290)
+    hatch_centers_pt = [(120.0, 220.0), (420.0, 290.0)]
+    for cx, cy in hatch_centers_pt:
+        hw = 0.30 * pt_per_m * 0.5  # 4.5 pt
+        hh = 0.60 * pt_per_m * 0.5  # 9.0 pt
+        _draw_cross_hatched_rect(sh, cx - hw, cy - hh, cx + hw, cy + hh, step=2.2)
+
+    # --- Distractors that MUST ALL BE REJECTED under shaded_or_hatched ---
+    # 3a. Hollow furniture rectangle (0.50 m x 0.80 m = 15 x 24 pt) + hollow room (2.0 m x 2.0 m = 60 x 60 pt)
+    sh.draw_rect(pymupdf.Rect(195.0, 285.0, 210.0, 309.0))
+    sh.finish(color=(0.15, 0.15, 0.15), width=0.8)
+    sh.draw_rect(pymupdf.Rect(180.0, 120.0, 240.0, 180.0))
+    sh.finish(color=(0.15, 0.15, 0.15), width=0.8)
+
+    # 3b. Solid pitch-black stove icon (0.50 m x 0.50 m = 15 x 15 pt)
+    sh.draw_rect(pymupdf.Rect(345.0, 130.0, 360.0, 145.0))
+    sh.finish(color=(0.0, 0.0, 0.0), fill=(0.0, 0.0, 0.0), width=0.6)
+
+    # 3c. Circular shaded tag (diameter 0.50 m = radius 7.5 pt)
+    sh.draw_circle(pymupdf.Point(430.0, 150.0), 7.5)
+    sh.finish(color=(0.1, 0.1, 0.1), fill=(0.55, 0.55, 0.55), width=0.7)
+
+    # 3d. Long thin gray wall (0.20 m x 4.00 m = 6 x 120 pt)
+    sh.draw_rect(pymupdf.Rect(500.0, 140.0, 506.0, 260.0))
+    sh.finish(color=(0.1, 0.1, 0.1), fill=(0.55, 0.55, 0.55), width=0.6)
+
+    # 3e. Large gray L-shaped earth backfill (3.0 m x 4.0 m = 90 x 120 pt)
+    l_pts = [
+        pymupdf.Point(560.0, 160.0),
+        pymupdf.Point(650.0, 160.0),
+        pymupdf.Point(650.0, 220.0),
+        pymupdf.Point(605.0, 220.0),
+        pymupdf.Point(605.0, 280.0),
+        pymupdf.Point(560.0, 280.0),
+    ]
+    sh.draw_polyline(l_pts)
+    sh.finish(color=(0.2, 0.2, 0.2), fill=(0.60, 0.60, 0.60), closePath=True, width=0.7)
+
+    sh.commit()
+    pdf_bytes = doc.tobytes()
+    doc.close()
+
+    up = client.post(
+        f"/api/projects/{pid}/pdf-imports",
+        files={"file": ("col_scan.pdf", pdf_bytes, "application/pdf")},
+    )
+    assert up.status_code == 200, up.text
+    doc_state = up.json()
+    doc_id = doc_state["doc_id"]
+    p1 = doc_state["pages"][0]
+    sx = p1["width_px"] / p1["width_pt"]
+    sy = p1["height_px"] / p1["height_pt"]
+
+    # Calibrate page at 30 pt/m (180 pt = 6.0 m) and confirm
+    cal = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/pages/1/calibrate",
+        json={
+            "p1": {"x_px": 120.0 * sx, "y_px": 380.0 * sy},
+            "p2": {"x_px": 300.0 * sx, "y_px": 380.0 * sy},
+            "known_distance": 6.0,
+            "unit": "m",
+            "confirmed": True,
+        },
+    )
+    assert cal.status_code == 200, cal.text
+
+    # Create a PlanRegion and trace/stamp 4 grids (A, B, 1', 2)
+    reg_res = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/regions",
+        json={
+            "page_number": 1,
+            "name": "First Floor Plan",
+            "floor_level": "1F",
+            "x_px": 40.0 * sx,
+            "y_px": 40.0 * sy,
+            "width_px": 680.0 * sx,
+            "height_px": 440.0 * sy,
+            "origin_px": {"x_px": 120.0 * sx, "y_px": 380.0 * sy},
+        },
+    )
+    assert reg_res.status_code == 200, reg_res.text
+    region_id = reg_res.json()["regions"][0]["region_id"]
+
+    for etype, label, p1_pt, p2_pt in [
+        ("grid_x", "A", (120.0, 60.0), (120.0, 450.0)),
+        ("grid_x", "B", (300.0, 60.0), (300.0, 450.0)),
+        ("grid_y", "1'", (60.0, 380.0), (680.0, 380.0)),
+        ("grid_y", "2", (60.0, 220.0), (680.0, 220.0)),
+    ]:
+        gr = client.post(
+            f"/api/projects/{pid}/pdf-imports/{doc_id}/elements/manual-grid",
+            json={
+                "page_number": 1,
+                "region_id": region_id,
+                "element_type": etype,
+                "label": label,
+                "p1": {"x_px": p1_pt[0] * sx, "y_px": p1_pt[1] * sy},
+                "p2": {"x_px": p2_pt[0] * sx, "y_px": p2_pt[1] * sy},
+            },
+        )
+        assert gr.status_code == 200, gr.text
+    stamped_grid_ids = {g["id"] for g in gr.json()["grid_candidates"]}
+    assert len(stamped_grid_ids) == 4
+
+    # Run "Scan Columns Only" (detect_grids=False, detect_columns=True, shaded_or_hatched)
+    scan_res = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/pages/1/extract",
+        json={
+            "method": "auto",
+            "region_id": region_id,
+            "options": {
+                "detect_grids": False,
+                "detect_columns": True,
+                "column_fill_mode": "shaded_or_hatched",
+                "min_column_size_m": 0.18,
+                "max_column_size_m": 1.10,
+                "column_max_aspect_ratio": 2.5,
+                "column_min_rectangularity": 0.78,
+                "column_min_fill_ratio": 0.35,
+                "require_near_grid": False,
+            },
+        },
+    )
+    assert scan_res.status_code == 200, scan_res.text
+    body = scan_res.json()
+
+    # Existing stamped grids MUST be untouched
+    after_grid_ids = {g["id"] for g in body["document"]["grid_candidates"]}
+    assert after_grid_ids == stamped_grid_ids
+    assert body["grids_detected"] == 0
+
+    # EXACTLY the 4 shaded/hatched columns detected; ZERO distractors (hollow, stove, circle, wall, backfill)
+    cols = body["document"]["column_candidates"]
+    assert body["columns_detected"] == 4, f"Expected 4 columns, got {len(cols)}: {cols}"
+    assert len(cols) == 4
+
+    # Verify each expected center (2 gray squares + 2 cross-hatched rectangles) was matched
+    expected_px = [(cx * sx, cy * sy) for cx, cy in (gray_centers_pt + hatch_centers_pt)]
+    for ex, ey in expected_px:
+        assert any(
+            abs(c["x_px"] - ex) <= 8.0 and abs(c["y_px"] - ey) <= 8.0 for c in cols
+        ), f"Expected column near ({ex:.1f}, {ey:.1f}) missing in {cols}"
+
+    # Verify grid snapping & tagging for on-grid columns + off-grid column kept
+    tagged = sorted(c["grid"] for c in cols if c["grid"])
+    assert tagged == ["A-1'", "A-2", "B-1'"]
+    off_grid = [c for c in cols if not c["grid"]]
+    assert len(off_grid) == 1
+
+    # Verify require_near_grid=True drops the off-grid column while keeping the 3 on-grid columns
+    near_res = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/pages/1/extract",
+        json={
+            "method": "auto",
+            "region_id": region_id,
+            "options": {
+                "detect_grids": False,
+                "detect_columns": True,
+                "column_fill_mode": "shaded_or_hatched",
+                "require_near_grid": True,
+            },
+        },
+    )
+    assert near_res.status_code == 200, near_res.text
+    assert near_res.json()["columns_detected"] == 3
+    assert {g["id"] for g in near_res.json()["document"]["grid_candidates"]} == stamped_grid_ids
+
+    # Verify gray_shaded_only keeps ONLY the 2 gray-shaded square columns
+    gray_res = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/pages/1/extract",
+        json={
+            "method": "auto",
+            "region_id": region_id,
+            "options": {
+                "detect_grids": False,
+                "detect_columns": True,
+                "column_fill_mode": "gray_shaded_only",
+            },
+        },
+    )
+    assert gray_res.status_code == 200, gray_res.text
+    assert gray_res.json()["columns_detected"] == 2

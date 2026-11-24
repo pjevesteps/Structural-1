@@ -22,6 +22,11 @@ const OPENING_CATEGORIES = [
   { value: "airwell", label: "Airwell / Air Vent", color: "#38bdf8" },
   { value: "shaft_other", label: "Shaft / Other", color: "#c084fc" },
 ];
+const COLUMN_FILL_MODES = [
+  { value: "shaded_or_hatched", label: "Shaded / Hatched Only" },
+  { value: "gray_shaded_only", label: "Gray Shaded Only" },
+  { value: "any_filled", label: "Any Filled" },
+];
 
 function openingColor(category) {
   const found = OPENING_CATEGORIES.find((c) => c.value === category);
@@ -115,6 +120,12 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
   const [mergeDashed, setMergeDashed] = useState(true);
   const [detectLabels, setDetectLabels] = useState(true);
   const [requireGridLabel, setRequireGridLabel] = useState(true);
+  const [columnFillMode, setColumnFillMode] = useState("shaded_or_hatched");
+  const [minColSizeM, setMinColSizeM] = useState("0.18");
+  const [maxColSizeM, setMaxColSizeM] = useState("1.10");
+  const [minColFillPct, setMinColFillPct] = useState("35");
+  const [maxColAspect, setMaxColAspect] = useState("2.5");
+  const [requireNearGrid, setRequireNearGrid] = useState(false);
 
   // Manual tracing & column/opening inputs
   const [nextGridXLabel, setNextGridXLabel] = useState("A");
@@ -1025,7 +1036,7 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
     }
   }
 
-  async function handleRunExtraction() {
+  async function handleRunExtraction({ detectGrids = true, detectColumns = true } = {}) {
     if (!doc || !activePage) return;
     setBusy(true);
     setError("");
@@ -1033,6 +1044,10 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
       const minSpanVal = Math.min(100, Math.max(1, parseFloat(minSpanPct) || 28));
       const borderMarginVal = Math.min(40, Math.max(0, parseFloat(borderMarginPct) || 4));
       const clusterTolVal = Math.min(100, Math.max(1, parseFloat(clusterTolPx) || 8));
+      const minColVal = Math.min(5, Math.max(0.05, parseFloat(minColSizeM) || 0.18));
+      const maxColVal = Math.min(10, Math.max(minColVal + 0.05, parseFloat(maxColSizeM) || 1.1));
+      const minFillVal = Math.min(100, Math.max(0, parseFloat(minColFillPct) || 35));
+      const maxAspectVal = Math.min(10, Math.max(1, parseFloat(maxColAspect) || 2.5));
 
       const res = await apiJson(
         `/api/projects/${pid}/pdf-imports/${encodeURIComponent(doc.doc_id)}/pages/${activePage.page_number}/extract`,
@@ -1050,6 +1065,14 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
               merge_dashed_segments: mergeDashed,
               detect_grid_labels: detectLabels,
               require_grid_label: requireGridLabel,
+              detect_grids: detectGrids,
+              detect_columns: detectColumns,
+              column_fill_mode: columnFillMode,
+              min_column_size_m: Number(minColVal.toFixed(3)),
+              max_column_size_m: Number(maxColVal.toFixed(3)),
+              column_min_fill_ratio: Number((minFillVal / 100).toFixed(4)),
+              column_max_aspect_ratio: Number(maxAspectVal.toFixed(2)),
+              require_near_grid: requireNearGrid,
             },
           }),
         }
@@ -1878,8 +1901,20 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
                             </option>
                           ))}
                         </select>
-                        <button className="secondary" disabled={busy} onClick={handleRunExtraction}>
+                        <button
+                          className="secondary"
+                          disabled={busy}
+                          onClick={() => handleRunExtraction({ detectGrids: true, detectColumns: true })}
+                        >
                           2. Detect Grids &amp; Columns
+                        </button>
+                        <button
+                          className="secondary pdf-launch-btn"
+                          disabled={busy}
+                          onClick={() => handleRunExtraction({ detectGrids: false, detectColumns: true })}
+                          title="Scan only shaded/hatched columns while preserving stamped or traced grids"
+                        >
+                          Scan Columns Only
                         </button>
                       </div>
                     </div>
@@ -1894,8 +1929,9 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
                     >
                       <span>{showDetectSettings ? "▾" : "▸"} Detection Settings</span>
                       <small>
-                        {requireGridLabel ? "Labeled Grids Only" : "All Lines"} · Span {minSpanPct}
-                        % · Margin {borderMarginPct}% · Tol {clusterTolPx}px
+                        {requireGridLabel ? "Labeled Grids" : "All Lines"} ·{" "}
+                        {COLUMN_FILL_MODES.find((m) => m.value === columnFillMode)?.label || columnFillMode}{" "}
+                        · Col {minColSizeM}–{maxColSizeM}m · Fill ≥{minColFillPct}%
                       </small>
                     </button>
                     {showDetectSettings && (
@@ -1956,6 +1992,75 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
                             onChange={(e) => setDetectLabels(e.target.checked)}
                           />
                           <span>Detect labels</span>
+                        </label>
+
+                        <span className="pdf-settings-divider" aria-hidden="true" />
+
+                        <label className="pdf-field-chip">
+                          <span>Column Fill Mode</span>
+                          <select
+                            className="pdf-select pdf-compact-select"
+                            value={columnFillMode}
+                            onChange={(e) => setColumnFillMode(e.target.value)}
+                          >
+                            {COLUMN_FILL_MODES.map((m) => (
+                              <option key={m.value} value={m.value}>
+                                {m.label}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label className="pdf-field-chip">
+                          <span>Col Size (m)</span>
+                          <input
+                            type="number"
+                            min="0.05"
+                            max="5"
+                            step="0.02"
+                            value={minColSizeM}
+                            onChange={(e) => setMinColSizeM(e.target.value)}
+                            aria-label="Min column size (m)"
+                          />
+                          <span>–</span>
+                          <input
+                            type="number"
+                            min="0.1"
+                            max="10"
+                            step="0.05"
+                            value={maxColSizeM}
+                            onChange={(e) => setMaxColSizeM(e.target.value)}
+                            aria-label="Max column size (m)"
+                          />
+                        </label>
+                        <label className="pdf-field-chip">
+                          <span>Min Fill (%)</span>
+                          <input
+                            type="number"
+                            min="5"
+                            max="100"
+                            step="5"
+                            value={minColFillPct}
+                            onChange={(e) => setMinColFillPct(e.target.value)}
+                          />
+                        </label>
+                        <label className="pdf-field-chip">
+                          <span>Max Aspect Ratio</span>
+                          <input
+                            type="number"
+                            min="1"
+                            max="10"
+                            step="0.1"
+                            value={maxColAspect}
+                            onChange={(e) => setMaxColAspect(e.target.value)}
+                          />
+                        </label>
+                        <label className="pdf-check-chip">
+                          <input
+                            type="checkbox"
+                            checked={requireNearGrid}
+                            onChange={(e) => setRequireNearGrid(e.target.checked)}
+                          />
+                          <span>Near Grids Only</span>
                         </label>
                       </div>
                     )}
@@ -2298,14 +2403,15 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
                       );
                     })}
 
-                    {/* Column Candidates */}
+                    {/* Column Candidates: outlined rect matching detected width_px × height_px + center crosshair + grid label */}
                     {pageCols.map((c) => {
                       const color = statusColor(c.status);
                       const isSel = selectedId === c.id;
-                      const rw = Math.max(c.width_px, activePage.width_px * 0.012 * invZ, 10 * invZ);
-                      const rh = Math.max(c.height_px, activePage.height_px * 0.012 * invZ, 10 * invZ);
-                      const strokeW = Math.max(activePage.width_px * 0.0022, 1.8) * invZ;
-                      const fontSize = Math.max(activePage.width_px * 0.012, 12) * invZ;
+                      const rw = Math.max(c.width_px || 12, 4);
+                      const rh = Math.max(c.height_px || 12, 4);
+                      const strokeW = Math.max(activePage.width_px * 0.002, 1.6) * invZ;
+                      const crossLen = Math.min(Math.max(Math.min(rw, rh) * 0.35, 4 * invZ), 12 * invZ);
+                      const fontSize = Math.max(activePage.width_px * 0.011, 11) * invZ;
                       return (
                         <g
                           key={c.id}
@@ -2322,9 +2428,25 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
                             width={rw}
                             height={rh}
                             fill={color}
-                            fillOpacity={isSel ? 0.45 : 0.28}
+                            fillOpacity={isSel ? 0.26 : 0.12}
                             stroke={color}
                             strokeWidth={isSel ? strokeW * 1.8 : strokeW}
+                          />
+                          <line
+                            x1={c.x_px - crossLen}
+                            y1={c.y_px}
+                            x2={c.x_px + crossLen}
+                            y2={c.y_px}
+                            stroke={color}
+                            strokeWidth={strokeW * 0.85}
+                          />
+                          <line
+                            x1={c.x_px}
+                            y1={c.y_px - crossLen}
+                            x2={c.x_px}
+                            y2={c.y_px + crossLen}
+                            stroke={color}
+                            strokeWidth={strokeW * 0.85}
                           />
                           <text
                             x={c.x_px + rw / 2 + 4 * invZ}
@@ -2337,6 +2459,7 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
                             paintOrder="stroke"
                           >
                             {c.column_id}
+                            {c.grid ? ` (${c.grid})` : ""}
                           </text>
                         </g>
                       );
