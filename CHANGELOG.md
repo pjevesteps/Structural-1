@@ -4,6 +4,10 @@ All notable changes to **AI Structural Engineering Office** are documented in th
 
 ## [Unreleased]
 
+### Changed
+- **Strict STAAD.Pro E2E Grammar & Mass-Modeling Linter (`backend/tests/test_e2e_pipeline.py`, `frontend/e2e/workflow.spec.js`)**:
+  - Enabled `require_ref_load_before_diaphragm=True` by default in `lint_staad_text`, added `FLOOR DIAPHRAGM` `JOI` parsing to assert zero supported/stepped nodes appear in any rigid diaphragm joint list, enforced no duplicate `SELFWEIGHT`/`MEMBER WEIGHT` inside `DEFINE UBC LOAD` when `DEFINE REFERENCE LOADS` is active, and verified `DEFINE REFERENCE LOADS` -> `FLOOR DIAPHRAGM` ordering and `R1 1.0` in Playwright's `.std` download check.
+
 ### Added
 - **Playwright Browser End-to-End Test Suite (`frontend/e2e/`, `frontend/playwright.config.js`, `backend/app/storage.py`, `frontend/vite.config.js`)**:
   - Added optional `STRUCTURAL_AI_DATA_DIR` environment variable support in `backend/app/storage.py` (with `get_exports_dir()` used by `main.py` and `loads/router.py`) and `VITE_API_PROXY_TARGET` in `frontend/vite.config.js` so Playwright runs a fully isolated FastAPI (`127.0.0.1:8010`) + Vite (`127.0.0.1:5175`) stack writing strictly to `frontend/e2e/.tmp-data/` without touching `data/projects/` or interfering with dev servers on `8000`/`5173`.

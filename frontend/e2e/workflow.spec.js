@@ -251,6 +251,13 @@ test.describe.serial("Structural AI Office — Full Browser E2E (Modules 01 to 0
     expect(stdText).toContain("STAAD SPACE");
     expect(stdText).toContain("JOINT COORDINATES");
     expect(stdText).toContain("MEMBER INCIDENCES");
+    expect(stdText).toContain("DEFINE REFERENCE LOADS");
+    expect(stdText).toContain("END DEFINE REFERENCE LOADS");
+    expect(stdText).toContain("FLOOR DIAPHRAGM");
+    expect(stdText).toContain("R1 1.0");
+    expect(stdText.indexOf("END DEFINE REFERENCE LOADS")).toBeLessThan(
+      stdText.indexOf("FLOOR DIAPHRAGM")
+    );
     expect(stdText).toContain("FINISH");
 
     guards.assertClean();

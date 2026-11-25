@@ -25,14 +25,14 @@ from backend.app.models import ProjectState
 
 def lint_staad_text(
     std_text: str,
-    require_ref_load_before_diaphragm: bool = False,
+    require_ref_load_before_diaphragm: bool = True,
 ) -> list[str]:
     """
     Validate an exported STAAD.Pro .std text against core STAAD grammar, block ordering,
-    line-length, and joint/member referential integrity rules.
+    line-length, mass-modeling (DEFINE REFERENCE LOADS before FLOOR DIAPHRAGM, no supported
+    nodes in diaphragm JOI lists, no double-counted UBC mass), and joint/member referential
+    integrity rules.
 
-    Set require_ref_load_before_diaphragm=True to enforce that DEFINE REFERENCE LOADS /
-    END DEFINE REFERENCE LOADS appear strictly before FLOOR DIAPHRAGM (mass modeling).
     Returns a list of human-readable error strings (empty list == valid).
     """
     errors: list[str] = []
@@ -96,7 +96,7 @@ def lint_staad_text(
                     f"appears after '{next_m}' (pos {positions[next_m]})."
                 )
 
-    # Optional mass-modeling ordering check (can be flipped to True to enforce Reference Loads before Diaphragm)
+    # Mass-modeling ordering & deduplication checks (Reference Loads before Diaphragm & UBC)
     if require_ref_load_before_diaphragm and "FLOOR DIAPHRAGM" in std_text:
         ref_start = std_text.find("DEFINE REFERENCE LOADS")
         ref_end = std_text.find("END DEFINE REFERENCE LOADS")
@@ -109,13 +109,27 @@ def lint_staad_text(
             errors.append(
                 "DEFINE REFERENCE LOADS / END DEFINE REFERENCE LOADS must appear strictly before FLOOR DIAPHRAGM."
             )
+        if "DEFINE UBC LOAD" in std_text and "LOAD 1" in std_text:
+            ubc_start = std_text.find("DEFINE UBC LOAD")
+            load1_pos = std_text.find("LOAD 1")
+            if ubc_start < load1_pos:
+                ubc_block = std_text[ubc_start:load1_pos]
+                if "SELFWEIGHT" in ubc_block or "MEMBER WEIGHT" in ubc_block:
+                    errors.append(
+                        "DEFINE UBC LOAD duplicates SELFWEIGHT or MEMBER WEIGHT while DEFINE REFERENCE LOADS is active."
+                    )
+        if "LOAD 9" in std_text and "LOAD 10" in std_text:
+            l9_block = std_text[std_text.find("LOAD 9") : std_text.find("LOAD 10")]
+            if "REFERENCE LOAD" not in l9_block or "R1 1.0" not in l9_block:
+                errors.append("LOAD 9 should reference R1 1.0 when DEFINE REFERENCE LOADS is active.")
 
-    # 3. Parse JOINT COORDINATES, MEMBER INCIDENCES, SUPPORTS, MEMBER PROPERTY for referential integrity
+    # 3. Parse JOINT COORDINATES, MEMBER INCIDENCES, SUPPORTS, MEMBER PROPERTY, FLOOR DIAPHRAGM
     known_joints: set[int] = set()
     known_members: set[int] = set()
     incidence_refs: list[tuple[int, int, int]] = []
     support_refs: list[int] = []
     prop_refs: list[int] = []
+    diaphragm_joint_refs: list[int] = []
 
     section: str | None = None
     top_headers = (
@@ -162,6 +176,9 @@ def lint_staad_text(
         if up.startswith("SUPPORTS"):
             section = "SUPPORTS"
             continue
+        if up.startswith("FLOOR DIAPHRAGM"):
+            section = "DIAPHRAGM"
+            continue
         if _is_header(s):
             section = None
             continue
@@ -190,6 +207,16 @@ def lint_staad_text(
             for tok in before_pris.split():
                 if tok.isdigit():
                     prop_refs.append(int(tok))
+        elif section == "DIAPHRAGM":
+            if "JOI" in up:
+                after_joi = up.split("JOI", 1)[1].replace("-", " ")
+                for tok in after_joi.split():
+                    if tok.isdigit():
+                        diaphragm_joint_refs.append(int(tok))
+            elif up[0].isdigit():
+                for tok in up.replace("-", " ").split():
+                    if tok.isdigit():
+                        diaphragm_joint_refs.append(int(tok))
 
     if not known_joints:
         errors.append("No joints parsed from JOINT COORDINATES.")
@@ -201,12 +228,20 @@ def lint_staad_text(
             errors.append(
                 f"Member {mid} references undefined joint(s): ({na}, {nb})."
             )
+    support_set = set(support_refs)
     for nid in support_refs:
         if nid not in known_joints:
             errors.append(f"SUPPORTS references undefined joint {nid}.")
     for mid in prop_refs:
         if mid not in known_members:
             errors.append(f"MEMBER PROPERTY references undefined member {mid}.")
+    for nid in diaphragm_joint_refs:
+        if nid not in known_joints:
+            errors.append(f"FLOOR DIAPHRAGM references undefined joint {nid}.")
+        elif nid in support_set:
+            errors.append(
+                f"FLOOR DIAPHRAGM JOI list includes supported node {nid} (must exclude supported nodes)."
+            )
 
     return errors
 
