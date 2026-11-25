@@ -517,6 +517,21 @@ class DesignCheckIssue(BaseModel):
     entity_ids: list[str] = Field(default_factory=list)
 
 
+class SmrfJointCheckResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    joint_node_id: int = Field(ge=1)
+    floor_level: str
+    grid_ref: str = ""
+    sum_mnc_knm: float = Field(ge=0.0)
+    sum_mnb_knm: float = Field(ge=0.0)
+    scwb_ratio: float = Field(ge=0.0)
+    scwb_status: Literal["PASS", "FAIL"]
+    joint_shear_vu_kn: float = Field(ge=0.0)
+    joint_shear_phi_vn_kn: float = Field(gt=0.0)
+    joint_shear_dcr: float = Field(ge=0.0)
+    joint_shear_status: Literal["PASS", "FAIL"]
+
+
 class AnalysisDesignState(BaseModel):
     model_config = ConfigDict(extra="forbid")
     generated_at: str | None = None
@@ -528,6 +543,7 @@ class AnalysisDesignState(BaseModel):
     beam_designs: list[BeamDesignResult] = Field(default_factory=list)
     column_designs: list[ColumnDesignResult] = Field(default_factory=list)
     footing_designs: list[FootingDesignResult] = Field(default_factory=list)
+    smrf_joint_checks: list[SmrfJointCheckResult] = Field(default_factory=list)
     validation_issues: list[DesignCheckIssue] = Field(default_factory=list)
     engineer_approved: bool = False
 

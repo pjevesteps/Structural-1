@@ -11,10 +11,12 @@ from ..models import (
     DesignParameters,
     FootingDesignResult,
     ProjectState,
+    SmrfJointCheckResult,
     StoryDriftResult,
     SupportReactionEnvelope,
 )
 from .anl_parser import parse_staad_anl
+from .smrf_joints import evaluate_smrf_joints
 from .solver import AnalysisResults, BeamForceEnvelope, ColumnForceEnvelope, solve_frame_dsm
 
 
@@ -662,6 +664,7 @@ def _collect_design_issues(
     beams: list[BeamDesignResult],
     columns: list[ColumnDesignResult],
     footings: list[FootingDesignResult],
+    smrf_joints: list[SmrfJointCheckResult] | None = None,
 ) -> list[DesignCheckIssue]:
     issues: list[DesignCheckIssue] = []
 
@@ -750,6 +753,35 @@ def _collect_design_issues(
             )
         )
 
+    if smrf_joints:
+        fail_scwb = [j for j in smrf_joints if j.scwb_status == "FAIL"]
+        if fail_scwb:
+            issues.append(
+                DesignCheckIssue(
+                    severity="warning",
+                    code="SMRF_SCWB_FAIL",
+                    message=(
+                        f"{len(fail_scwb)} beam-column joint(s) failed NSCP Sec. 418.7.3 Strong-Column/Weak-Beam "
+                        f"check (min Sum(Mnc)/Sum(Mnb) = {min(j.scwb_ratio for j in fail_scwb):.2f} < 1.20). "
+                        "Use Auto-Resolve with Enforce SCWB >= 1.20 or upsize columns."
+                    ),
+                    entity_ids=[f"N{j.joint_node_id}" for j in fail_scwb[:12]],
+                )
+            )
+        fail_js = [j for j in smrf_joints if j.joint_shear_status == "FAIL"]
+        if fail_js:
+            issues.append(
+                DesignCheckIssue(
+                    severity="warning",
+                    code="SMRF_JOINT_SHEAR_FAIL",
+                    message=(
+                        f"{len(fail_js)} beam-column joint(s) exceeded NSCP Sec. 418.8.4 horizontal joint shear "
+                        f"capacity (max DCR = {max(j.joint_shear_dcr for j in fail_js):.2f})."
+                    ),
+                    entity_ids=[f"N{j.joint_node_id}" for j in fail_js[:12]],
+                )
+            )
+
     return issues
 
 
@@ -764,7 +796,10 @@ def _build_state_from_results(
     beams = design_beams(project, results, params)
     columns = design_columns(project, results, params)
     footings = design_footings(project, results.support_reactions, params)
-    issues = _collect_design_issues(drifts, results.support_reactions, beams, columns, footings)
+    smrf_joints = evaluate_smrf_joints(project, beams, columns, params)
+    issues = _collect_design_issues(
+        drifts, results.support_reactions, beams, columns, footings, smrf_joints
+    )
 
     return AnalysisDesignState(
         generated_at=_utc_now(),
@@ -776,6 +811,7 @@ def _build_state_from_results(
         beam_designs=beams,
         column_designs=columns,
         footing_designs=footings,
+        smrf_joint_checks=smrf_joints,
         validation_issues=issues,
         engineer_approved=False,
     )

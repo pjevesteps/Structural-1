@@ -76,19 +76,6 @@ async def upload_staad_anl(project_id: str, file: UploadFile = File(...)):
     return state
 
 
-@router.post("/auto-resolve", response_model=AutoResolveResponse)
-def auto_resolve_design(project_id: str, payload: AutoResolveRequest | None = None):
-    project = _load_or_404(project_id)
-    req = payload if payload is not None else AutoResolveRequest()
-    try:
-        result = run_auto_resolve(project, req)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-
-    storage.save_project(project)
-    return result
-
-
 @router.post("/approve", response_model=AnalysisDesignState)
 def approve_design(project_id: str):
     project = _load_or_404(project_id)

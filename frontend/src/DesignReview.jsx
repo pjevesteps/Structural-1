@@ -50,8 +50,9 @@ export default function DesignReview({ project, onClose, onUpdated }) {
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
   const [autoLog, setAutoLog] = useState(null);
+  const [enforceScwb, setEnforceScwb] = useState(false);
 
-  // Active tab: util3d | drift | beams | columns | footings
+  // Active tab: util3d | drift | beams | columns | footings | smrf
   const [activeTab, setActiveTab] = useState("util3d");
 
   // Design parameters state
@@ -186,9 +187,13 @@ export default function DesignReview({ project, onClose, onUpdated }) {
     const cols = ad?.column_designs || [];
     const ftgs = ad?.footing_designs || [];
     const drifts = ad?.story_drifts || [];
+    const joints = ad?.smrf_joint_checks || [];
     const beamPass = beams.filter((b) => b.status === "PASS").length;
     const colPass = cols.filter((c) => c.status === "PASS").length;
     const ftgPass = ftgs.filter((f) => f.status === "PASS").length;
+    const jointPass = joints.filter(
+      (j) => j.scwb_status === "PASS" && j.joint_shear_status === "PASS"
+    ).length;
     const maxDrift = drifts.reduce(
       (acc, d) => Math.max(acc, d.drift_ratio_x, d.drift_ratio_z),
       0
@@ -202,6 +207,8 @@ export default function DesignReview({ project, onClose, onUpdated }) {
       colTotal: cols.length,
       ftgPass,
       ftgTotal: ftgs.length,
+      jointPass,
+      jointTotal: joints.length,
       maxDrift,
       maxColDcr,
       maxBeamDcr,
@@ -406,7 +413,7 @@ export default function DesignReview({ project, onClose, onUpdated }) {
       const res = await apiJson(`/api/projects/${pid}/design/auto-resolve`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ max_iterations: 6 }),
+        body: JSON.stringify({ max_iterations: 6, enforce_scwb: enforceScwb }),
       });
       setAutoLog(res);
       setFullProject((prev) => (prev ? { ...prev, analysis_design: res.analysis_design } : prev));
@@ -676,12 +683,20 @@ export default function DesignReview({ project, onClose, onUpdated }) {
           />
           STAAD ACI Design Block
         </label>
+        <label className="pdf-check" title="Upsize columns during Auto-Resolve if Sum(Mnc)/Sum(Mnb) < 1.20 or joint shear fails">
+          <input
+            type="checkbox"
+            checked={enforceScwb}
+            onChange={(e) => setEnforceScwb(e.target.checked)}
+          />
+          Enforce SCWB &ge; 1.20
+        </label>
       </div>
 
       {/* Main Split Workspace */}
       <div className="geom-workspace">
         <div className="sizing-main-col">
-          {/* 5 Workspace Tabs */}
+          {/* 6 Workspace Tabs */}
           <div className="geom-floor-tabs loads-tabs">
             {[
               ["util3d", "1. 3D Utilization View"],
@@ -689,6 +704,7 @@ export default function DesignReview({ project, onClose, onUpdated }) {
               ["beams", `3. Beam Schedule (${kpis.beamTotal})`],
               ["columns", `4. Column Schedule (${kpis.colTotal})`],
               ["footings", `5. Footing Schedule (${kpis.ftgTotal})`],
+              ["smrf", `6. SMRF Joints (SCWB) (${kpis.jointTotal})`],
             ].map(([key, label]) => (
               <button
                 key={key}
@@ -1279,6 +1295,83 @@ export default function DesignReview({ project, onClose, onUpdated }) {
                       <tr>
                         <td colSpan={9} className="loads-empty">
                           Run Analysis &amp; RC Design to generate isolated footing sizing.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* TAB 6: SMRF JOINTS (SCWB & JOINT SHEAR) */}
+          {activeTab === "smrf" && (
+            <div className="geom-panel">
+              <div className="geom-panel-head">
+                <div>
+                  <strong>NSCP Sec. 418 SMRF Beam-Column Joint &amp; SCWB Verification</strong>
+                  <small>
+                    Strong-Column/Weak-Beam (&Sigma;Mnc / &Sigma;Mnb &ge; 1.20, Sec. 418.7.3) &amp;
+                    Horizontal Joint Shear (Vu &le; &phi;Vn, Sec. 418.8.4) · {kpis.jointPass}/
+                    {kpis.jointTotal} PASS
+                  </small>
+                </div>
+              </div>
+              <div className="sizing-table-wrap">
+                <table className="sizing-table">
+                  <thead>
+                    <tr>
+                      <th>Node</th>
+                      <th>Level</th>
+                      <th>Grid</th>
+                      <th>Sum Mnc (kN·m)</th>
+                      <th>Sum Mnb (kN·m)</th>
+                      <th>SCWB Ratio &ge; 1.20</th>
+                      <th>Joint Shear DCR</th>
+                      <th>Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(ad?.smrf_joint_checks || []).map((j) => {
+                      const bothPass = j.scwb_status === "PASS" && j.joint_shear_status === "PASS";
+                      return (
+                        <tr key={j.joint_node_id}>
+                          <td>
+                            <code>N{j.joint_node_id}</code>
+                          </td>
+                          <td>{j.floor_level}</td>
+                          <td>{j.grid_ref || "—"}</td>
+                          <td>{j.sum_mnc_knm.toFixed(1)}</td>
+                          <td>{j.sum_mnb_knm.toFixed(1)}</td>
+                          <td
+                            style={{
+                              color: j.scwb_status === "PASS" ? "#10b981" : "#ef4444",
+                            }}
+                          >
+                            <b>{j.scwb_ratio.toFixed(2)}</b>
+                          </td>
+                          <td
+                            style={{
+                              color: dcrColor(j.joint_shear_dcr, j.joint_shear_status),
+                            }}
+                            title={`Vu = ${j.joint_shear_vu_kn.toFixed(1)} kN / phi Vn = ${j.joint_shear_phi_vn_kn.toFixed(1)} kN`}
+                          >
+                            <b>{j.joint_shear_dcr.toFixed(2)}</b>
+                          </td>
+                          <td>
+                            <span
+                              className={`design-status-pill ${bothPass ? "pass" : "fail"}`}
+                            >
+                              {bothPass ? "PASS" : "FAIL"}
+                            </span>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                    {!(ad?.smrf_joint_checks || []).length && (
+                      <tr>
+                        <td colSpan={8} className="loads-empty">
+                          Run Analysis &amp; RC Design to evaluate elevated SMRF beam-column joints.
                         </td>
                       </tr>
                     )}

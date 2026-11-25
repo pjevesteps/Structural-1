@@ -622,6 +622,41 @@ def build_calculation_report_pdf(project: ProjectState) -> bytes:
                 status_col=8,
             )
 
+        if ad.smrf_joint_checks:
+            add_sub("5.4 NSCP Sec. 418 SMRF Joint & SCWB Summary")
+            scwb_pass = sum(1 for j in ad.smrf_joint_checks if j.scwb_status == "PASS")
+            js_pass = sum(1 for j in ad.smrf_joint_checks if j.joint_shear_status == "PASS")
+            story.append(
+                Paragraph(
+                    _safe_pdf_text(
+                        f"Evaluated {len(ad.smrf_joint_checks)} beam-column joint(s): "
+                        f"{scwb_pass}/{len(ad.smrf_joint_checks)} PASS SCWB (>= 1.20, NSCP Sec. 418.7.3) | "
+                        f"{js_pass}/{len(ad.smrf_joint_checks)} PASS Joint Shear (NSCP Sec. 418.8.4)."
+                    ),
+                    st_note,
+                )
+            )
+            j_rows = [
+                [
+                    f"N{j.joint_node_id}",
+                    j.floor_level,
+                    j.grid_ref or "-",
+                    f"{j.sum_mnc_knm:.1f}",
+                    f"{j.sum_mnb_knm:.1f}",
+                    f"{j.scwb_ratio:.2f}",
+                    f"{j.joint_shear_dcr:.2f}",
+                    "PASS" if (j.scwb_status == "PASS" and j.joint_shear_status == "PASS") else "FAIL",
+                ]
+                for j in ad.smrf_joint_checks
+            ]
+            add_table(
+                ["Node", "Level", "Grid", "Sum Mnc", "Sum Mnb", "SCWB", "Shear DCR", "Status"],
+                j_rows,
+                col_weights=[9, 14, 13, 13, 13, 12, 14, 12],
+                right_cols={3, 4, 5, 6},
+                status_col=7,
+            )
+
     # =========================================================================
     # SECTION 6: BOM & COST ESTIMATE
     # =========================================================================

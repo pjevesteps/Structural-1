@@ -8,6 +8,7 @@ from ..loads.engine import generate_loads
 from ..models import AnalysisDesignState, ProjectState
 from ..sizing.validator import validate_member_sizing
 from .rc_design import run_analysis_and_design
+from .smrf_joints import smrf_scwb_auto_resolve_hook
 
 
 class AutoResolveRequest(BaseModel):
@@ -18,6 +19,7 @@ class AutoResolveRequest(BaseModel):
     upsize_footings: bool = True
     control_story_drift: bool = True
     respect_locked_sections: bool = True
+    enforce_scwb: bool = False
 
 
 class AutoResolveResponse(BaseModel):
@@ -53,7 +55,9 @@ def run_auto_resolve(
     Modular `extra_check_hooks` allow Sprint C checks (e.g., SMRF SCWB) to flag additional
     section IDs for upsizing without modifying this loop.
     """
-    hooks = extra_check_hooks or []
+    hooks = list(extra_check_hooks or [])
+    if req.enforce_scwb and smrf_scwb_auto_resolve_hook not in hooks:
+        hooks.append(smrf_scwb_auto_resolve_hook)
     history: list[dict] = []
     converged = False
     sec_by_id = {s.section_id: s for s in project.member_sizing.sections}
