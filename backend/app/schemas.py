@@ -1,4 +1,4 @@
-"""Backward-compatible re-export of core project, geometry, member sizing, load generation, analysis/design, and reporting schemas."""
+"""Backward-compatible re-export of core project, geometry, member sizing, load generation, analysis/design, reporting, and CAD schemas."""
 
 from .models import (
     AnalysisDesignState,
@@ -10,6 +10,9 @@ from .models import (
     BomCostLine,
     BomCostParameters,
     BomSummary,
+    CadDrawingOptions,
+    CadDrawingState,
+    CadSheetSummary,
     Column,
     ColumnDesignResult,
     ConcreteQuantityRow,
@@ -64,6 +67,9 @@ __all__ = [
     "BomCostLine",
     "BomCostParameters",
     "BomSummary",
+    "CadDrawingOptions",
+    "CadDrawingState",
+    "CadSheetSummary",
     "Column",
     "ColumnDesignResult",
     "ConcreteQuantityRow",

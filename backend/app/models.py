@@ -637,6 +637,37 @@ class ReportState(BaseModel):
     readiness_warnings: list[str] = Field(default_factory=list)
 
 
+class CadDrawingOptions(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    sheet_size: Literal["A1", "A2", "A3"] = "A1"
+    plan_scale: int = Field(default=100, ge=20, le=500)
+    detail_scale: int = Field(default=25, ge=5, le=100)
+    sheet_prefix: str = Field(default="S", min_length=1, max_length=10)
+    include_general_notes: bool = True
+    include_foundation_plan: bool = True
+    include_framing_plans: bool = True
+    include_schedules: bool = True
+    include_typical_details: bool = True
+
+
+class CadSheetSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    sheet_no: str
+    title: str
+    contents: list[str] = Field(default_factory=list)
+    entity_count: int = Field(default=0, ge=0)
+
+
+class CadDrawingState(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    generated_at: str | None = None
+    options: CadDrawingOptions = Field(default_factory=CadDrawingOptions)
+    sheets: list[CadSheetSummary] = Field(default_factory=list)
+    total_entities: int = Field(default=0, ge=0)
+    layers: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
 class ProjectState(BaseModel):
     model_config = ConfigDict(extra="forbid")
     project_info: ProjectInfo
@@ -650,6 +681,7 @@ class ProjectState(BaseModel):
     load_generation: LoadGenerationState = Field(default_factory=LoadGenerationState)
     analysis_design: AnalysisDesignState = Field(default_factory=AnalysisDesignState)
     reporting: ReportState = Field(default_factory=ReportState)
+    cad_drawings: CadDrawingState = Field(default_factory=CadDrawingState)
 
     @model_validator(mode="after")
     def check_references(self):

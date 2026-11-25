@@ -309,3 +309,18 @@
 .report-paper-total{display:flex;justify-content:space-between;align-items:center;margin-top:14px;padding:10px 14px;background:#1b365d;color:#ffffff;border-radius:6px;font-size:12px}
 .report-paper-total strong{font-size:15px;color:#6ee7b7}
 @media(max-width:760px){.report-form-grid,.report-toggles-grid,.report-paper-meta,.report-paper-kpis{grid-template-columns:1fr}.report-span-2{grid-column:span 1}}
+
+/* Phase 7: Module 07 Structural Drawings (AutoCAD .dxf & Interactive SVG Viewer) */
+.cad-launch-btn{border-color:#ec4899;color:#f9a8d4}
+.cad-download-btn{border-color:#22d3ee;color:#67e8f9}
+.cad-builder{padding:26px 0 12px}
+.cad-zoom-controls{display:flex;align-items:center;gap:5px}
+.cad-zoom-readout{font-size:11px;color:#cbd5e1;min-width:40px;text-align:center;font-family:Consolas,ui-monospace,monospace}
+.cad-viewport{position:relative;width:100%;height:560px;background:#0b111e;overflow:hidden;cursor:grab;user-select:none;display:flex;align-items:center;justify-content:center}
+.cad-viewport:active{cursor:grabbing}
+.cad-viewport-inner{width:100%;height:100%;transform-origin:center center;transition:transform 60ms linear;display:flex;align-items:center;justify-content:center}
+.cad-svg-canvas{width:100%;height:100%;display:block}
+.cad-layer-list{display:flex;flex-direction:column;gap:5px;max-height:280px;overflow-y:auto}
+.cad-layer-item{display:flex;align-items:center;gap:7px;padding:5px 8px;border-radius:7px;background:#0e1828;border:1px solid #223147;font-size:11px;cursor:pointer}
+.cad-layer-item code{font-size:10px;color:#eaf0f6;min-width:86px}
+.cad-layer-item small{font-size:10px;color:#8999ae;margin-left:auto}

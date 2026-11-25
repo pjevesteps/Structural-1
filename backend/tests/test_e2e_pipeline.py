@@ -992,6 +992,31 @@ def test_full_pipeline_phase1_to_phase6(isolated_env, tmp_path: Path):
     assert "=== PNS 49:2020 REINFORCING STEEL BREAKDOWN ===" in bom_csv_resp.text
 
     # =========================================================================
+    # PHASE 7: Structural Drawings (AutoCAD .dxf Plans, Schedules & SVG Preview)
+    # =========================================================================
+    import ezdxf
+
+    cad_res = client.post(
+        f"/api/projects/{pid}/cad/generate",
+        json={"options": {"sheet_size": "A1", "plan_scale": 100, "detail_scale": 25}},
+    )
+    assert cad_res.status_code == 200, cad_res.text
+    cad_state = cad_res.json()
+    assert cad_state["generated_at"] is not None
+    assert [s["sheet_no"] for s in cad_state["sheets"]] == ["S-1", "S-2", "S-3"]
+    assert cad_state["total_entities"] > 100
+
+    dxf_resp = client.get(f"/api/projects/{pid}/cad/download/dxf")
+    assert dxf_resp.status_code == 200
+    dxf_doc = ezdxf.read(io.StringIO(dxf_resp.content.decode("utf-8")))
+    assert dxf_doc.audit().errors == []
+    assert "S-GRID" in dxf_doc.layers and "S-FTG" in dxf_doc.layers and "S-SCHED" in dxf_doc.layers
+
+    svg_resp = client.get(f"/api/projects/{pid}/cad/preview-svg", params={"sheet_no": "S-1"})
+    assert svg_resp.status_code == 200
+    assert 'data-layer="S-TITLEBLK"' in svg_resp.json()["svg"]
+
+    # =========================================================================
     # PERSISTENCE ROUND-TRIP CHECK (Strict ProjectState extra="forbid")
     # =========================================================================
     persisted_json = data_root / "projects" / f"{pid}.json"
@@ -1014,3 +1039,5 @@ def test_full_pipeline_phase1_to_phase6(isolated_env, tmp_path: Path):
     assert reloaded.reporting.generated_at is not None
     assert reloaded.reporting.bom is not None
     assert reloaded.reporting.bom.grand_total_cost_php > 0
+    assert reloaded.cad_drawings.generated_at is not None
+    assert len(reloaded.cad_drawings.sheets) == 3

@@ -356,4 +356,44 @@ test.describe.serial("Structural AI Office — Full Browser E2E (Modules 01 to 0
 
     guards.assertClean();
   });
+
+  test("Test 7 — Module 07: Structural Drawings (AutoCAD .dxf & Live SVG Viewer)", async ({
+    page,
+  }) => {
+    const guards = attachRuntimeGuards(page);
+    await openProjectModule(page, "CAD / DXF");
+    await expect(
+      page.getByText("MODULE 07 · STRUCTURAL DRAWINGS (AUTOCAD .DXF PLANS, SCHEDULES & DETAILS)")
+    ).toBeVisible();
+
+    // 1. Generate CAD drawings and verify S-1 SVG preview renders
+    await page.getByRole("button", { name: "Generate CAD Drawings" }).click();
+    await expect(page.locator(".notice")).toContainText(/Generated 3 AutoCAD sheet/i);
+    await expect(page.locator("svg.cad-svg-canvas")).toBeVisible();
+    await expect(page.locator('svg.cad-svg-canvas g[data-layer="S-TITLEBLK"]')).toBeVisible();
+
+    // 2. Switch to S-2 and S-3 sheet tabs
+    await page.getByRole("button", { name: /S-2 ·/ }).click();
+    await expect(page.locator(".geom-legend")).toContainText("S-2");
+    await page.getByRole("button", { name: /S-3 ·/ }).click();
+    await expect(page.locator(".geom-legend")).toContainText("S-3");
+
+    // 3. Toggle a CAD layer visibility checkbox in the sidebar
+    const schedLayerToggle = page.locator(".cad-layer-item", { hasText: "S-SCHED" }).locator('input[type="checkbox"]');
+    await schedLayerToggle.uncheck();
+    await expect(page.locator('svg.cad-svg-canvas g[data-layer="S-SCHED"]')).toBeHidden();
+    await schedLayerToggle.check();
+
+    // 4. Download AutoCAD .dxf and verify valid DXF structure
+    const [dxfDl] = await Promise.all([
+      page.waitForEvent("download"),
+      page.getByRole("button", { name: "Download AutoCAD (.dxf)" }).click(),
+    ]);
+    const dxfText = fs.readFileSync(await dxfDl.path(), "utf-8");
+    expect(dxfText).toContain("SECTION");
+    expect(dxfText).toContain("S-TITLEBLK");
+    expect(dxfText).toContain("EOF");
+
+    guards.assertClean();
+  });
 });
