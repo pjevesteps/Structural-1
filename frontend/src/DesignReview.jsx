@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import PostDesignViewer from "./PostDesignViewer";
 
 function project3D(pt, center, yaw, pitch, scale, width, height) {
   const dx = pt.x - center.x;
@@ -112,6 +113,7 @@ export default function DesignReview({ project, onClose, onUpdated }) {
   // 3D Viewer state
   const [storyFilter, setStoryFilter] = useState("ALL");
   const [selectedMemberId, setSelectedMemberId] = useState(null);
+  const [studioSelection, setStudioSelection] = useState(null);
   const [yaw, setYaw] = useState(-0.68);
   const [pitch, setPitch] = useState(0.46);
   const [zoom3d, setZoom3d] = useState(1.0);
@@ -770,6 +772,27 @@ export default function DesignReview({ project, onClose, onUpdated }) {
           Enforce SCWB &ge; 1.20
         </label>
       </div>
+
+      {/* Post-Design CAD-BIM Studio (3D/2D Interactive Viewer + Inspector) */}
+      {ad?.generated_at && fullProject && (
+        <PostDesignViewer
+          project={fullProject}
+          analysisDesign={ad}
+          selectedEntity={studioSelection}
+          onSelectEntity={(ent) => {
+            setStudioSelection(ent);
+            if (ent && (ent.type === "beam" || ent.type === "column")) {
+              setSelectedMemberId(ent.id);
+            }
+          }}
+          onDesignUpdated={(updatedAd) => {
+            setFullProject((prev) => (prev ? { ...prev, analysis_design: updatedAd } : prev));
+            if (onUpdated) onUpdated();
+          }}
+          onNotice={setNotice}
+          onError={setError}
+        />
+      )}
 
       {/* Main Split Workspace */}
       <div className="geom-workspace">

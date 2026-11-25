@@ -273,6 +273,16 @@ test.describe.serial("Structural AI Office — Full Browser E2E (Modules 01 to 0
     await page.getByRole("button", { name: "Run Analysis & RC Design" }).click();
     await expect(page.locator(".notice")).toContainText(/completed/i);
 
+    // 0. Verify Post-Design CAD-BIM Studio renders, overlay switches work, and clicking opens cross-section inspector
+    const studio = page.getByTestId("post-design-viewer");
+    await expect(studio).toBeVisible();
+    await studio.getByRole("button", { name: "Marks & Sizes" }).click();
+    await studio.getByRole("button", { name: "Force Envelopes" }).click();
+    await studio.getByRole("button", { name: "Joint SCWB" }).click();
+    await studio.getByRole("button", { name: "DCR Heatmap" }).click();
+    await studio.locator("svg.pdv-2d-svg rect").first().click({ force: true });
+    await expect(studio.locator("svg.pdv-blueprint-svg")).toBeVisible();
+
     // 1. Verify Story Drift & Reactions tab renders rows
     await page.getByRole("button", { name: "2. Story Drift & Reactions" }).click();
     expect(await page.locator("table.sizing-table").nth(0).locator("tbody tr").count()).toBeGreaterThanOrEqual(3);

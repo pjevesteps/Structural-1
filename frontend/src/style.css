@@ -359,3 +359,62 @@
 .rev-delta-strip strong{display:block;font-size:13px;color:#eaf0f6;margin-top:3px}
 .rev-delta-strip strong.delta-up{color:#fcd34d}
 .rev-delta-strip strong.delta-down{color:#6ee7b7}
+
+/* Post-Design CAD-BIM Studio (Module 06) */
+.pdv-studio{background:#090e17;border:1px solid #1e293b;border-radius:10px;overflow:hidden;margin-bottom:14px;font-variant-numeric:tabular-nums}
+.pdv-studio-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 14px;background:#0f172a;border-bottom:1px solid #1e293b}
+.pdv-studio-title{display:flex;flex-direction:column;gap:2px}
+.pdv-studio-title strong{font-size:12px;letter-spacing:.04em;color:#e2e8f0}
+.pdv-studio-title small{font-size:11px;color:#94a3b8}
+.pdv-studio-head-right{display:flex;align-items:center;gap:8px}
+.pdv-workspace{display:flex;min-height:520px;background:#090e17}
+.pdv-stage{flex:1;min-width:0;display:flex;flex-direction:column;background:#090e17;position:relative}
+.pdv-hud{min-height:36px;display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:4px 10px;background:rgba(15,23,42,.88);backdrop-filter:blur(6px);border-bottom:1px solid #1e293b}
+.pdv-seg-group{display:inline-flex;background:#090e17;border:1px solid #334155;border-radius:6px;overflow:hidden}
+.pdv-seg{background:transparent;border:none;color:#94a3b8;font-size:11px;padding:4px 9px;cursor:pointer;border-radius:0}
+.pdv-seg:hover{color:#e2e8f0;background:#1e293b}
+.pdv-seg.active{background:#0ea5e9;color:#082f49;font-weight:700}
+.pdv-hud-check{display:inline-flex;align-items:center;gap:5px;font-size:11px;color:#cbd5e1;cursor:pointer}
+.pdv-hud-select{background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:5px;font-size:11px;padding:3px 6px}
+.pdv-hud-amp{font-size:11px;color:#38bdf8;font-weight:600;min-width:28px}
+.pdv-pin-btn{margin-left:auto;background:#1e293b;color:#38bdf8;border:1px solid #38bdf8;border-radius:6px;font-size:11px;padding:4px 10px;cursor:pointer;font-weight:600}
+.pdv-pin-btn:hover{background:#0ea5e9;color:#082f49}
+.pdv-viewports{flex:1;display:grid;min-height:480px}
+.pdv-viewports.mode-split{grid-template-columns:1fr 1fr}
+.pdv-viewports.mode-3d,.pdv-viewports.mode-2d{grid-template-columns:1fr}
+.pdv-pane{position:relative;display:flex;flex-direction:column;min-height:480px;overflow:hidden}
+.pdv-3d-pane{border-right:1px solid #1e293b}
+.pdv-3d-canvas{width:100%;height:100%;min-height:480px;display:block;cursor:grab}
+.pdv-3d-canvas:active{cursor:grabbing}
+.pdv-cam-pills{position:absolute;top:10px;right:10px;z-index:2;display:flex;gap:4px}
+.pdv-cam-pill{background:rgba(15,23,42,.85);color:#cbd5e1;border:1px solid #334155;border-radius:4px;font-size:10px;padding:3px 7px;cursor:pointer;font-weight:600}
+.pdv-cam-pill:hover{border-color:#38bdf8;color:#38bdf8}
+.pdv-legend{position:absolute;bottom:10px;left:10px;z-index:2;display:flex;gap:10px;padding:4px 9px;background:rgba(15,23,42,.85);border:1px solid #1e293b;border-radius:6px;font-size:10.5px;color:#cbd5e1}
+.pdv-legend span{display:inline-flex;align-items:center;gap:5px}
+.pdv-legend i{display:inline-block;width:9px;height:9px;border-radius:2px}
+.pdv-2d-bar{padding:6px 10px;background:#0c1424;border-bottom:1px solid #1e293b;display:flex;justify-content:space-between;align-items:center}
+.pdv-2d-svg{width:100%;height:100%;min-height:440px;background:#090e17;display:block}
+.pdv-inspector{width:320px;flex-shrink:0;background:#0f172a;border-left:1px solid #1e293b;padding:12px;overflow-y:auto;font-variant-numeric:tabular-nums}
+.pdv-insp-body{display:flex;flex-direction:column;gap:10px}
+.pdv-insp-head{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;border-bottom:1px solid #1e293b;padding-bottom:8px}
+.pdv-insp-head strong{display:block;font-size:12.5px;color:#f1f5f9;margin-bottom:4px}
+.pdv-insp-sub{font-size:11px;color:#94a3b8}
+.pdv-kpi-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.pdv-kpi{background:#090e17;border:1px solid #1e293b;border-radius:7px;padding:8px 10px;display:flex;flex-direction:column;gap:2px}
+.pdv-kpi small{font-size:10.5px;color:#94a3b8}
+.pdv-kpi strong{font-size:16px;color:#f8fafc}
+.pdv-clash-box{background:#090e17;border:1px solid #1e293b;border-radius:7px;padding:9px 10px;display:flex;flex-direction:column;gap:6px}
+.pdv-clash-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:4px}
+.pdv-clash-link{background:rgba(239,68,68,.12);color:#fca5a5;border:1px solid rgba(239,68,68,.35);border-radius:5px;font-size:11px;padding:4px 7px;text-align:left;cursor:pointer;width:100%}
+.pdv-blueprint-svg{width:100%;height:186px;background:#090e17;border:1px solid #1e293b;border-radius:7px}
+.pdv-dcr-block{display:flex;flex-direction:column;gap:7px}
+.pdv-dcr-row{display:flex;flex-direction:column;gap:3px}
+.pdv-dcr-labels{display:flex;justify-content:space-between;font-size:11px;color:#cbd5e1}
+.pdv-dcr-track{height:6px;background:#1e293b;border-radius:3px;overflow:hidden}
+.pdv-dcr-fill{height:100%;border-radius:3px;transition:width .2s ease}
+.pdv-override-box{background:#090e17;border:1px solid #1e293b;border-radius:7px;padding:10px}
+.pdv-override-title{font-size:11px;font-weight:700;color:#38bdf8;text-transform:uppercase;letter-spacing:.04em;margin-bottom:7px}
+.pdv-override-grid{display:grid;grid-template-columns:1fr 1fr;gap:7px}
+.pdv-override-grid label{display:flex;flex-direction:column;gap:2px;font-size:10.5px;color:#94a3b8}
+.pdv-override-grid input{background:#0f172a;color:#f1f5f9;border:1px solid #334155;border-radius:4px;padding:4px 6px;font-size:11.5px;width:100%}
+@media (max-width:1100px){.pdv-workspace{flex-direction:column}.pdv-inspector{width:100%;border-left:none;border-top:1px solid #1e293b}.pdv-viewports.mode-split{grid-template-columns:1fr}}
