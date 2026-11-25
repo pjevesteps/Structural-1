@@ -317,3 +317,60 @@ def test_custom_per_sheet_composer_pdf_zip_and_overflow_guard(cad_client):
     assert a3_doc[0].rect.width == pytest.approx(420.0 * 72.0 / 25.4, rel=0.01)
     assert a3_doc[0].rect.height == pytest.approx(297.0 * 72.0 / 25.4, rel=0.01)
     a3_doc.close()
+
+
+def test_dwg_status_and_binary_dwg_export_mocked_and_503_fallback(cad_client, monkeypatch: pytest.MonkeyPatch):
+    from backend.app.cad import dwg_converter as dwg_mod
+
+    client, _ = cad_client
+    pid = "CAD-DWG-01"
+    _run_prereqs(client, pid)
+    assert client.post(f"/api/projects/{pid}/cad/generate").status_code == 200
+
+    # 1. Live /cad/dwg-status returns expected metadata contract
+    st_res = client.get(f"/api/projects/{pid}/cad/dwg-status")
+    assert st_res.status_code == 200
+    st = st_res.json()
+    assert isinstance(st["available"], bool)
+    assert "backend" in st and "executable_path" in st and "ODA File Converter" in st["install_hint"]
+
+    # 2. When no converter binary is available -> HTTP 503 with clear ODA setup guidance
+    monkeypatch.setattr(
+        dwg_mod,
+        "detect_dwg_converter",
+        lambda: {
+            "available": False,
+            "backend": None,
+            "executable_path": None,
+            "install_hint": dwg_mod.INSTALL_HINT,
+        },
+    )
+    unavail = client.get(f"/api/projects/{pid}/cad/download/dwg")
+    assert unavail.status_code == 503
+    assert "ODA File Converter" in unavail.json()["detail"]
+
+    # 3. When ODA File Converter is available (mocked odafc.convert) -> streams binary .dwg bytes
+    fake_dwg_payload = b"AC1027\x00\x00\x00\x00\x00BINARY_DWG_TEST_STREAM"
+
+    def _fake_oda_convert(src: str, dst: str, version: str = "R2013", replace: bool = True):
+        assert Path(src).is_file()
+        assert version == "R2013"
+        Path(dst).write_bytes(fake_dwg_payload)
+
+    monkeypatch.setattr(
+        dwg_mod,
+        "detect_dwg_converter",
+        lambda: {
+            "available": True,
+            "backend": "oda_file_converter",
+            "executable_path": "ODAFileConverter.exe",
+            "install_hint": dwg_mod.INSTALL_HINT,
+        },
+    )
+    monkeypatch.setattr(dwg_mod.odafc, "convert", _fake_oda_convert)
+
+    ok_res = client.get(f"/api/projects/{pid}/cad/download/dwg")
+    assert ok_res.status_code == 200
+    assert ok_res.headers["content-type"].startswith("application/acad")
+    assert ok_res.content == fake_dwg_payload
+    assert ok_res.content.startswith(b"AC1027")

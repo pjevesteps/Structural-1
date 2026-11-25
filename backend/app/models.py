@@ -657,6 +657,7 @@ class CadDrawingOptions(BaseModel):
     include_schedules: bool = True
     include_typical_details: bool = True
     preset: Literal["custom", "a1_permit_set", "a3_individual_floors"] = "a1_permit_set"
+    dwg_version: Literal["ACAD2010", "ACAD2013", "ACAD2018"] = "ACAD2013"
     sheets: list[CadSheetConfig] = Field(default_factory=list)
 
 

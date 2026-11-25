@@ -6,6 +6,11 @@ from pydantic import BaseModel, ConfigDict
 
 from .. import storage
 from ..models import CadDrawingOptions, CadDrawingState
+from .dwg_converter import (
+    DwgConverterUnavailableError,
+    convert_dxf_to_dwg,
+    detect_dwg_converter,
+)
 from .dxf_builder import (
     build_dxf_bytes,
     build_sheets_pdf,
@@ -45,6 +50,43 @@ def generate_cad_drawings(project_id: str, payload: GenerateCadRequest | None = 
     project.cad_drawings = state
     storage.save_project(project)
     return state
+
+
+@router.get("/dwg-status")
+def get_cad_dwg_status(project_id: str):
+    _load_or_404(project_id)
+    return detect_dwg_converter()
+
+
+@router.get("/download/dwg")
+def download_cad_dwg(project_id: str):
+    project = _load_or_404(project_id)
+    try:
+        dxf_bytes, state = build_dxf_bytes(project)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    if project.cad_drawings.generated_at is None:
+        project.cad_drawings = state
+        storage.save_project(project)
+
+    try:
+        dwg_bytes = convert_dxf_to_dwg(
+            dxf_bytes,
+            dwg_version=project.cad_drawings.options.dwg_version,
+        )
+    except DwgConverterUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    return Response(
+        content=dwg_bytes,
+        media_type="application/acad",
+        headers={
+            "Content-Disposition": f'attachment; filename="{project_id}_Structural_Plans.dwg"',
+        },
+    )
 
 
 @router.get("/download/dxf")

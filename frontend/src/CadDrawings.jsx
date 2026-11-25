@@ -11,6 +11,7 @@ const DEFAULT_OPTIONS = {
   include_schedules: true,
   include_typical_details: true,
   preset: "a1_permit_set",
+  dwg_version: "ACAD2013",
   sheets: [],
 };
 
@@ -60,6 +61,12 @@ export default function CadDrawings({ project, onClose, onUpdated }) {
   const [error, setError] = useState("");
 
   const [options, setOptions] = useState(DEFAULT_OPTIONS);
+  const [dwgStatus, setDwgStatus] = useState({
+    available: false,
+    backend: null,
+    executable_path: null,
+    install_hint: "",
+  });
   const [composerOpen, setComposerOpen] = useState(true);
   const [activeSheet, setActiveSheet] = useState("");
   const [preview, setPreview] = useState(null);
@@ -91,8 +98,17 @@ export default function CadDrawings({ project, onClose, onUpdated }) {
     setBusy(true);
     setError("");
     try {
-      const p = await apiJson(`/api/projects/${pid}`);
+      const [p, dwg] = await Promise.all([
+        apiJson(`/api/projects/${pid}`),
+        apiJson(`/api/projects/${pid}/cad/dwg-status`).catch(() => ({
+          available: false,
+          backend: null,
+          executable_path: null,
+          install_hint: "",
+        })),
+      ]);
       setFullProject(p);
+      setDwgStatus(dwg);
       if (p.cad_drawings?.options) {
         setOptions({ ...DEFAULT_OPTIONS, ...p.cad_drawings.options });
       }
@@ -307,6 +323,18 @@ export default function CadDrawings({ project, onClose, onUpdated }) {
     }
   }
 
+  function handleDownloadDwg() {
+    if (!dwgStatus?.available) {
+      setError(
+        dwgStatus?.install_hint ||
+          "Native .dwg export requires ODA File Converter or AutoCAD Core Console. Install ODA File Converter or download the .dxf file directly."
+      );
+      return;
+    }
+    setError("");
+    triggerDownload("download/dwg", `${project.project_id}_Structural_Plans.dwg`);
+  }
+
   function triggerDownload(endpoint, filename) {
     const a = document.createElement("a");
     a.href = `/api/projects/${pid}/cad/${endpoint}`;
@@ -364,18 +392,30 @@ export default function CadDrawings({ project, onClose, onUpdated }) {
             {cad?.generated_at ? "Regenerate CAD Drawings" : "Generate CAD Drawings"}
           </button>
           <button
+            className="secondary cad-dwg-btn"
+            disabled={busy || !hasPrereqs}
+            title={
+              dwgStatus?.available
+                ? `Export binary ${options.dwg_version} .dwg via ${dwgStatus.backend}`
+                : dwgStatus?.install_hint || "Install ODA File Converter for native .dwg export"
+            }
+            onClick={handleDownloadDwg}
+          >
+            Download AutoCAD (.dwg)
+          </button>
+          <button
             className="secondary cad-download-btn"
             disabled={busy || !hasPrereqs}
             onClick={() => triggerDownload("download/dxf", `${project.project_id}_Structural_Plans.dxf`)}
           >
-            Download AutoCAD (.dxf)
+            Download DXF (.dxf)
           </button>
           <button
             className="secondary report-pdf-btn"
             disabled={busy || !hasPrereqs}
             onClick={() => triggerDownload("download/pdf", `${project.project_id}_Structural_Plans.pdf`)}
           >
-            Download PDF
+            Download PDF (.pdf)
           </button>
           <button
             className="secondary loads-download-btn"
@@ -440,6 +480,18 @@ export default function CadDrawings({ project, onClose, onUpdated }) {
               <option value={25}>1:25</option>
               <option value={20}>1:20</option>
               <option value={30}>1:30</option>
+            </select>
+          </label>
+          <label className="design-param-field">
+            <span>DWG Version</span>
+            <select
+              aria-label="DWG Version"
+              value={options.dwg_version || "ACAD2013"}
+              onChange={(e) => setOptions({ ...options, dwg_version: e.target.value })}
+            >
+              <option value="ACAD2013">ACAD2013</option>
+              <option value="ACAD2018">ACAD2018</option>
+              <option value="ACAD2010">ACAD2010</option>
             </select>
           </label>
           <label className="design-param-field">
@@ -738,6 +790,14 @@ export default function CadDrawings({ project, onClose, onUpdated }) {
         <aside className="geom-sidebar">
           <div className="geom-checks-head">
             <h4>CAD Drawing Summary</h4>
+            <span
+              className={
+                dwgStatus?.available ? "design-status-pill pass" : "design-status-pill warn"
+              }
+              title={dwgStatus?.install_hint || ""}
+            >
+              {dwgStatus?.available ? `DWG Ready (${dwgStatus.backend})` : "DXF Ready · No DWG Bin"}
+            </span>
           </div>
           <div className="geom-stats-grid loads-kpi-sidebar">
             <div>

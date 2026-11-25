@@ -312,6 +312,7 @@
 
 /* Phase 7: Module 07 Structural Drawings (AutoCAD .dxf & Interactive SVG Viewer) */
 .cad-launch-btn{border-color:#ec4899;color:#f9a8d4}
+.cad-dwg-btn{border-color:#8b5cf6;color:#c4b5fd}
 .cad-download-btn{border-color:#22d3ee;color:#67e8f9}
 .cad-builder{padding:26px 0 12px}
 .cad-zoom-controls{display:flex;align-items:center;gap:5px}

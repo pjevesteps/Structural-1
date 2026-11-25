@@ -1027,6 +1027,10 @@ def test_full_pipeline_phase1_to_phase6(isolated_env, tmp_path: Path):
     assert cad_zip_resp.status_code == 200
     assert cad_zip_resp.content[:2] == b"PK"
 
+    dwg_status_resp = client.get(f"/api/projects/{pid}/cad/dwg-status")
+    assert dwg_status_resp.status_code == 200
+    assert "available" in dwg_status_resp.json() and "install_hint" in dwg_status_resp.json()
+
     # =========================================================================
     # PERSISTENCE ROUND-TRIP CHECK (Strict ProjectState extra="forbid")
     # =========================================================================

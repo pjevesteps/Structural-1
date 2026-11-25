@@ -387,7 +387,7 @@ test.describe.serial("Structural AI Office — Full Browser E2E (Modules 01 to 0
     // 4. Download AutoCAD .dxf and vector PDF and verify valid headers / structure
     const [dxfDl] = await Promise.all([
       page.waitForEvent("download"),
-      page.getByRole("button", { name: "Download AutoCAD (.dxf)" }).click(),
+      page.getByRole("button", { name: "Download DXF (.dxf)" }).click(),
     ]);
     const dxfText = fs.readFileSync(await dxfDl.path(), "utf-8");
     expect(dxfText).toContain("SECTION");
@@ -396,7 +396,7 @@ test.describe.serial("Structural AI Office — Full Browser E2E (Modules 01 to 0
 
     const [cadPdfDl] = await Promise.all([
       page.waitForEvent("download"),
-      page.getByRole("button", { name: "Download PDF" }).click(),
+      page.getByRole("button", { name: "Download PDF (.pdf)" }).click(),
     ]);
     const cadPdfBytes = fs.readFileSync(await cadPdfDl.path());
     expect(cadPdfBytes.subarray(0, 5).toString("ascii")).toBe("%PDF-");
