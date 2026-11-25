@@ -123,13 +123,16 @@ def lint_staad_text(
             if "REFERENCE LOAD" not in l9_block or "R1 1.0" not in l9_block:
                 errors.append("LOAD 9 should reference R1 1.0 when DEFINE REFERENCE LOADS is active.")
 
-    # 3. Parse JOINT COORDINATES, MEMBER INCIDENCES, SUPPORTS, MEMBER PROPERTY, FLOOR DIAPHRAGM
+    # 3. Parse JOINT COORDINATES, MEMBER INCIDENCES, SUPPORTS, MEMBER PROPERTY, FLOOR DIAPHRAGM, MEMBER LOAD TRAP
     known_joints: set[int] = set()
+    joint_coords_3dp: dict[int, tuple[float, float, float]] = {}
     known_members: set[int] = set()
+    member_len_3dp: dict[int, float] = {}
     incidence_refs: list[tuple[int, int, int]] = []
     support_refs: list[int] = []
     prop_refs: list[int] = []
     diaphragm_joint_refs: list[int] = []
+    trap_load_refs: list[tuple[int, float, float]] = []  # (member_id, d1, d2)
 
     section: str | None = None
     top_headers = (
@@ -148,9 +151,14 @@ def lint_staad_text(
         "END DEFINE REFERENCE LOADS",
         "FLOOR DIAPHRAGM",
         "DEFINE UBC LOAD",
+        "MEMBER LOAD",
+        "JOINT LOAD",
+        "REFERENCE LOAD",
+        "SELFWEIGHT",
         "LOAD ",
         "LOAD COMB",
         "PERFORM ANALYSIS",
+        "PRINT ",
         "START CONCRETE DESIGN",
         "FINISH",
     )
@@ -158,6 +166,8 @@ def lint_staad_text(
     def _is_header(s: str) -> bool:
         up = s.upper()
         return any(up.startswith(h) for h in top_headers)
+
+    pending_trap_mids: list[int] = []
 
     for raw in lines:
         s = raw.strip()
@@ -179,15 +189,22 @@ def lint_staad_text(
         if up.startswith("FLOOR DIAPHRAGM"):
             section = "DIAPHRAGM"
             continue
+        if up.startswith("MEMBER LOAD"):
+            section = "MEMBER_LOAD"
+            pending_trap_mids = []
+            continue
         if _is_header(s):
             section = None
+            pending_trap_mids = []
             continue
 
         if section == "JOINTS":
             for stmt in s.split(";"):
                 toks = stmt.strip().split()
                 if len(toks) >= 4 and toks[0].isdigit():
-                    known_joints.add(int(toks[0]))
+                    nid = int(toks[0])
+                    known_joints.add(nid)
+                    joint_coords_3dp[nid] = (float(toks[1]), float(toks[2]), float(toks[3]))
         elif section == "MEMBERS":
             for stmt in s.split(";"):
                 toks = stmt.strip().split()
@@ -195,6 +212,11 @@ def lint_staad_text(
                     mid, na, nb = int(toks[0]), int(toks[1]), int(toks[2])
                     known_members.add(mid)
                     incidence_refs.append((mid, na, nb))
+                    if na in joint_coords_3dp and nb in joint_coords_3dp:
+                        pa, pb = joint_coords_3dp[na], joint_coords_3dp[nb]
+                        member_len_3dp[mid] = (
+                            (pb[0] - pa[0]) ** 2 + (pb[1] - pa[1]) ** 2 + (pb[2] - pa[2]) ** 2
+                        ) ** 0.5
         elif section == "SUPPORTS":
             # Strip trailing FIXED/PINNED and continuation '-'
             cleaned = re.sub(r"\b(FIXED|PINNED)\b", "", up).replace("-", " ")
@@ -217,6 +239,26 @@ def lint_staad_text(
                 for tok in up.replace("-", " ").split():
                     if tok.isdigit():
                         diaphragm_joint_refs.append(int(tok))
+        elif section == "MEMBER_LOAD":
+            if "TRAP GY" in up:
+                before, after = up.split("TRAP GY", 1)
+                mids = pending_trap_mids + [
+                    int(t) for t in before.replace("-", " ").split() if t.isdigit()
+                ]
+                pending_trap_mids = []
+                vals = after.split()
+                if len(vals) >= 4:
+                    d1_val, d2_val = float(vals[2]), float(vals[3])
+                    for mid in mids:
+                        trap_load_refs.append((mid, d1_val, d2_val))
+            elif "UNI GY" in up:
+                pending_trap_mids = []
+            elif up.endswith("-"):
+                pending_trap_mids.extend(
+                    int(t) for t in up[:-1].split() if t.isdigit()
+                )
+            else:
+                pending_trap_mids = []
 
     if not known_joints:
         errors.append("No joints parsed from JOINT COORDINATES.")
@@ -241,6 +283,15 @@ def lint_staad_text(
         elif nid in support_set:
             errors.append(
                 f"FLOOR DIAPHRAGM JOI list includes supported node {nid} (must exclude supported nodes)."
+            )
+    for mid, d1_val, d2_val in trap_load_refs:
+        l_act = member_len_3dp.get(mid)
+        if l_act is None:
+            errors.append(f"TRAP load references undefined member {mid}.")
+        elif not (0.0 <= d1_val < d2_val < l_act):
+            errors.append(
+                f"TRAP load on member {mid} violates 0 <= d1 < d2 < L_actual: "
+                f"d1={d1_val:.3f}, d2={d2_val:.3f}, L_actual={l_act:.4f}."
             )
 
     return errors

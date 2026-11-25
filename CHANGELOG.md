@@ -4,6 +4,13 @@ All notable changes to **AI Structural Engineering Office** are documented in th
 
 ## [Unreleased]
 
+### Fixed
+- **STAAD.Pro `TRAP` Load Length Clamping, Disjointed-Frame Check & `.anl` Print Tables (`backend/app/loads/engine.py`, `backend/app/staad.py`, `backend/app/geometry/validator.py`)**:
+  - Clamped all `TRAP` (and partial `UNI`) distributed load distances strictly inside each member's 3-decimal `JOINT COORDINATES` Euclidean length (`d1 <= L_actual - 0.002`, `d2 <= floor((L_actual - 0.001)*1000)/1000`, skipping degenerate segments `< 0.005 m`) and restricted `staad.py` grouping to members satisfying `L_actual >= d2 + 0.001`, eliminating `**WARNING** TRAP LOAD BEYOND MEMBER LENGTH` in STAAD.Pro.
+  - Added BFS connected-components check in `backend/app/geometry/validator.py` emitting a `DISJOINTED_SUBSTRUCTURE` warning listing detached node/member IDs whenever the analytical model has multiple disconnected substructures.
+  - Emitted `PRINT SUPPORT REACTIONS`, `PRINT JOINT DISPLACEMENTS`, and `PRINT MEMBER FORCES` right after `PERFORM ANALYSIS PRINT STATICS CHECK` in `staad.py` so STAAD `.anl` output files always contain readable tables for Module 06's `.anl` bridge.
+  - Added regression tests in `test_load_generator.py`, `test_geometry_generator.py`, and `lint_staad_text` (`test_e2e_pipeline.py`).
+
 ### Added
 - **Configurable Column Pedestal Drop (`footing_depth_m`) Across Phases 3–6 (`backend/app/models.py`, `geometry/`, `sizing/`, `loads/`, `staad.py`, `design/`, `frontend/src/GeometryBuilder.jsx`, `DesignReview.jsx`)**:
   - Added backward-compatible `footing_depth_m: float = 0.0` (`0.0–6.0 m`) to `GeometryGenerationOptions` and `is_pedestal: bool = False` to `AnalyticalMember`.

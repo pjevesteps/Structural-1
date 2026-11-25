@@ -483,3 +483,70 @@ def test_full_staad_export_download_approval_and_legacy_json_compat(isolated_env
             out_legacy = write_staad_preview(loaded, tmp_path / f"{legacy_path.stem}.std")
             assert "DEFINE UBC LOAD" not in out_legacy["std_preview"]
             assert "LOAD COMB" not in out_legacy["std_preview"]
+
+
+
+def test_trap_load_distances_clamped_strictly_below_staad_member_length_and_print_tables(isolated_env):
+    """
+    Regression test for STAAD **WARNING** TRAP LOAD BEYOND MEMBER LENGTH:
+    Uses non-integer fractional column coordinates (e.g., 3.3334 m, 4.1277 m) that previously
+    rounded d2_m up past STAAD's 3-decimal JOINT COORDINATES Euclidean length, and verifies:
+      1. Every TRAP line in the exported .std satisfies 0.0 <= d1 < d2 < L_actual.
+      2. PRINT SUPPORT REACTIONS, PRINT JOINT DISPLACEMENTS, and PRINT MEMBER FORCES appear
+         right after PERFORM ANALYSIS PRINT STATICS CHECK and before START CONCRETE DESIGN.
+    """
+    from backend.tests.test_e2e_pipeline import lint_staad_text
+
+    client, _ = isolated_env
+    pid = "P5-TRAP-CLAMP"
+    cols = []
+    cid = 1
+    for gx, xm in [("A", 0.0), ("B", 3.3334), ("C", 7.4611)]:
+        for gy, ym in [("1", 0.0), ("2", 3.7776), ("3", 7.9053)]:
+            cols.append(
+                {
+                    "id": f"C{cid}",
+                    "grid": f"{gx}-{gy}",
+                    "x_m": xm,
+                    "y_m": ym,
+                    "width_mm": 400.0,
+                    "depth_mm": 400.0,
+                }
+            )
+            cid += 1
+
+    payload = {
+        "project_info": {
+            "project_id": pid,
+            "project_name": "Fractional Span TRAP Clamping Test",
+            "location": "Baguio City",
+            "design_code": "NSCP 2015",
+            "materials": {"fc_mpa": 28.0, "fy_mpa": 415.0, "concrete_density_kn_m3": 23.54},
+        },
+        "levels": [
+            {"id": "1F", "elevation_m": 0.0},
+            {"id": "2F", "elevation_m": 3.0},
+            {"id": "RD", "elevation_m": 6.0},
+        ],
+        "columns": cols,
+    }
+    assert client.post("/api/projects", json=payload).status_code == 200
+    assert client.post(f"/api/projects/{pid}/geometry/generate").status_code == 200
+    assert client.post(f"/api/projects/{pid}/sizing/auto-size").status_code == 200
+    assert client.post(f"/api/projects/{pid}/loads/generate").status_code == 200
+
+    std = client.get(f"/api/projects/{pid}/staad/download").text
+    assert "TRAP GY" in std
+
+    # Verify linter finds ZERO errors (including strict 0 <= d1 < d2 < L_actual on every TRAP line)
+    assert lint_staad_text(std, require_ref_load_before_diaphragm=True) == []
+
+    # Verify explicit post-analysis .anl table print commands for Module 06 bridge
+    for cmd in (
+        "PRINT SUPPORT REACTIONS",
+        "PRINT JOINT DISPLACEMENTS",
+        "PRINT MEMBER FORCES",
+    ):
+        assert cmd in std
+        assert std.index("PERFORM ANALYSIS PRINT STATICS CHECK") < std.index(cmd)
+        assert std.index(cmd) < std.index("START CONCRETE DESIGN")

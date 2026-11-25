@@ -601,3 +601,52 @@ def test_footing_depth_pedestal_drop_and_full_downstream_pipeline(isolated_env):
     assert dsm.primary_vertical_reactions_kn["DL"] == pytest.approx(
         dsm.primary_vertical_applied_kn["DL"], rel=0.02
     )
+
+
+
+def test_disjointed_substructure_warning():
+    """
+    Verify validator.py flags a disconnected column/frame with a DISJOINTED_SUBSTRUCTURE warning
+    listing the detached node and member IDs.
+    """
+    from backend.app.geometry.validator import validate_structural_model
+    from backend.app.models import (
+        AnalyticalMember,
+        AnalyticalNode,
+        GeometryGenerationOptions,
+        StructuralModelState,
+    )
+
+    model = StructuralModelState(
+        options=GeometryGenerationOptions(),
+        nodes=[
+            # Main connected portal frame (nodes 1-4)
+            AnalyticalNode(node_id=1, x_m=0.0, y_m=0.0, z_m=0.0, floor_level="1F", is_support=True, support_type="FIXED"),
+            AnalyticalNode(node_id=2, x_m=4.0, y_m=0.0, z_m=0.0, floor_level="1F", is_support=True, support_type="FIXED"),
+            AnalyticalNode(node_id=3, x_m=0.0, y_m=3.0, z_m=0.0, floor_level="2F"),
+            AnalyticalNode(node_id=4, x_m=4.0, y_m=3.0, z_m=0.0, floor_level="2F"),
+            # Detached / untied column stack (nodes 5-6)
+            AnalyticalNode(node_id=5, x_m=15.0, y_m=0.0, z_m=0.0, floor_level="1F", is_support=True, support_type="FIXED"),
+            AnalyticalNode(node_id=6, x_m=15.0, y_m=3.0, z_m=0.0, floor_level="2F"),
+        ],
+        members=[
+            AnalyticalMember(member_id=1, start_node=1, end_node=3, member_type="column", floor_level="1F", length_m=3.0),
+            AnalyticalMember(member_id=2, start_node=2, end_node=4, member_type="column", floor_level="1F", length_m=3.0),
+            AnalyticalMember(member_id=3, start_node=3, end_node=4, member_type="primary_beam", floor_level="2F", length_m=4.0),
+            # Detached column M4
+            AnalyticalMember(member_id=4, start_node=5, end_node=6, member_type="column", floor_level="1F", length_m=3.0),
+        ],
+    )
+    issues = validate_structural_model(model)
+    disjoint = [iss for iss in issues if iss.code == "DISJOINTED_SUBSTRUCTURE"]
+    assert len(disjoint) == 1
+    assert disjoint[0].severity == "warning"
+    assert "N5" in disjoint[0].entity_ids and "N6" in disjoint[0].entity_ids
+    assert "M4" in disjoint[0].entity_ids
+
+    # Tie the detached column back with a beam N4-N6 -> DISJOINTED_SUBSTRUCTURE clears
+    model.members.append(
+        AnalyticalMember(member_id=5, start_node=4, end_node=6, member_type="primary_beam", floor_level="2F", length_m=11.0)
+    )
+    issues_tied = validate_structural_model(model)
+    assert not any(iss.code == "DISJOINTED_SUBSTRUCTURE" for iss in issues_tied)

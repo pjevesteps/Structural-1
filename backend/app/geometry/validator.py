@@ -171,4 +171,58 @@ def validate_structural_model(model: StructuralModelState) -> list[GeometryCheck
                 )
             )
 
+    # 6. Disjointed / disconnected frame substructure check (BFS connected components)
+    adj: dict[int, set[int]] = {n.node_id: set() for n in model.nodes}
+    for m in model.members:
+        if m.start_node in adj and m.end_node in adj:
+            adj[m.start_node].add(m.end_node)
+            adj[m.end_node].add(m.start_node)
+
+    visited: set[int] = set()
+    components: list[set[int]] = []
+    for n in model.nodes:
+        if n.node_id in visited:
+            continue
+        comp: set[int] = set()
+        queue = [n.node_id]
+        visited.add(n.node_id)
+        while queue:
+            cur = queue.pop()
+            comp.add(cur)
+            for nxt in adj.get(cur, ()):
+                if nxt not in visited:
+                    visited.add(nxt)
+                    queue.append(nxt)
+        components.append(comp)
+
+    if len(components) > 1:
+        components.sort(key=len, reverse=True)
+        detached_nodes = sorted(nid for comp in components[1:] for nid in comp)
+        detached_node_set = set(detached_nodes)
+        detached_members = sorted(
+            m.member_id
+            for m in model.members
+            if m.start_node in detached_node_set or m.end_node in detached_node_set
+        )
+        node_preview = ", ".join(f"N{nid}" for nid in detached_nodes[:10])
+        if len(detached_nodes) > 10:
+            node_preview += f" (+{len(detached_nodes) - 10} more)"
+        mem_preview = ", ".join(f"M{mid}" for mid in detached_members[:10])
+        if len(detached_members) > 10:
+            mem_preview += f" (+{len(detached_members) - 10} more)"
+        issues.append(
+            GeometryCheckIssue(
+                severity="warning",
+                code="DISJOINTED_SUBSTRUCTURE",
+                message=(
+                    f"Analytical model has {len(components)} disconnected substructures. "
+                    f"Detached node(s): {node_preview}"
+                    + (f"; detached member(s): {mem_preview}" if mem_preview else "")
+                    + ". Tie detached columns/nodes with beams in Module 03's 2D Framing Editor."
+                ),
+                entity_ids=[f"N{nid}" for nid in detached_nodes[:12]]
+                + [f"M{mid}" for mid in detached_members[:12]],
+            )
+        )
+
     return issues

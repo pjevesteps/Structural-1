@@ -392,6 +392,36 @@ def _match_edge_beams(
     return matched
 
 
+def _staad_member_length_3dp(
+    m: AnalyticalMember,
+    node_by_id: dict[int, AnalyticalNode],
+) -> float:
+    """Compute exact Euclidean member length from 3-decimal STAAD JOINT COORDINATES."""
+    na = node_by_id.get(m.start_node)
+    nb = node_by_id.get(m.end_node)
+    if na is None or nb is None:
+        return m.length_m
+    dx = round(nb.x_m, 3) - round(na.x_m, 3)
+    dy = round(nb.y_m, 3) - round(na.y_m, 3)
+    dz = round(nb.z_m, 3) - round(na.z_m, 3)
+    return math.sqrt(dx * dx + dy * dy + dz * dz)
+
+
+def _clamp_segment_to_member(d1_m: float, d2_m: float, l_actual: float) -> tuple[float, float] | None:
+    """
+    Clamp distributed load segment [d1_m, d2_m] strictly inside STAAD 3-decimal length L_actual.
+    Returns None if the clamped segment is degenerate (< 0.005 m).
+    """
+    if l_actual <= 0.008:
+        return None
+    max_d2 = math.floor((l_actual - 0.001) * 1000.0) / 1000.0
+    c_d1 = max(0.0, min(round(d1_m, 3), max(0.0, round(l_actual - 0.002, 3))))
+    c_d2 = min(round(d2_m, 3), max_d2)
+    if c_d2 - c_d1 < 0.005:
+        return None
+    return round(c_d1, 3), round(c_d2, 3)
+
+
 def _emit_edge_load_segments(
     edge_matches: list[tuple[AnalyticalMember, float, float, float, float, bool]],
     edge_len: float,
@@ -402,10 +432,11 @@ def _emit_edge_load_segments(
     is_two_way: bool,
     is_short_edge: bool,
     out_loads: list[BeamDistributedLoad],
+    node_by_id: dict[int, AnalyticalNode] | None = None,
 ) -> None:
     """
     Emit statically exact UNI or TRAP BeamDistributedLoad segments along matched beams
-    for a single panel edge.
+    for a single panel edge, clamping distances strictly inside 3-decimal STAAD length.
     """
     if not edge_matches or q_kpa <= 1e-6 or edge_len <= 1e-4:
         return
@@ -415,7 +446,15 @@ def _emit_edge_load_segments(
 
     if not is_two_way:
         for m, d1, d2, _u1, _u2, _rev in edge_matches:
-            is_full = abs(d1) <= 0.02 and abs(d2 - m.length_m) <= 0.02
+            l_actual = _staad_member_length_3dp(m, node_by_id) if node_by_id else m.length_m
+            is_full = abs(d1) <= 0.02 and abs(d2 - l_actual) <= 0.02
+            if is_full:
+                c_d1, c_d2 = 0.0, 0.0
+            else:
+                clamped = _clamp_segment_to_member(d1, d2, l_actual)
+                if clamped is None:
+                    continue
+                c_d1, c_d2 = clamped
             out_loads.append(
                 BeamDistributedLoad(
                     member_id=m.member_id,
@@ -423,8 +462,8 @@ def _emit_edge_load_segments(
                     load_shape="UNI",
                     w1_kn_m=round(-w_peak, 4),
                     w2_kn_m=0.0,
-                    d1_m=0.0 if is_full else round(d1, 4),
-                    d2_m=0.0 if is_full else round(d2, 4),
+                    d1_m=c_d1,
+                    d2_m=c_d2,
                     source=source,
                 )
             )
@@ -447,6 +486,7 @@ def _emit_edge_load_segments(
         edge_span = u2 - u1
         if edge_span <= 1e-4:
             continue
+        l_actual = _staad_member_length_3dp(m, node_by_id) if node_by_id else m.length_m
         for seg_u0, seg_u1, seg_w0, seg_w1 in profile:
             ov0 = max(u1, seg_u0)
             ov1 = min(u2, seg_u1)
@@ -465,6 +505,10 @@ def _emit_edge_load_segments(
                 bd0 = d2 - frac1 * (d2 - d1)
                 bd1 = d2 - frac0 * (d2 - d1)
                 w_start, w_end = wb, wa
+            clamped = _clamp_segment_to_member(bd0, bd1, l_actual)
+            if clamped is None:
+                continue
+            c_d1, c_d2 = clamped
             out_loads.append(
                 BeamDistributedLoad(
                     member_id=m.member_id,
@@ -472,8 +516,8 @@ def _emit_edge_load_segments(
                     load_shape="TRAP",
                     w1_kn_m=round(w_start, 4),
                     w2_kn_m=round(w_end, 4),
-                    d1_m=round(bd0, 4),
-                    d2_m=round(bd1, 4),
+                    d1_m=c_d1,
+                    d2_m=c_d2,
                     source=source,
                 )
             )
@@ -574,6 +618,7 @@ def _distribute_slab_panel_loads(
                 is_two_way=is_two_way,
                 is_short_edge=is_short,
                 out_loads=out_loads,
+                node_by_id=node_by_id,
             )
 
         # Static equilibrium normalization if an edge had missing/partial beam coverage

@@ -1,3 +1,4 @@
+import math
 from pathlib import Path
 import re
 from .models import BeamDistributedLoad, ProjectState
@@ -85,22 +86,47 @@ def _wrap_staad_tokens(tokens: list[str], max_len: int = 72) -> list[str]:
 def _format_member_loads_block(
     loads: list[BeamDistributedLoad],
     scale: float = 1.0,
+    member_len_by_id: dict[int, float] | None = None,
 ) -> list[str]:
-    """Group identical UNI / TRAP member loads cleanly with 72-char wrapping."""
+    """
+    Group identical UNI / TRAP member loads cleanly with 72-char wrapping.
+    Clamps all TRAP (and partial UNI) distances strictly inside each member's 3-decimal
+    STAAD Euclidean length (d2 <= floor((L_actual - 0.001)*1000)/1000) and only groups
+    members whose L_actual >= d2 + 0.001 so STAAD never emits TRAP LOAD BEYOND MEMBER LENGTH.
+    """
     if not loads or abs(scale) <= 1e-6:
         return []
     grouped: dict[str, list[int]] = {}
     for ld in loads:
         w1 = ld.w1_kn_m * scale
         w2 = ld.w2_kn_m * scale
+        l_actual = member_len_by_id.get(ld.member_id) if member_len_by_id else None
+
         if ld.load_shape == "UNI":
             if abs(ld.d1_m) <= 1e-4 and abs(ld.d2_m) <= 1e-4:
                 spec = f"UNI GY {w1:.3f}"
             else:
-                spec = f"UNI GY {w1:.3f} {ld.d1_m:.3f} {ld.d2_m:.3f}"
+                d1, d2 = round(ld.d1_m, 3), round(ld.d2_m, 3)
+                if l_actual is not None:
+                    max_d2 = math.floor((l_actual - 0.001) * 1000.0) / 1000.0
+                    d1 = max(0.0, min(d1, max(0.0, round(l_actual - 0.002, 3))))
+                    d2 = min(d2, max_d2)
+                    if d2 - d1 < 0.005 or l_actual < d2 + 0.001 - 1e-9:
+                        continue
+                spec = f"UNI GY {w1:.3f} {d1:.3f} {d2:.3f}"
         else:
-            spec = f"TRAP GY {w1:.3f} {w2:.3f} {ld.d1_m:.3f} {ld.d2_m:.3f}"
+            d1, d2 = round(ld.d1_m, 3), round(ld.d2_m, 3)
+            if l_actual is not None:
+                max_d2 = math.floor((l_actual - 0.001) * 1000.0) / 1000.0
+                d1 = max(0.0, min(d1, max(0.0, round(l_actual - 0.002, 3))))
+                d2 = min(d2, max_d2)
+                if d2 - d1 < 0.005 or l_actual < d2 + 0.001 - 1e-9:
+                    continue
+            spec = f"TRAP GY {w1:.3f} {w2:.3f} {d1:.3f} {d2:.3f}"
         grouped.setdefault(spec, []).append(ld.member_id)
+
+    if not grouped:
+        return []
 
     out: list[str] = ["MEMBER LOAD"]
     for spec, mids in grouped.items():
@@ -129,6 +155,19 @@ def _append_phase5_loads(lines: list[str], project: ProjectState) -> None:
     elevated_levels = [lv for lv in levels if lv.elevation_m > base_elev + 1e-4]
     valid_mids = {m.member_id for m in model.members}
 
+    # Exact Euclidean length computed from 3-decimal STAAD JOINT COORDINATES
+    node_3dp = {n.node_id: (round(n.x_m, 3), round(n.y_m, 3), round(n.z_m, 3)) for n in model.nodes}
+    member_len_3dp: dict[int, float] = {}
+    for m in model.members:
+        pa = node_3dp.get(m.start_node)
+        pb = node_3dp.get(m.end_node)
+        if pa and pb:
+            member_len_3dp[m.member_id] = math.sqrt(
+                (pb[0] - pa[0]) ** 2 + (pb[1] - pa[1]) ** 2 + (pb[2] - pa[2]) ** 2
+            )
+        else:
+            member_len_3dp[m.member_id] = m.length_m
+
     dl_loads = [b for b in lg.beam_loads if b.load_case == "DL" and b.member_id in valid_mids]
     ll_loads = [b for b in lg.beam_loads if b.load_case == "LL" and b.member_id in valid_mids]
     lr_loads = [b for b in lg.beam_loads if b.load_case == "LR" and b.member_id in valid_mids]
@@ -137,10 +176,16 @@ def _append_phase5_loads(lines: list[str], project: ProjectState) -> None:
     lines.append("DEFINE REFERENCE LOADS")
     lines.append("LOAD R1 LOADTYPE Dead TITLE REF DEAD MASS (DL)")
     lines.append("SELFWEIGHT Y -1.0")
-    lines.extend(_format_member_loads_block(dl_loads))
+    lines.extend(_format_member_loads_block(dl_loads, member_len_by_id=member_len_3dp))
     if seis.live_load_seismic_fraction > 1e-6 and ll_loads:
         lines.append("LOAD R2 LOADTYPE Live TITLE REF LIVE MASS (LL)")
-        lines.extend(_format_member_loads_block(ll_loads, scale=seis.live_load_seismic_fraction))
+        lines.extend(
+            _format_member_loads_block(
+                ll_loads,
+                scale=seis.live_load_seismic_fraction,
+                member_len_by_id=member_len_3dp,
+            )
+        )
     lines.append("END DEFINE REFERENCE LOADS")
 
     # 2. Rigid Floor Diaphragms (strictly AFTER END DEFINE REFERENCE LOADS, excluding supported nodes)
@@ -275,14 +320,16 @@ def _append_phase5_loads(lines: list[str], project: ProjectState) -> None:
     lines.append("R1 1.0")
 
     lines.append("LOAD 10 LOADTYPE Live TITLE FLOOR LIVE LOAD (LL)")
-    if ll_loads:
-        lines.extend(_format_member_loads_block(ll_loads))
+    ll_block = _format_member_loads_block(ll_loads, member_len_by_id=member_len_3dp)
+    if ll_block:
+        lines.extend(ll_block)
     else:
         lines.append("* No floor live loads assigned")
 
     lines.append("LOAD 11 LOADTYPE Roof Live TITLE ROOF LIVE LOAD (LR)")
-    if lr_loads:
-        lines.extend(_format_member_loads_block(lr_loads))
+    lr_block = _format_member_loads_block(lr_loads, member_len_by_id=member_len_3dp)
+    if lr_block:
+        lines.extend(lr_block)
     else:
         lines.append("* No roof live loads assigned")
 
@@ -303,8 +350,11 @@ def _append_phase5_loads(lines: list[str], project: ProjectState) -> None:
             lines.append(f"LOAD COMB {combo.combo_id} {combo.name}")
             lines.extend(_wrap_staad_tokens(pair_tokens))
 
-    # 7. Analysis Trailer
+    # 7. Analysis Trailer & Readable .anl Output Tables for Module 06 Bridge
     lines.append("PERFORM ANALYSIS PRINT STATICS CHECK")
+    lines.append("PRINT SUPPORT REACTIONS")
+    lines.append("PRINT JOINT DISPLACEMENTS")
+    lines.append("PRINT MEMBER FORCES")
 
     # 8. Phase 6: ACI / NSCP Concrete Design Block (optional, enabled by default)
     ad_params = project.analysis_design.params
