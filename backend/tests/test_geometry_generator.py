@@ -363,3 +363,113 @@ def test_flexible_column_level_and_numeric_elevation_matching():
     assert "HELIPAD" in bad_unknown[0].message
     assert "Available project levels" in bad_unknown[0].message
     assert "4F" in bad_unknown[0].message and "RD" in bad_unknown[0].message
+
+
+def test_diagonal_manual_beam_replication_persistence_and_staad_export(isolated_env, tmp_path: Path):
+    """
+    Verify:
+      1. Adding a diagonal manual beam along skewed perimeter columns with replicate_all_floors=True
+         creates diagonal members across all matching floors with accurate 3D Euclidean lengths
+         and records coordinate-anchored ManualBeamOverride entries.
+      2. Re-running POST /geometry/generate (e.g. changing snap_tolerance_m / support type)
+         preserves and replays all diagonal manual beams onto valid remapped node IDs.
+      3. Deleting a manual diagonal beam removes both the AnalyticalMember and its ManualBeamOverride.
+      4. STAAD .std export writes all diagonal manual beam member IDs into MEMBER INCIDENCES and _BEAMS.
+    """
+    client, _ = isolated_env
+    pid = "P3-DIAG"
+
+    # Skewed top perimeter columns: C3 at (0.0, 4.0) and C4 at (6.0, 5.5) -> non-orthogonal diagonal (dx=6, dz=1.5)
+    payload = {
+        "project_info": _base_project_info(pid),
+        "levels": [
+            {"id": "BASE", "elevation_m": 0.0},
+            {"id": "2F", "elevation_m": 3.0},
+            {"id": "ROOF", "elevation_m": 6.0},
+        ],
+        "columns": [
+            {"id": "C1", "grid": "A-1", "x_m": 0.0, "y_m": 0.0, "width_mm": 400, "depth_mm": 400},
+            {"id": "C2", "grid": "A-2", "x_m": 6.0, "y_m": 0.0, "width_mm": 400, "depth_mm": 400},
+            {"id": "C3", "grid": "B-1", "x_m": 0.0, "y_m": 4.0, "width_mm": 400, "depth_mm": 400},
+            {"id": "C4", "grid": "B-2", "x_m": 6.0, "y_m": 5.5, "width_mm": 400, "depth_mm": 400},
+        ],
+    }
+    assert client.post("/api/projects", json=payload).status_code == 200
+
+    # 1. Generate initial 3D frame
+    gen1 = client.post(
+        f"/api/projects/{pid}/geometry/generate",
+        json={"default_support_type": "FIXED", "include_base_tie_beams": True, "snap_tolerance_m": 0.05},
+    )
+    assert gen1.status_code == 200, gen1.text
+    sm1 = gen1.json()
+    assert sm1["manual_beams"] == []
+
+    # Add diagonal beam on 2F between skewed perimeter nodes (0, 4.0) and (6, 5.5) with replicate_all_floors=True
+    f2_nodes = [n for n in sm1["nodes"] if n["floor_level"] == "2F"]
+    n_c3 = next(n for n in f2_nodes if abs(n["x_m"] - 0.0) < 0.05 and abs(n["z_m"] - 4.0) < 0.05)
+    n_c4 = next(n for n in f2_nodes if abs(n["x_m"] - 6.0) < 0.05 and abs(n["z_m"] - 5.5) < 0.05)
+
+    expected_diag_len = round((6.0**2 + 1.5**2) ** 0.5, 4)  # 6.1847 m
+    add_res = client.post(
+        f"/api/projects/{pid}/geometry/members",
+        json={
+            "start_node": n_c3["node_id"],
+            "end_node": n_c4["node_id"],
+            "member_type": "primary_beam",
+            "floor_level": "2F",
+            "replicate_all_floors": True,
+        },
+    )
+    assert add_res.status_code == 200, add_res.text
+    sm_added = add_res.json()
+
+    manual_members = [m for m in sm_added["members"] if m["manual_override"]]
+    assert len(manual_members) == 3  # Replicated across BASE, 2F, ROOF
+    assert sorted(m["floor_level"] for m in manual_members) == ["2F", "BASE", "ROOF"]
+    for m in manual_members:
+        assert abs(m["length_m"] - expected_diag_len) < 1e-3
+    assert len(sm_added["manual_beams"]) == 3
+
+    # 2. Re-generate 3D frame with different Snap Tol & Support Type -> diagonal beams MUST survive!
+    gen2 = client.post(
+        f"/api/projects/{pid}/geometry/generate",
+        json={"default_support_type": "PINNED", "include_base_tie_beams": True, "snap_tolerance_m": 0.10},
+    )
+    assert gen2.status_code == 200, gen2.text
+    sm2 = gen2.json()
+    replayed_manual = [m for m in sm2["members"] if m["manual_override"]]
+    assert len(replayed_manual) == 3
+    assert sorted(m["floor_level"] for m in replayed_manual) == ["2F", "BASE", "ROOF"]
+    assert len(sm2["manual_beams"]) == 3
+
+    node_by_id = {n["node_id"]: n for n in sm2["nodes"]}
+    for m in replayed_manual:
+        assert m["start_node"] in node_by_id and m["end_node"] in node_by_id
+        assert abs(m["length_m"] - expected_diag_len) < 1e-3
+
+    # 3. Export STAAD .std preview and verify EVERY diagonal manual beam ID appears in MEMBER INCIDENCES & _BEAMS
+    reloaded = ProjectState.model_validate(client.get(f"/api/projects/{pid}").json())
+    out_std = tmp_path / "diag_model.std"
+    staad_res = write_staad_preview(reloaded, out_std)
+    assert staad_res["source"] == "structural_model"
+    std_text = out_std.read_text(encoding="utf-8")
+    for m in replayed_manual:
+        assert f"{m['member_id']} {m['start_node']} {m['end_node']};" in std_text
+    beams_line = next(ln for ln in std_text.splitlines() if ln.startswith("_BEAMS "))
+    for m in replayed_manual:
+        assert str(m["member_id"]) in beams_line.split()
+
+    # 4. Delete one manual diagonal beam (BASE) and confirm it stays deleted across regeneration
+    base_diag = next(m for m in replayed_manual if m["floor_level"] == "BASE")
+    del_res = client.delete(f"/api/projects/{pid}/geometry/members/{base_diag['member_id']}")
+    assert del_res.status_code == 200
+    assert len(del_res.json()["manual_beams"]) == 2
+
+    gen3 = client.post(
+        f"/api/projects/{pid}/geometry/generate",
+        json={"default_support_type": "FIXED", "include_base_tie_beams": True},
+    )
+    assert gen3.status_code == 200
+    remaining = [m for m in gen3.json()["members"] if m["manual_override"]]
+    assert sorted(m["floor_level"] for m in remaining) == ["2F", "ROOF"]

@@ -1,5 +1,6 @@
-from math import sqrt
+from math import hypot, sqrt
 from typing import Literal
+from uuid import uuid4
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -8,6 +9,7 @@ from ..models import (
     AnalyticalMember,
     AnalyticalNode,
     GeometryGenerationOptions,
+    ManualBeamOverride,
     StructuralModelState,
 )
 from .generator import generate_structural_model
@@ -26,6 +28,7 @@ class AddMemberRequest(BaseModel):
     member_type: Literal["column", "primary_beam", "secondary_beam", "tie_beam", "trimmer_beam"] = "primary_beam"
     floor_level: str = ""
     grid_ref: str = ""
+    replicate_all_floors: bool = False
     # Optional intermediate node creation by splitting an existing member (for secondary/trimmer beams)
     split_start_member_id: int | None = Field(default=None, ge=1)
     split_start_ratio: float = Field(default=0.5, gt=0.05, lt=0.95)
@@ -49,6 +52,49 @@ def _load_or_404(project_id: str):
 
 def _dist_3d(a: AnalyticalNode, b: AnalyticalNode) -> float:
     return round(sqrt((a.x_m - b.x_m) ** 2 + (a.y_m - b.y_m) ** 2 + (a.z_m - b.z_m) ** 2), 4)
+
+
+def _xyz_close(p: list[float], q: list[float], xz_tol: float = 0.25, y_tol: float = 0.10) -> bool:
+    return hypot(p[0] - q[0], p[2] - q[2]) <= xz_tol and abs(p[1] - q[1]) <= y_tol
+
+
+def _override_matches_endpoints(
+    ov: ManualBeamOverride,
+    start_xyz: list[float],
+    end_xyz: list[float],
+    xz_tol: float = 0.25,
+    y_tol: float = 0.10,
+) -> bool:
+    return (
+        (_xyz_close(ov.start_xyz_m, start_xyz, xz_tol, y_tol) and _xyz_close(ov.end_xyz_m, end_xyz, xz_tol, y_tol))
+        or (_xyz_close(ov.start_xyz_m, end_xyz, xz_tol, y_tol) and _xyz_close(ov.end_xyz_m, start_xyz, xz_tol, y_tol))
+    )
+
+
+def _record_manual_beam_override(
+    model: StructuralModelState,
+    na: AnalyticalNode,
+    nb: AnalyticalNode,
+    member_type: str,
+    floor_level: str,
+    grid_ref: str,
+) -> None:
+    if member_type == "column":
+        return
+    s_xyz = [round(na.x_m, 4), round(na.y_m, 4), round(na.z_m, 4)]
+    e_xyz = [round(nb.x_m, 4), round(nb.y_m, 4), round(nb.z_m, 4)]
+    if any(_override_matches_endpoints(ov, s_xyz, e_xyz) for ov in model.manual_beams):
+        return
+    model.manual_beams.append(
+        ManualBeamOverride(
+            override_id=f"mb-{uuid4().hex[:8]}",
+            floor_level=floor_level,
+            start_xyz_m=s_xyz,
+            end_xyz_m=e_xyz,
+            member_type=member_type,
+            grid_ref=grid_ref or "MANUAL",
+        )
+    )
 
 
 def _revalidate_preserving_info(model: StructuralModelState) -> None:
@@ -164,7 +210,7 @@ def add_member(project_id: str, payload: AddMemberRequest):
 
     next_mid = max((m.member_id for m in model.members), default=0) + 1
     fl = payload.floor_level.strip() or na.floor_level
-    gref = payload.grid_ref.strip() or f"{na.grid_ref}-{nb.grid_ref}".strip("-")
+    gref = payload.grid_ref.strip() or f"{na.grid_ref}-{nb.grid_ref}".strip("-") or "MANUAL"
 
     model.members.append(
         AnalyticalMember(
@@ -178,6 +224,65 @@ def add_member(project_id: str, payload: AddMemberRequest):
             manual_override=True,
         )
     )
+    _record_manual_beam_override(model, na, nb, payload.member_type, fl, gref)
+    next_mid += 1
+
+    # Optionally replicate the same (x, z) beam onto every other framing level with matching nodes
+    if payload.replicate_all_floors and payload.member_type != "column" and na.floor_level == nb.floor_level:
+        tol_xz = max(model.options.snap_tolerance_m, 0.25)
+        nodes_by_floor: dict[str, list[AnalyticalNode]] = {}
+        for n in model.nodes:
+            nodes_by_floor.setdefault(n.floor_level, []).append(n)
+        min_elev = min((n.y_m for n in model.nodes), default=0.0)
+        lowest_floors = {n.floor_level for n in model.nodes if abs(n.y_m - min_elev) <= 0.05}
+        existing_pairs = {(min(m.start_node, m.end_node), max(m.start_node, m.end_node)) for m in model.members}
+
+        for other_floor, floor_nodes in nodes_by_floor.items():
+            if other_floor == fl:
+                continue
+            if (
+                other_floor in lowest_floors
+                and fl not in lowest_floors
+                and not model.options.include_base_tie_beams
+            ):
+                continue
+
+            oa = min(
+                (n for n in floor_nodes if hypot(n.x_m - na.x_m, n.z_m - na.z_m) <= tol_xz),
+                key=lambda n: hypot(n.x_m - na.x_m, n.z_m - na.z_m),
+                default=None,
+            )
+            ob = min(
+                (n for n in floor_nodes if hypot(n.x_m - nb.x_m, n.z_m - nb.z_m) <= tol_xz),
+                key=lambda n: hypot(n.x_m - nb.x_m, n.z_m - nb.z_m),
+                default=None,
+            )
+            if oa is None or ob is None or oa.node_id == ob.node_id:
+                continue
+            opair = (min(oa.node_id, ob.node_id), max(oa.node_id, ob.node_id))
+            if opair in existing_pairs:
+                continue
+            olen = _dist_3d(oa, ob)
+            if olen < 0.05:
+                continue
+
+            ogref = payload.grid_ref.strip() or f"{oa.grid_ref}-{ob.grid_ref}".strip("-") or "MANUAL"
+            model.members.append(
+                AnalyticalMember(
+                    member_id=next_mid,
+                    start_node=oa.node_id,
+                    end_node=ob.node_id,
+                    member_type=payload.member_type,
+                    floor_level=other_floor,
+                    grid_ref=ogref,
+                    length_m=olen,
+                    manual_override=True,
+                )
+            )
+            existing_pairs.add(opair)
+            _record_manual_beam_override(model, oa, ob, payload.member_type, other_floor, ogref)
+            next_mid += 1
+
     model.engineer_approved = False
     _revalidate_preserving_info(model)
     storage.save_project(project)
@@ -188,10 +293,25 @@ def add_member(project_id: str, payload: AddMemberRequest):
 def delete_member(project_id: str, member_id: int):
     project = _load_or_404(project_id)
     model = project.structural_model
-    before = len(model.members)
-    model.members = [m for m in model.members if m.member_id != member_id]
-    if len(model.members) == before:
+    target = next((m for m in model.members if m.member_id == member_id), None)
+    if target is None:
         raise HTTPException(status_code=404, detail=f"Member {member_id} not found.")
+
+    if target.manual_override:
+        node_by_id = {n.node_id: n for n in model.nodes}
+        na = node_by_id.get(target.start_node)
+        nb = node_by_id.get(target.end_node)
+        if na is not None and nb is not None:
+            s_xyz = [na.x_m, na.y_m, na.z_m]
+            e_xyz = [nb.x_m, nb.y_m, nb.z_m]
+            tol_xz = max(model.options.snap_tolerance_m, 0.25)
+            model.manual_beams = [
+                ov
+                for ov in model.manual_beams
+                if not _override_matches_endpoints(ov, s_xyz, e_xyz, xz_tol=tol_xz, y_tol=0.10)
+            ]
+
+    model.members = [m for m in model.members if m.member_id != member_id]
 
     model.engineer_approved = False
     _revalidate_preserving_info(model)

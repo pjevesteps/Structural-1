@@ -65,6 +65,7 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
   const [activeFloor, setActiveFloor] = useState("");
   const [editorMode, setEditorMode] = useState("inspect"); // inspect | add_beam | delete_member | toggle_support
   const [addBeamType, setAddBeamType] = useState("primary_beam");
+  const [replicateAllFloors, setReplicateAllFloors] = useState(false);
   const [beamStartNodeId, setBeamStartNodeId] = useState(null);
   const [selectedEntity, setSelectedEntity] = useState(null);
 
@@ -228,6 +229,7 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
   async function handleAddBeam(startNid, endNid) {
     setBusy(true);
     setError("");
+    const prevCount = (model.members || []).length;
     try {
       const updated = await apiJson(`/api/projects/${pid}/geometry/members`, {
         method: "POST",
@@ -237,10 +239,18 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
           end_node: endNid,
           member_type: addBeamType,
           floor_level: activeFloor,
+          replicate_all_floors: replicateAllFloors,
         }),
       });
-      await applyModelUpdate(updated, `Added ${addBeamType} from N${startNid} to N${endNid}.`);
+      const addedCount = Math.max(1, (updated.members || []).length - prevCount);
+      await applyModelUpdate(
+        updated,
+        replicateAllFloors && addedCount > 1
+          ? `Added ${addBeamType} N${startNid}→N${endNid} and replicated across ${addedCount} matching floor(s).`
+          : `Added ${addBeamType} from N${startNid} to N${endNid}.`
+      );
       setBeamStartNodeId(null);
+      setStdPreview(null);
     } catch (e) {
       setError(e.message);
     } finally {
@@ -383,13 +393,18 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
       ctx.stroke();
     }
 
-    // Project & depth-sort members
+    // Project & depth-sort members (never filter out manual/diagonal beams by member_type or story filter)
     const projectedMembers = [];
+    const visibleManualNodeIds = new Set();
     for (const m of members) {
-      if (storyFilter !== "ALL" && m.floor_level !== storyFilter) continue;
+      if (storyFilter !== "ALL" && !m.manual_override && m.floor_level !== storyFilter) continue;
       const na = nodeMap.get(m.start_node);
       const nb = nodeMap.get(m.end_node);
       if (!na || !nb) continue;
+      if (m.manual_override) {
+        visibleManualNodeIds.add(na.node_id);
+        visibleManualNodeIds.add(nb.node_id);
+      }
       const pa = project3D({ x: na.x_m, y: na.y_m, z: na.z_m }, center, yaw, pitch, scale, w, h);
       const pb = project3D({ x: nb.x_m, y: nb.y_m, z: nb.z_m }, center, yaw, pitch, scale, w, h);
       projectedMembers.push({
@@ -403,8 +418,14 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
 
     for (const item of projectedMembers) {
       const { member, pa, pb } = item;
-      ctx.strokeStyle = MEMBER_COLORS[member.member_type] || "#45c9a8";
-      ctx.lineWidth = member.member_type === "column" ? 2.8 : 2.1;
+      ctx.strokeStyle = member.manual_override
+        ? "#c084fc"
+        : MEMBER_COLORS[member.member_type] || "#45c9a8";
+      ctx.lineWidth = member.manual_override
+        ? 2.9
+        : member.member_type === "column"
+          ? 2.8
+          : 2.1;
       ctx.beginPath();
       ctx.moveTo(pa.sx, pa.sy);
       ctx.lineTo(pb.sx, pb.sy);
@@ -413,7 +434,9 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
 
     // Draw nodes & support triangles
     for (const n of nodes) {
-      if (storyFilter !== "ALL" && n.floor_level !== storyFilter) continue;
+      if (storyFilter !== "ALL" && n.floor_level !== storyFilter && !visibleManualNodeIds.has(n.node_id)) {
+        continue;
+      }
       const p = project3D({ x: n.x_m, y: n.y_m, z: n.z_m }, center, yaw, pitch, scale, w, h);
       if (n.is_support && n.support_type !== "NONE") {
         ctx.fillStyle = "#f87171";
@@ -462,8 +485,12 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
   // 2D Floor Framing data for activeFloor
   const floorData = useMemo(() => {
     const nodes = (model.nodes || []).filter((n) => n.floor_level === activeFloor);
+    const floorNodeIds = new Set(nodes.map((n) => n.node_id));
     const beams = (model.members || []).filter(
-      (m) => m.member_type !== "column" && m.floor_level === activeFloor
+      (m) =>
+        m.member_type !== "column" &&
+        (m.floor_level === activeFloor ||
+          (floorNodeIds.has(m.start_node) && floorNodeIds.has(m.end_node)))
     );
     const panels = (model.slab_panels || []).filter((p) => p.floor_level === activeFloor);
     const openings = (fullProject?.openings || []).filter(
@@ -713,6 +740,9 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
                   <i style={{ background: "#f59e0b" }} /> Tie / Secondary Beams
                 </span>
                 <span>
+                  <i style={{ background: "#c084fc" }} /> Manual / Diagonal Beams
+                </span>
+                <span>
                   <i style={{ background: "#f87171" }} /> Supports
                 </span>
               </div>
@@ -792,6 +822,14 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
                       <option value="trimmer_beam">Trimmer Beam</option>
                       <option value="tie_beam">Tie Beam</option>
                     </select>
+                  </label>
+                  <label className="pdf-check-chip">
+                    <input
+                      type="checkbox"
+                      checked={replicateAllFloors}
+                      onChange={(e) => setReplicateAllFloors(e.target.checked)}
+                    />
+                    <span>Replicate to matching floors</span>
                   </label>
                   <small className="pdf-hint">
                     {beamStartNodeId
@@ -897,7 +935,9 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
                   if (!na || !nb) return null;
                   const pa = toSvg2D(na.x_m, na.z_m);
                   const pb = toSvg2D(nb.x_m, nb.z_m);
-                  const col = MEMBER_COLORS[m.member_type] || "#45c9a8";
+                  const col = m.manual_override
+                    ? "#c084fc"
+                    : MEMBER_COLORS[m.member_type] || "#45c9a8";
                   const isSel = selectedEntity?.type === "member" && selectedEntity.data.member_id === m.member_id;
                   return (
                     <g
@@ -912,7 +952,7 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
                         x2={pb.x}
                         y2={pb.y}
                         stroke={editorMode === "delete_member" ? "#f87171" : col}
-                        strokeWidth={isSel ? 4.5 : 2.8}
+                        strokeWidth={isSel ? 4.5 : m.manual_override ? 3.3 : 2.8}
                       />
                       <text
                         x={(pa.x + pb.x) * 0.5}

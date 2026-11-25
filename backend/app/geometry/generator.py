@@ -291,6 +291,7 @@ def generate_structural_model(
     opts = options if options is not None else GeometryGenerationOptions()
     tol = opts.snap_tolerance_m
     levels = sorted(project.levels, key=lambda lv: lv.elevation_m)
+    saved_manual_beams = [mb.model_copy(deep=True) for mb in project.structural_model.manual_beams]
 
     info_issues: list[GeometryCheckIssue] = []
     if len(levels) < 2 or not project.columns:
@@ -299,6 +300,7 @@ def generate_structural_model(
             options=opts,
             nodes=[],
             members=[],
+            manual_beams=saved_manual_beams,
             slab_panels=[],
             validation_issues=[],
             engineer_approved=False,
@@ -464,6 +466,59 @@ def generate_structural_model(
                 )
             )
 
+    # 3b. Replay saved coordinate-anchored manual & diagonal beams so regenerations never wipe user overrides
+    replay_xz_tol = max(tol, 0.25)
+    replay_y_tol = 0.10
+    for mb in saved_manual_beams:
+        sx, sy, sz = mb.start_xyz_m
+        ex, ey, ez = mb.end_xyz_m
+        na = min(
+            (
+                n
+                for n in nodes
+                if hypot(n.x_m - sx, n.z_m - sz) <= replay_xz_tol and abs(n.y_m - sy) <= replay_y_tol
+            ),
+            key=lambda n: hypot(n.x_m - sx, n.z_m - sz) + abs(n.y_m - sy),
+            default=None,
+        )
+        nb = min(
+            (
+                n
+                for n in nodes
+                if hypot(n.x_m - ex, n.z_m - ez) <= replay_xz_tol and abs(n.y_m - ey) <= replay_y_tol
+            ),
+            key=lambda n: hypot(n.x_m - ex, n.z_m - ez) + abs(n.y_m - ey),
+            default=None,
+        )
+        if na is None or nb is None or na.node_id == nb.node_id:
+            continue
+        pair = (min(na.node_id, nb.node_id), max(na.node_id, nb.node_id))
+        if pair in seen_member_pairs:
+            continue
+        length_m = round(
+            sqrt((nb.x_m - na.x_m) ** 2 + (nb.y_m - na.y_m) ** 2 + (nb.z_m - na.z_m) ** 2),
+            4,
+        )
+        if length_m < 0.05:
+            continue
+        fl_id = na.floor_level or mb.floor_level
+        gref = mb.grid_ref or f"{na.grid_ref}-{nb.grid_ref}".strip("-") or "MANUAL"
+        seen_member_pairs.add(pair)
+        if na.floor_level == nb.floor_level and fl_id in level_beam_edges:
+            level_beam_edges[fl_id].add(pair)
+        members.append(
+            AnalyticalMember(
+                member_id=len(members) + 1,
+                start_node=na.node_id,
+                end_node=nb.node_id,
+                member_type=mb.member_type,
+                floor_level=fl_id,
+                grid_ref=gref,
+                length_m=length_m,
+                manual_override=True,
+            )
+        )
+
     # 4. Slab Panel Detection (framing levels above base)
     slab_panels: list[SlabPanel] = []
     if opts.auto_detect_slab_panels:
@@ -544,6 +599,7 @@ def generate_structural_model(
         options=opts,
         nodes=nodes,
         members=members,
+        manual_beams=saved_manual_beams,
         slab_panels=slab_panels,
         validation_issues=[],
         engineer_approved=False,

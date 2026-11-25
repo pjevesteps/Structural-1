@@ -5,6 +5,12 @@ All notable changes to **AI Structural Engineering Office** are documented in th
 ## [Unreleased]
 
 ### Added
+- **Coordinate-Anchored Manual & Diagonal Beam Persistence (`backend/app/models.py`, `schemas.py`, `geometry/`, `frontend/src/GeometryBuilder.jsx`)**:
+  - Added backward-compatible `ManualBeamOverride` model and `StructuralModelState.manual_beams` list (default empty, compatible with `extra="forbid"`).
+  - Updated `POST /api/projects/{project_id}/geometry/members` to persist coordinate-anchored `(x_m, y_m, z_m)` overrides for any manual/diagonal/non-orthogonal beam, added `replicate_all_floors: bool = False` to replicate skewed perimeter beams across all matching framing levels, and updated `DELETE /members/{member_id}` to clean up matching `manual_beams` entries.
+  - Updated `generate_structural_model` to preserve and replay all saved `manual_beams` onto regenerated nodes (within `max(snap_tolerance_m, 0.25)` m in XZ and `0.10` m in Y) so clicking **Generate 3D Frame** never wipes user-added diagonal or secondary beams.
+  - Updated `GeometryBuilder.jsx` to render manual/diagonal beams distinctly in bright violet (`#c084fc`) in both 2D and 3D views (never hidden by story filters), and added a **Replicate to matching floors** checkbox in `Add Beam` mode.
+  - Added `test_diagonal_manual_beam_replication_persistence_and_staad_export` in `backend/tests/test_geometry_generator.py`.
 - **Level Dropdown & Flexible Level Matching (`frontend/src/PdfImporter.jsx`, `backend/app/geometry/generator.py`)**:
   - Replaced free-text region `Level` inputs in `PdfImporter.jsx` with `<select>` dropdowns populated directly from `project.levels` (`"{id} ({elevation_m} m)"`), refreshed automatically after transferring levels, with a fallback prompt (`"Extract levels on Elevation/Section first"`) when no levels exist yet.
   - Added `_resolve_level_index` in `backend/app/geometry/generator.py` supporting case-insensitive `id`/`name` matching, common floor aliases (`B1`/`BASEMENT`, `L1`/`1F`/`FIRST`, `L2`/`2F`/`SECOND`, `L3`/`3F`/`THIRD`, `L4`/`4F`/`FOURTH`, `RD`/`ROOF DECK`), and numeric elevation matching (`±0.05 m`, e.g. `"14"` -> `14.0 m`), plus actionable available-level lists in `UNKNOWN_COLUMN_LEVEL` warnings.

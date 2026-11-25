@@ -116,12 +116,23 @@ class GeometryGenerationOptions(BaseModel):
     auto_detect_slab_panels: bool = True
 
 
+class ManualBeamOverride(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    override_id: str
+    floor_level: str
+    start_xyz_m: list[float] = Field(min_length=3, max_length=3)
+    end_xyz_m: list[float] = Field(min_length=3, max_length=3)
+    member_type: Literal["primary_beam", "secondary_beam", "tie_beam", "trimmer_beam"] = "primary_beam"
+    grid_ref: str = "MANUAL"
+
+
 class StructuralModelState(BaseModel):
     model_config = ConfigDict(extra="forbid")
     generated_at: str | None = None
     options: GeometryGenerationOptions = Field(default_factory=GeometryGenerationOptions)
     nodes: list[AnalyticalNode] = Field(default_factory=list)
     members: list[AnalyticalMember] = Field(default_factory=list)
+    manual_beams: list[ManualBeamOverride] = Field(default_factory=list)
     slab_panels: list[SlabPanel] = Field(default_factory=list)
     validation_issues: list[GeometryCheckIssue] = Field(default_factory=list)
     engineer_approved: bool = False
