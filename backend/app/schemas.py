@@ -1,4 +1,4 @@
-"""Backward-compatible re-export of core project and analytical geometry schemas."""
+"""Backward-compatible re-export of core project, geometry, and member sizing schemas."""
 
 from .models import (
     AnalyticalMember,
@@ -13,9 +13,16 @@ from .models import (
     Level,
     ManualBeamOverride,
     MaterialProperties,
+    MemberPropertyAssignment,
+    MemberSizingState,
     ProjectInfo,
+    ProjectMaterialProperties,
     ProjectState,
+    PropertyCheckIssue,
+    SectionDefinition,
+    SizingOptions,
     SlabPanel,
+    SlabPropertyAssignment,
     StructuralModelState,
 )
 
@@ -32,8 +39,15 @@ __all__ = [
     "Level",
     "ManualBeamOverride",
     "MaterialProperties",
+    "MemberPropertyAssignment",
+    "MemberSizingState",
     "ProjectInfo",
+    "ProjectMaterialProperties",
     "ProjectState",
+    "PropertyCheckIssue",
+    "SectionDefinition",
+    "SizingOptions",
     "SlabPanel",
+    "SlabPropertyAssignment",
     "StructuralModelState",
 ]

@@ -183,3 +183,28 @@
 .geom-std-drawer{margin-top:16px;background:#111d2e;border:1px solid #26364d;border-radius:10px;overflow:hidden}
 .geom-std-code{margin:0;padding:14px;background:#070c14;color:#a7f3d0;font-size:11px;line-height:1.5;overflow-x:auto;max-height:340px;font-family:Consolas,ui-monospace,monospace}
 @media(max-width:1100px){.geom-workspace{grid-template-columns:1fr}.geom-viewports.layout-split{grid-template-columns:1fr}}
+
+/* Phase 4: Module 04 Member Sizing & Properties */
+.sizing-launch-btn{border-color:#6d4aa3;color:#d8b4fe}
+.sizing-builder{padding:26px 0 12px}
+.sizing-main-col{min-width:0}
+.sizing-split{display:grid;grid-template-columns:1.25fr 1fr;gap:14px;align-items:start}
+.sizing-bulk-bar{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;background:#17223a;border:1px solid #4c6aa3;border-radius:10px;padding:10px 12px;margin-bottom:14px;font-size:12px}
+.sizing-sec-form{padding:10px 12px;border-bottom:1px solid #223147;background:#0e1828}
+.sizing-sec-list{display:flex;flex-direction:column;gap:7px;padding:10px 12px;max-height:420px;overflow-y:auto}
+.sizing-sec-card{display:flex;justify-content:space-between;align-items:center;gap:8px;background:#0e1828;border:1px solid #233349;border-left:4px solid #38bdf8;border-radius:8px;padding:8px 10px;cursor:pointer}
+.sizing-sec-card.active{border-color:#50d2b0;background:#132438}
+.sizing-sec-main strong{display:flex;align-items:center;gap:6px;font-size:12px;color:#eaf0f6}
+.sizing-sec-main small{display:block;font-size:10px;color:#8999ae;margin-top:2px}
+.sizing-swatch{display:inline-block;width:9px;height:9px;border-radius:3px}
+.sizing-legend-chip{cursor:pointer;padding:2px 6px;border-radius:6px;border:1px solid transparent}
+.sizing-legend-chip.active{border-color:#50d2b0;background:#132438;color:#eaf0f6}
+.sizing-table-wrap{overflow:auto;max-height:500px}
+.sizing-table{width:100%;border-collapse:collapse;font-size:11px}
+.sizing-table th,.sizing-table td{padding:8px 9px;border-bottom:1px solid #1e2d42;text-align:left;white-space:nowrap}
+.sizing-table th{position:sticky;top:0;background:#0e1828;color:#8999ae;font-size:10px;text-transform:uppercase;letter-spacing:.5px}
+.sizing-table tbody tr{cursor:pointer}
+.sizing-table tbody tr:hover{background:#132236}
+.sizing-table tbody tr.selected{background:#182d46}
+.sizing-tag-pill{display:inline-block;padding:2px 7px;border-radius:12px;border:1px solid;font-weight:800;font-size:10px}
+@media(max-width:1100px){.sizing-split{grid-template-columns:1fr}}

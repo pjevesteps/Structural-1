@@ -66,6 +66,14 @@ Connect tablet and PC to the same trusted Wi-Fi. Run `ipconfig` on Windows, then
 - Interactive Module 03 UI (`frontend/src/GeometryBuilder.jsx`): HTML5 Canvas 3D orbit/zoom wireframe, 2D SVG floor framing editor (`Inspect`, `Add Beam`, `Delete Member`, `Toggle Support`), integrity checklist, approval gate, and live `.std` preview drawer
 - Upgraded geometry-only STAAD.Pro `.std` exporter (`backend/app/staad.py`) emitting `JOINT COORDINATES`, `MEMBER INCIDENCES`, `START GROUP DEFINITION` (`_COLUMNS`, `_BEAMS`, `_TIE_BEAMS`, per-level groups), and `SUPPORTS`
 
+### Phase 4 — Preliminary Member Sizing & Property Assignment (Module 04)
+- Automated NSCP 2015 preliminary sizing (`backend/app/sizing/engine.py`):
+  - Story-tiered square column sections (`C1`, `C2`, `C3` with `0.70 Ig` cracked modifiers), span-bucketed primary/tie/secondary beam sections (`B1..`, `TB1..`, `SB1..` with `0.35 Ig` and optional `START/END MY MZ` releases), and one-way/two-way/void slab thicknesses
+  - Automatic concrete modulus calculation (`Ec = 4700 * sqrt(f'c)` in `kN/m²`)
+- NSCP 2015 SMRF (Zone 4) validator (`backend/app/sizing/validator.py`) checking assignment completeness, column min dimension (`>= 300 mm`), beam min width (`>= 250 mm`, `b/h >= 0.30`), beam-vs-column width, and slab min thickness
+- Full STAAD.Pro `.std` property exporter (`backend/app/staad.py`) emitting `DEFINE MATERIAL START`, `MEMBER PROPERTY` (`PRIS YD/ZD`), `CONSTANTS` (`MATERIAL` + `BETA`), `MEMBER CRACKED`, `MEMBER RELEASE`, `_SEC_*` groups, and 72-char `-` line continuations
+- Interactive Module 04 UI (`frontend/src/MemberSizing.jsx`): color-coded 3D property viewer, Section Catalog CRUD, filterable Member Schedule with Bulk Assign, Slab Thickness Schedule, live concrete volume (`m³`), and NSCP 2015 check sidebar
+
 ## API
 
 ### Phase 1 Endpoints
@@ -116,6 +124,15 @@ Connect tablet and PC to the same trusted Wi-Fi. Run `ipconfig` on Windows, then
 - `DELETE /api/projects/{project_id}/geometry/members/{member_id}` — Delete an analytical member and re-validate
 - `PATCH /api/projects/{project_id}/geometry/nodes/{node_id}/support` — Toggle node support (`NONE`, `FIXED`, `PINNED`) and re-validate
 - `POST /api/projects/{project_id}/geometry/approve` — Mark geometry approved for downstream load/STAAD modules (blocked if any `error` issues exist)
+
+### Phase 4 Member Sizing & Property Endpoints (`/api/projects/{project_id}/sizing`)
+- `POST /api/projects/{project_id}/sizing/auto-size` — Generate preliminary NSCP 2015 sections, member assignments, and slab thicknesses
+- `PATCH /api/projects/{project_id}/sizing/material` — Update concrete/rebar material (`f'c`, `fy`) & sizing options, recalculate `Ec`, and re-validate
+- `POST /api/projects/{project_id}/sizing/sections` — Create or update a `SectionDefinition` and re-validate
+- `DELETE /api/projects/{project_id}/sizing/sections/{section_id}` — Delete an unused section (400 if still assigned)
+- `POST /api/projects/{project_id}/sizing/assign` — Bulk assign `member_ids` to a section with optional `beta_angle_deg` and `MY/MZ` releases
+- `PATCH /api/projects/{project_id}/sizing/slabs/{panel_id}` — Update slab panel thickness or tag and re-validate
+- `POST /api/projects/{project_id}/sizing/approve` — Approve preliminary properties (blocked if any `error` issues remain)
 
 ## Documentation & History
 See [CHANGELOG.md](CHANGELOG.md) for a chronological record of changes.

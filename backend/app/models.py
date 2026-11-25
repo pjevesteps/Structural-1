@@ -1,8 +1,10 @@
-from typing import Literal
+import math
+from typing import Any, Literal
 from pydantic import BaseModel, Field, ConfigDict, model_validator
 
 
-class MaterialProperties(BaseModel):
+class ProjectMaterialProperties(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     fc_mpa: float = Field(gt=0)
     fy_mpa: float = Field(gt=0)
     concrete_density_kn_m3: float = Field(gt=0)
@@ -13,7 +15,7 @@ class ProjectInfo(BaseModel):
     project_name: str = Field(min_length=1, max_length=200)
     location: str = ""
     design_code: str = "To be confirmed by engineer"
-    materials: MaterialProperties
+    materials: ProjectMaterialProperties
 
 
 class Level(BaseModel):
@@ -138,6 +140,96 @@ class StructuralModelState(BaseModel):
     engineer_approved: bool = False
 
 
+class MaterialProperties(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = "CONCRETE"
+    fc_mpa: float = Field(default=28.0, gt=0)
+    fy_main_mpa: float = Field(default=415.0, gt=0)
+    fy_tie_mpa: float = Field(default=275.0, gt=0)
+    ec_kn_m2: float = Field(default=24870062.0, gt=0)
+    poisson: float = Field(default=0.17, gt=0, lt=0.5)
+    density_kn_m3: float = Field(default=23.54, gt=0)
+    alpha: float = Field(default=1e-5, gt=0)
+    damp: float = Field(default=0.05, ge=0, le=1.0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def auto_compute_ec(cls, data: Any):
+        if isinstance(data, dict) and "fc_mpa" in data and "ec_kn_m2" not in data:
+            try:
+                fc = float(data["fc_mpa"])
+                if fc > 0:
+                    updated = dict(data)
+                    updated["ec_kn_m2"] = round(4700.0 * math.sqrt(fc) * 1000.0, 2)
+                    return updated
+            except (TypeError, ValueError):
+                pass
+        return data
+
+
+class SectionDefinition(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    section_id: str = Field(min_length=1)
+    label: str = Field(min_length=1)
+    category: Literal["column", "primary_beam", "secondary_beam", "tie_beam", "trimmer_beam"]
+    width_mm: float
+    depth_mm: float
+    material_name: str = "CONCRETE"
+    color_hex: str = "#38bdf8"
+    cracked_ix: float = Field(default=0.70, gt=0, le=1.0)
+    cracked_iy: float = Field(default=0.70, gt=0, le=1.0)
+    cracked_iz: float = Field(default=0.70, gt=0, le=1.0)
+
+
+class MemberPropertyAssignment(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    member_id: int = Field(ge=1)
+    section_id: str = Field(min_length=1)
+    beta_angle_deg: float = 0.0
+    release_start_moment: bool = False
+    release_end_moment: bool = False
+    manual_override: bool = False
+
+
+class SlabPropertyAssignment(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    panel_id: str = Field(min_length=1)
+    floor_level: str
+    slab_tag: str = "S1"
+    thickness_mm: float = Field(default=125.0, ge=0.0)
+    min_code_thickness_mm: float = Field(default=100.0, ge=0.0)
+    manual_override: bool = False
+
+
+class SizingOptions(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    seismic_smrf_zone4: bool = True
+    include_cracked_modifiers: bool = True
+    pin_secondary_beams: bool = True
+    beam_span_depth_ratio: float = Field(default=12.0, gt=2.0, le=30.0)
+    round_increment_mm: int = Field(default=50, ge=10, le=200)
+
+
+class PropertyCheckIssue(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    severity: Literal["error", "warning", "info"]
+    code: str
+    message: str
+    entity_ids: list[str] = Field(default_factory=list)
+
+
+class MemberSizingState(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    generated_at: str | None = None
+    material: MaterialProperties = Field(default_factory=MaterialProperties)
+    options: SizingOptions = Field(default_factory=SizingOptions)
+    sections: list[SectionDefinition] = Field(default_factory=list)
+    member_assignments: list[MemberPropertyAssignment] = Field(default_factory=list)
+    slab_assignments: list[SlabPropertyAssignment] = Field(default_factory=list)
+    validation_issues: list[PropertyCheckIssue] = Field(default_factory=list)
+    engineer_approved: bool = False
+
+
 class ProjectState(BaseModel):
     model_config = ConfigDict(extra="forbid")
     project_info: ProjectInfo
@@ -147,6 +239,7 @@ class ProjectState(BaseModel):
     beams: list[Beam] = Field(default_factory=list)
     openings: list[FloorOpening] = Field(default_factory=list)
     structural_model: StructuralModelState = Field(default_factory=StructuralModelState)
+    member_sizing: MemberSizingState = Field(default_factory=MemberSizingState)
 
     @model_validator(mode="after")
     def check_references(self):
