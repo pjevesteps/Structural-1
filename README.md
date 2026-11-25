@@ -27,10 +27,15 @@ npm run dev -- --host 0.0.0.0
 Open the Vite URL printed in the terminal. API docs: http://localhost:8000/docs.
 
 ## Run Tests
+Backend unit, API, and Phase 1 → Phase 6 E2E pipeline + STAAD.Pro linter (`backend/tests/test_e2e_pipeline.py`, isolated in pytest `tmp_path`):
 ```powershell
 .\.venv\Scripts\pytest.exe -v
 ```
-Includes unit & API tests for Phases 1–6 plus the full Phase 1 → Phase 6 end-to-end pipeline & STAAD.Pro grammar linter (`backend/tests/test_e2e_pipeline.py`, isolated in pytest `tmp_path`).
+Browser E2E tests in Chromium across Modules 01–06 (isolated ports `8010`/`5175` and `frontend/e2e/.tmp-data/`):
+```powershell
+cd frontend
+npm run test:e2e
+```
 
 ## Tablet Access
 Connect tablet and PC to the same trusted Wi-Fi. Run `ipconfig` on Windows, then open `http://PC-IP:5173` on the tablet. If prompted, allow the app only on a private network. Do not expose the development server to the public internet.

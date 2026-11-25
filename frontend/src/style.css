@@ -259,3 +259,5 @@
 .design-status-pill.pass{background:#123228;color:#6ee7b7;border:1px solid #10b981}
 .design-status-pill.fail{background:#3a171f;color:#fca5a5;border:1px solid #ef4444}
 .design-status-pill.warn{background:#332412;color:#fcd34d;border:1px solid #f59e0b}
+.new-proj-form{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px;padding:12px;background:#111d2e;border:1px solid #2b3c55;border-radius:10px}
+.new-proj-form input{background:#0b1320;color:#eaf0f6;border:1px solid #2b3c55;border-radius:7px;padding:7px 10px;font-size:13px;min-width:210px}

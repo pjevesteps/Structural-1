@@ -14,6 +14,11 @@ npm-debug.log*
 data/exports/
 data/imports/
 
+# Playwright E2E artifacts
+frontend/e2e/.tmp-data/
+frontend/playwright-report/
+frontend/test-results/
+
 # OS / Editor
 .DS_Store
 Thumbs.db

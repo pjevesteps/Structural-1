@@ -111,7 +111,7 @@ def approve_loads(project_id: str):
 @router.get("/staad/download")
 def download_staad_file(project_id: str):
     project = _load_or_404(project_id)
-    dest = Path(__file__).resolve().parents[3] / "data" / "exports" / f"{project_id}.std"
+    dest = storage.get_exports_dir() / f"{project_id}.std"
     try:
         result = write_staad_preview(project, dest)
     except KeyError as exc:

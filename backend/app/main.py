@@ -2,7 +2,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from .models import ProjectState
-from .storage import save_project, load_project, list_projects
+from .storage import save_project, load_project, list_projects, get_exports_dir
 from .staad import write_staad_preview, simulate_placeholder
 from .pdf_importer import router as pdf_importer_router
 from .geometry import router as geometry_router
@@ -61,7 +61,7 @@ def staad_preview(project_id: str):
         p = load_project(project_id)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Project not found.")
-    path = Path(__file__).resolve().parents[2] / "data" / "exports" / f"{project_id}_geometry_preview.std"
+    path = get_exports_dir() / f"{project_id}_geometry_preview.std"
     try:
         return write_staad_preview(p, path)
     except KeyError as exc:
