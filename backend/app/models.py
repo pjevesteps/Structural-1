@@ -637,6 +637,14 @@ class ReportState(BaseModel):
     readiness_warnings: list[str] = Field(default_factory=list)
 
 
+class CadSheetConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    sheet_no: str = Field(min_length=1, max_length=20)
+    title: str = Field(min_length=1, max_length=160)
+    plan_scale: int | None = Field(default=None, ge=20, le=500)
+    items: list[str] = Field(default_factory=list)
+
+
 class CadDrawingOptions(BaseModel):
     model_config = ConfigDict(extra="forbid")
     sheet_size: Literal["A1", "A2", "A3"] = "A1"
@@ -648,6 +656,8 @@ class CadDrawingOptions(BaseModel):
     include_framing_plans: bool = True
     include_schedules: bool = True
     include_typical_details: bool = True
+    preset: Literal["custom", "a1_permit_set", "a3_individual_floors"] = "a1_permit_set"
+    sheets: list[CadSheetConfig] = Field(default_factory=list)
 
 
 class CadSheetSummary(BaseModel):
@@ -656,6 +666,7 @@ class CadSheetSummary(BaseModel):
     title: str
     contents: list[str] = Field(default_factory=list)
     entity_count: int = Field(default=0, ge=0)
+    overflow: bool = False
 
 
 class CadDrawingState(BaseModel):
@@ -666,6 +677,7 @@ class CadDrawingState(BaseModel):
     total_entities: int = Field(default=0, ge=0)
     layers: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    available_items: list[dict[str, str]] = Field(default_factory=list)
 
 
 class ProjectState(BaseModel):

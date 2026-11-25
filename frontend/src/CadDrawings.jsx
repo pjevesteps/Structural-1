@@ -10,6 +10,8 @@ const DEFAULT_OPTIONS = {
   include_framing_plans: true,
   include_schedules: true,
   include_typical_details: true,
+  preset: "a1_permit_set",
+  sheets: [],
 };
 
 const LAYER_META = {
@@ -28,6 +30,25 @@ const LAYER_META = {
   "S-TEXT": { color: "#cbd5e1", label: "Annotations & Notes" },
 };
 
+const STATIC_SCHED_DETAIL_ITEMS = [
+  { key: "schedule_footings", label: "Footing Schedule", group: "Schedules & Details" },
+  { key: "schedule_columns", label: "Column Schedule", group: "Schedules & Details" },
+  { key: "schedule_beams", label: "Beam Schedule", group: "Schedules & Details" },
+  { key: "detail_footing_section", label: "Footing Detail", group: "Schedules & Details" },
+  { key: "detail_column_section", label: "Column Section", group: "Schedules & Details" },
+  { key: "detail_beam_section", label: "Beam Section", group: "Schedules & Details" },
+  { key: "detail_beam_longitudinal", label: "Beam Longitudinal (SMRF)", group: "Schedules & Details" },
+  { key: "detail_column_longitudinal", label: "Column Longitudinal (SMRF)", group: "Schedules & Details" },
+];
+
+function renumberSheets(sheetList, prefix) {
+  const cleanPrefix = (prefix || "S").trim().toUpperCase() || "S";
+  return sheetList.map((sh, idx) => ({
+    ...sh,
+    sheet_no: `${cleanPrefix}-${idx + 1}`,
+  }));
+}
+
 export default function CadDrawings({ project, onClose, onUpdated }) {
   const pid = encodeURIComponent(project.project_id);
   const panRef = useRef({ dragging: false, startX: 0, startY: 0, origX: 0, origY: 0 });
@@ -39,8 +60,9 @@ export default function CadDrawings({ project, onClose, onUpdated }) {
   const [error, setError] = useState("");
 
   const [options, setOptions] = useState(DEFAULT_OPTIONS);
+  const [composerOpen, setComposerOpen] = useState(true);
   const [activeSheet, setActiveSheet] = useState("");
-  const [preview, setPreview] = useState(null); // { sheet_no, title, layers, svg }
+  const [preview, setPreview] = useState(null);
   const [hiddenLayers, setHiddenLayers] = useState({});
   const [zoom, setZoom] = useState(1.0);
   const [pan, setPan] = useState({ x: 0, y: 0 });
@@ -88,7 +110,6 @@ export default function CadDrawings({ project, onClose, onUpdated }) {
     loadProjectState();
   }, [project.project_id]);
 
-  // Apply layer visibility toggles directly to rendered SVG <g data-layer="..."> nodes
   useEffect(() => {
     const host = svgHostRef.current;
     if (!host) return;
@@ -111,11 +132,47 @@ export default function CadDrawings({ project, onClose, onUpdated }) {
       ad?.generated_at
   );
 
+  // Selectable Plan items derived from backend available_items or project.levels
+  const planCheckItems = useMemo(() => {
+    const base = [
+      { key: "general_notes", label: "General Notes" },
+      { key: "foundation_plan", label: "Foundation Plan" },
+    ];
+    const fromApi = (cad?.available_items || []).filter((it) => it.key.startsWith("floor_plan:"));
+    if (fromApi.length > 0) {
+      return [...base, ...fromApi.map((it) => ({ key: it.key, label: it.label }))];
+    }
+    const lvls = [...(fullProject?.levels || [])].sort((a, b) => a.elevation_m - b.elevation_m);
+    for (const lv of lvls) {
+      base.push({
+        key: `floor_plan:${lv.id}`,
+        label: `${lv.id} Framing (EL. ${lv.elevation_m >= 0 ? "+" : ""}${lv.elevation_m.toFixed(2)}m)`,
+      });
+    }
+    return base;
+  }, [cad?.available_items, fullProject?.levels]);
+
   const sheets = cad?.sheets || [];
+  const summaryByNo = useMemo(() => {
+    const m = {};
+    for (const s of sheets) m[s.sheet_no] = s;
+    return m;
+  }, [sheets]);
+
   const activeSheetMeta = useMemo(
     () => sheets.find((s) => s.sheet_no === activeSheet) || sheets[0] || null,
     [sheets, activeSheet]
   );
+
+  const activeSheetConfig = useMemo(
+    () =>
+      (options.sheets || []).find((s) => s.sheet_no === activeSheet) ||
+      (options.sheets || [])[0] ||
+      null,
+    [options.sheets, activeSheet]
+  );
+
+  const effectiveActiveScale = activeSheetConfig?.plan_scale || options.plan_scale;
 
   const layerList = useMemo(() => {
     const set = new Set(cad?.layers || []);
@@ -123,31 +180,47 @@ export default function CadDrawings({ project, onClose, onUpdated }) {
     return Array.from(set);
   }, [cad?.layers, preview?.layers]);
 
-  async function handleGenerate() {
+  async function runGenerateWithOptions(nextOptions, preferredSheet = null) {
     setBusy(true);
     setError("");
     setNotice("");
     try {
+      const payload = {
+        options: {
+          ...nextOptions,
+          plan_scale: Number(nextOptions.plan_scale),
+          detail_scale: Number(nextOptions.detail_scale),
+          sheets: (nextOptions.sheets || []).map((s) => ({
+            sheet_no: s.sheet_no,
+            title: s.title || s.sheet_no,
+            plan_scale: s.plan_scale ? Number(s.plan_scale) : null,
+            items: s.items || [],
+          })),
+        },
+      };
       const updated = await apiJson(`/api/projects/${pid}/cad/generate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          options: {
-            ...options,
-            plan_scale: Number(options.plan_scale),
-            detail_scale: Number(options.detail_scale),
-          },
-        }),
+        body: JSON.stringify(payload),
       });
       setFullProject((prev) => (prev ? { ...prev, cad_drawings: updated } : prev));
-      const firstSheet = updated.sheets?.[0]?.sheet_no || "";
+      if (updated.options) {
+        setOptions({ ...DEFAULT_OPTIONS, ...updated.options });
+      }
+      const targetSheet =
+        preferredSheet && updated.sheets?.some((s) => s.sheet_no === preferredSheet)
+          ? preferredSheet
+          : updated.sheets?.[0]?.sheet_no || "";
       setZoom(1.0);
       setPan({ x: 0, y: 0 });
-      if (firstSheet) {
-        await loadSheetPreview(firstSheet);
+      if (targetSheet) {
+        await loadSheetPreview(targetSheet);
       }
+      const overflowCnt = (updated.sheets || []).filter((s) => s.overflow).length;
       setNotice(
-        `Generated ${updated.sheets?.length || 0} AutoCAD sheet(s) (${updated.total_entities} CAD entities across ${updated.layers?.length || 0} layers).`
+        `Generated ${updated.sheets?.length || 0} AutoCAD sheet(s) (${updated.total_entities} CAD entities` +
+          (overflowCnt > 0 ? `, ${overflowCnt} sheet(s) auto-fitted due to scale overflow` : "") +
+          ")."
       );
       if (onUpdated) await onUpdated();
     } catch (err) {
@@ -155,6 +228,71 @@ export default function CadDrawings({ project, onClose, onUpdated }) {
     } finally {
       setBusy(false);
     }
+  }
+
+  function handleApplyPreset(presetName) {
+    const next = {
+      ...options,
+      preset: presetName,
+      sheet_size: presetName === "a3_individual_floors" ? "A3" : "A1",
+      plan_scale: presetName === "a3_individual_floors" ? 100 : 100,
+      sheets: [], // let backend auto-compose the preset from actual levels
+    };
+    setOptions(next);
+    if (hasPrereqs) {
+      runGenerateWithOptions(next);
+    }
+  }
+
+  function handleAddSheet() {
+    const current = options.sheets || [];
+    const prefix = (options.sheet_prefix || "S").trim().toUpperCase() || "S";
+    const nextNo = `${prefix}-${current.length + 1}`;
+    const nextSheets = [
+      ...current,
+      {
+        sheet_no: nextNo,
+        title: `CUSTOM STRUCTURAL SHEET ${current.length + 1}`,
+        plan_scale: null,
+        items: ["foundation_plan"],
+      },
+    ];
+    setOptions({ ...options, preset: "custom", sheets: nextSheets });
+  }
+
+  function updateSheet(idx, patch) {
+    const next = (options.sheets || []).map((s, i) => (i === idx ? { ...s, ...patch } : s));
+    setOptions({ ...options, preset: "custom", sheets: next });
+  }
+
+  function toggleSheetItem(idx, itemKey) {
+    const sh = (options.sheets || [])[idx];
+    if (!sh) return;
+    const exists = sh.items.includes(itemKey);
+    const nextItems = exists ? sh.items.filter((k) => k !== itemKey) : [...sh.items, itemKey];
+    updateSheet(idx, { items: nextItems });
+  }
+
+  function moveSheet(idx, delta) {
+    const list = [...(options.sheets || [])];
+    const target = idx + delta;
+    if (target < 0 || target >= list.length) return;
+    const [item] = list.splice(idx, 1);
+    list.splice(target, 0, item);
+    setOptions({
+      ...options,
+      preset: "custom",
+      sheets: renumberSheets(list, options.sheet_prefix),
+    });
+  }
+
+  function removeSheet(idx) {
+    const list = (options.sheets || []).filter((_, i) => i !== idx);
+    setOptions({
+      ...options,
+      preset: "custom",
+      sheets: renumberSheets(list, options.sheet_prefix),
+    });
   }
 
   async function handleSelectSheet(sheetNo) {
@@ -169,10 +307,10 @@ export default function CadDrawings({ project, onClose, onUpdated }) {
     }
   }
 
-  function handleDownloadDxf() {
+  function triggerDownload(endpoint, filename) {
     const a = document.createElement("a");
-    a.href = `/api/projects/${pid}/cad/download/dxf`;
-    a.download = `${project.project_id}_Structural_Plans.dxf`;
+    a.href = `/api/projects/${pid}/cad/${endpoint}`;
+    a.download = filename;
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -203,7 +341,9 @@ export default function CadDrawings({ project, onClose, onUpdated }) {
   }
   function onViewportWheel(e) {
     e.preventDefault();
-    setZoom((z) => Math.max(0.5, Math.min(4.0, Number((z * (e.deltaY < 0 ? 1.15 : 0.87)).toFixed(2)))));
+    setZoom((z) =>
+      Math.max(0.5, Math.min(4.0, Number((z * (e.deltaY < 0 ? 1.15 : 0.87)).toFixed(2))))
+    );
   }
 
   return (
@@ -217,15 +357,34 @@ export default function CadDrawings({ project, onClose, onUpdated }) {
           </h2>
         </div>
         <div className="geom-header-actions">
-          <button disabled={busy || !hasPrereqs} onClick={handleGenerate}>
+          <button
+            disabled={busy || !hasPrereqs}
+            onClick={() => runGenerateWithOptions(options, activeSheet)}
+          >
             {cad?.generated_at ? "Regenerate CAD Drawings" : "Generate CAD Drawings"}
           </button>
           <button
             className="secondary cad-download-btn"
             disabled={busy || !hasPrereqs}
-            onClick={handleDownloadDxf}
+            onClick={() => triggerDownload("download/dxf", `${project.project_id}_Structural_Plans.dxf`)}
           >
             Download AutoCAD (.dxf)
+          </button>
+          <button
+            className="secondary report-pdf-btn"
+            disabled={busy || !hasPrereqs}
+            onClick={() => triggerDownload("download/pdf", `${project.project_id}_Structural_Plans.pdf`)}
+          >
+            Download PDF
+          </button>
+          <button
+            className="secondary loads-download-btn"
+            disabled={busy || !hasPrereqs}
+            onClick={() =>
+              triggerDownload("download/zip", `${project.project_id}_Structural_Plans_Sheets.zip`)
+            }
+          >
+            Download Sheets (.zip)
           </button>
           <button className="secondary" disabled={busy} onClick={onClose}>
             Back to Dashboard
@@ -238,11 +397,11 @@ export default function CadDrawings({ project, onClose, onUpdated }) {
       {!hasPrereqs && fullProject && (
         <div className="notice error">
           Complete Modules 03 (3D Geometry), 04 (Member Sizing), and 06 (Analysis &amp; RC Design)
-          before generating AutoCAD .dxf drawings.
+          before generating AutoCAD .dxf / vector PDF structural drawings.
         </div>
       )}
 
-      {/* Drawing Settings Bar */}
+      {/* Global Settings + Quick Presets Bar */}
       <div className="sizing-bulk-bar loads-preset-bar">
         <div className="loads-presets-row">
           <label className="design-param-field">
@@ -264,9 +423,11 @@ export default function CadDrawings({ project, onClose, onUpdated }) {
               value={options.plan_scale}
               onChange={(e) => setOptions({ ...options, plan_scale: Number(e.target.value) })}
             >
-              <option value={100}>1:100</option>
-              <option value={75}>1:75</option>
               <option value={50}>1:50</option>
+              <option value={75}>1:75</option>
+              <option value={100}>1:100</option>
+              <option value={150}>1:150</option>
+              <option value={200}>1:200</option>
             </select>
           </label>
           <label className="design-param-field">
@@ -282,37 +443,205 @@ export default function CadDrawings({ project, onClose, onUpdated }) {
             </select>
           </label>
           <label className="design-param-field">
-            <span>Sheet Prefix</span>
+            <span>Prefix</span>
             <input
               type="text"
               aria-label="Sheet Prefix"
               maxLength={6}
               value={options.sheet_prefix}
-              onChange={(e) => setOptions({ ...options, sheet_prefix: e.target.value })}
+              onChange={(e) => {
+                const pref = e.target.value;
+                setOptions({
+                  ...options,
+                  sheet_prefix: pref,
+                  sheets: renumberSheets(options.sheets || [], pref),
+                });
+              }}
             />
           </label>
-        </div>
 
-        <div className="loads-toggles-row">
-          <span className="loads-bar-label">Sheets &amp; Sections:</span>
-          {[
-            ["include_general_notes", "General Notes"],
-            ["include_foundation_plan", "Foundation Plan"],
-            ["include_framing_plans", "Framing Plans"],
-            ["include_schedules", "RC Schedules"],
-            ["include_typical_details", "Typical Details"],
-          ].map(([key, lbl]) => (
-            <label key={key} className="loads-inline-field">
-              <input
-                type="checkbox"
-                checked={options[key]}
-                onChange={(e) => setOptions({ ...options, [key]: e.target.checked })}
-              />
-              <span>{lbl}</span>
-            </label>
-          ))}
+          <div className="cad-preset-btns">
+            <button
+              type="button"
+              className={options.preset === "a1_permit_set" ? "pdf-chip active" : "pdf-chip"}
+              disabled={busy}
+              onClick={() => handleApplyPreset("a1_permit_set")}
+            >
+              A1 Standard Permit Set
+            </button>
+            <button
+              type="button"
+              className={options.preset === "a3_individual_floors" ? "pdf-chip active" : "pdf-chip"}
+              disabled={busy}
+              onClick={() => handleApplyPreset("a3_individual_floors")}
+            >
+              A3 Individual Floor Set
+            </button>
+            <button
+              type="button"
+              className="pdf-chip"
+              disabled={busy}
+              onClick={handleAddSheet}
+            >
+              + Add Sheet
+            </button>
+            <button
+              type="button"
+              className="pdf-chip"
+              onClick={() => setComposerOpen((v) => !v)}
+            >
+              {composerOpen ? "Hide Sheet Composer" : "Show Sheet Composer"}
+            </button>
+          </div>
         </div>
       </div>
+
+      {/* Per-Page Sheet Composer Panel */}
+      {composerOpen && (
+        <div className="geom-panel cad-composer-panel">
+          <div className="geom-panel-head">
+            <div>
+              <strong>Per-Page Sheet Composer</strong>
+              <small>
+                Assign exact plans, schedules, and 1:25 SMRF details to each drawing sheet, override
+                scale per page, then click Regenerate CAD Drawings.
+              </small>
+            </div>
+            <button
+              className="secondary"
+              disabled={busy || !hasPrereqs}
+              onClick={() => runGenerateWithOptions(options, activeSheet)}
+            >
+              Apply Sheet Layout
+            </button>
+          </div>
+
+          {(options.sheets || []).length === 0 ? (
+            <div className="loads-empty">
+              Click <strong>Generate CAD Drawings</strong> or choose a Quick Preset above to
+              populate customizable sheets (<code>S-1</code>, <code>S-2</code>, <code>S-3</code>…).
+            </div>
+          ) : (
+            <div className="cad-composer-grid">
+              {options.sheets.map((sh, idx) => {
+                const summary = summaryByNo[sh.sheet_no];
+                const isOverflow = Boolean(summary?.overflow);
+                return (
+                  <div
+                    key={`${sh.sheet_no}-${idx}`}
+                    className={
+                      activeSheet === sh.sheet_no ? "cad-sheet-card active" : "cad-sheet-card"
+                    }
+                  >
+                    <div className="cad-sheet-card-head">
+                      <span className="cad-sheet-badge">{sh.sheet_no}</span>
+                      <input
+                        type="text"
+                        className="cad-sheet-title-input"
+                        aria-label={`Title for ${sh.sheet_no}`}
+                        value={sh.title}
+                        onChange={(e) => updateSheet(idx, { title: e.target.value })}
+                      />
+                      <select
+                        className="cad-sheet-scale-sel"
+                        aria-label={`Scale for ${sh.sheet_no}`}
+                        value={sh.plan_scale || ""}
+                        onChange={(e) =>
+                          updateSheet(idx, {
+                            plan_scale: e.target.value ? Number(e.target.value) : null,
+                          })
+                        }
+                      >
+                        <option value="">Inherit (1:{options.plan_scale})</option>
+                        <option value={50}>1:50</option>
+                        <option value={75}>1:75</option>
+                        <option value={100}>1:100</option>
+                        <option value={150}>1:150</option>
+                        <option value={200}>1:200</option>
+                      </select>
+                      {summary && (
+                        <span
+                          className={
+                            isOverflow
+                              ? "design-status-pill warn"
+                              : "design-status-pill pass"
+                          }
+                        >
+                          {isOverflow
+                            ? "Overflow — reduce scale or split sheet"
+                            : "Fits Sheet"}
+                        </span>
+                      )}
+                      <div className="cad-sheet-move-btns">
+                        <button
+                          type="button"
+                          className="pdf-chip"
+                          title="Move sheet up"
+                          disabled={idx === 0}
+                          onClick={() => moveSheet(idx, -1)}
+                        >
+                          ↑
+                        </button>
+                        <button
+                          type="button"
+                          className="pdf-chip"
+                          title="Move sheet down"
+                          disabled={idx === options.sheets.length - 1}
+                          onClick={() => moveSheet(idx, 1)}
+                        >
+                          ↓
+                        </button>
+                        <button
+                          type="button"
+                          className="pdf-chip"
+                          title="Remove sheet"
+                          disabled={options.sheets.length <= 1}
+                          onClick={() => removeSheet(idx)}
+                        >
+                          ×
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="cad-sheet-groups">
+                      <div>
+                        <small className="cad-group-lbl">Plans &amp; Notes</small>
+                        <div className="cad-item-checks">
+                          {planCheckItems.map((it) => (
+                            <label key={it.key} className="cad-check-chip">
+                              <input
+                                type="checkbox"
+                                checked={sh.items.includes(it.key)}
+                                onChange={() => toggleSheetItem(idx, it.key)}
+                              />
+                              <span>{it.label}</span>
+                            </label>
+                          ))}
+                        </div>
+                      </div>
+                      <div>
+                        <small className="cad-group-lbl">Schedules &amp; 1:25 Details</small>
+                        <div className="cad-item-checks">
+                          {STATIC_SCHED_DETAIL_ITEMS.map((it) => (
+                            <label key={it.key} className="cad-check-chip">
+                              <input
+                                type="checkbox"
+                                checked={sh.items.includes(it.key)}
+                                onChange={() => toggleSheetItem(idx, it.key)}
+                              />
+                              <span>{it.label}</span>
+                            </label>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Main CAD Workspace */}
       <div className="geom-workspace">
@@ -329,6 +658,7 @@ export default function CadDrawings({ project, onClose, onUpdated }) {
                       onClick={() => handleSelectSheet(s.sheet_no)}
                     >
                       {s.sheet_no} · {s.title.split(" ").slice(0, 3).join(" ")}
+                      {s.overflow ? " ⚠" : ""}
                     </button>
                   ))
                 ) : (
@@ -387,8 +717,8 @@ export default function CadDrawings({ project, onClose, onUpdated }) {
             ) : (
               <div className="loads-empty">
                 Click <strong>Generate CAD Drawings</strong> to build multi-sheet AutoCAD R2010{" "}
-                <code>.dxf</code> plans, schedules, and 1:25 typical RC details with live SVG
-                inspection.
+                <code>.dxf</code> &amp; true-scale vector <code>.pdf</code> plans, schedules, and
+                1:25 SMRF details.
               </div>
             )}
 
@@ -404,14 +734,14 @@ export default function CadDrawings({ project, onClose, onUpdated }) {
           </div>
         </div>
 
-        {/* Right Sidebar: Drawing KPIs & CAD Layer Toggles */}
+        {/* Right Sidebar: Live Drawing Summary & Layer Toggles */}
         <aside className="geom-sidebar">
           <div className="geom-checks-head">
             <h4>CAD Drawing Summary</h4>
           </div>
           <div className="geom-stats-grid loads-kpi-sidebar">
             <div>
-              <strong>{sheets.length}</strong>
+              <strong>{options.sheets?.length || sheets.length}</strong>
               <small>Sheets</small>
             </div>
             <div>
@@ -419,23 +749,19 @@ export default function CadDrawings({ project, onClose, onUpdated }) {
               <small>DXF Entities</small>
             </div>
             <div>
-              <strong>{cad?.options?.sheet_size || options.sheet_size}</strong>
+              <strong>{options.sheet_size}</strong>
               <small>Sheet Size</small>
             </div>
             <div>
-              <strong>1:{cad?.options?.plan_scale || options.plan_scale}</strong>
-              <small>Plan Scale</small>
+              <strong>1:{effectiveActiveScale}</strong>
+              <small>Active Scale</small>
             </div>
           </div>
 
           <div className="geom-checks-head" style={{ marginTop: "6px" }}>
             <h4>CAD Layers ({layerList.length})</h4>
             {layerList.length > 0 && (
-              <button
-                type="button"
-                className="pdf-chip"
-                onClick={() => setHiddenLayers({})}
-              >
+              <button type="button" className="pdf-chip" onClick={() => setHiddenLayers({})}>
                 Show All
               </button>
             )}
@@ -478,13 +804,13 @@ export default function CadDrawings({ project, onClose, onUpdated }) {
           {(cad?.warnings || []).length > 0 && (
             <>
               <div className="geom-checks-head" style={{ marginTop: "6px" }}>
-                <h4>Layout Notes ({cad.warnings.length})</h4>
+                <h4>Layout Warnings ({cad.warnings.length})</h4>
               </div>
               {cad.warnings.map((w, idx) => (
-                <div key={idx} className="geom-issue sev-info">
+                <div key={idx} className="geom-issue sev-warning">
                   <div className="geom-issue-top">
-                    <span className="geom-sev-badge sev-info">SCALE</span>
-                    <code>CAD-FIT</code>
+                    <span className="geom-sev-badge sev-warning">FIT</span>
+                    <code>CAD-SCALE</code>
                   </div>
                   <p>{w}</p>
                 </div>

@@ -1016,6 +1016,17 @@ def test_full_pipeline_phase1_to_phase6(isolated_env, tmp_path: Path):
     assert svg_resp.status_code == 200
     assert 'data-layer="S-TITLEBLK"' in svg_resp.json()["svg"]
 
+    cad_pdf_resp = client.get(f"/api/projects/{pid}/cad/download/pdf")
+    assert cad_pdf_resp.status_code == 200
+    assert cad_pdf_resp.content.startswith(b"%PDF-")
+    cad_pdf_doc = pymupdf.open(stream=cad_pdf_resp.content, filetype="pdf")
+    assert cad_pdf_doc.page_count == len(cad_state["sheets"])
+    cad_pdf_doc.close()
+
+    cad_zip_resp = client.get(f"/api/projects/{pid}/cad/download/zip")
+    assert cad_zip_resp.status_code == 200
+    assert cad_zip_resp.content[:2] == b"PK"
+
     # =========================================================================
     # PERSISTENCE ROUND-TRIP CHECK (Strict ProjectState extra="forbid")
     # =========================================================================

@@ -6,7 +6,12 @@ from pydantic import BaseModel, ConfigDict
 
 from .. import storage
 from ..models import CadDrawingOptions, CadDrawingState
-from .dxf_builder import build_dxf_bytes, render_sheet_svg
+from .dxf_builder import (
+    build_dxf_bytes,
+    build_sheets_pdf,
+    build_sheets_zip,
+    render_sheet_svg,
+)
 
 router = APIRouter(
     prefix="/api/projects/{project_id}/cad",
@@ -59,6 +64,40 @@ def download_cad_dxf(project_id: str):
         media_type="application/dxf",
         headers={
             "Content-Disposition": f'attachment; filename="{project_id}_Structural_Plans.dxf"',
+        },
+    )
+
+
+@router.get("/download/pdf")
+def download_cad_pdf(project_id: str):
+    project = _load_or_404(project_id)
+    try:
+        pdf_bytes = build_sheets_pdf(project)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="{project_id}_Structural_Plans.pdf"',
+        },
+    )
+
+
+@router.get("/download/zip")
+def download_cad_zip(project_id: str):
+    project = _load_or_404(project_id)
+    try:
+        zip_bytes = build_sheets_zip(project)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    return Response(
+        content=zip_bytes,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{project_id}_Structural_Plans_Sheets.zip"',
         },
     )
 

@@ -384,7 +384,7 @@ test.describe.serial("Structural AI Office — Full Browser E2E (Modules 01 to 0
     await expect(page.locator('svg.cad-svg-canvas g[data-layer="S-SCHED"]')).toBeHidden();
     await schedLayerToggle.check();
 
-    // 4. Download AutoCAD .dxf and verify valid DXF structure
+    // 4. Download AutoCAD .dxf and vector PDF and verify valid headers / structure
     const [dxfDl] = await Promise.all([
       page.waitForEvent("download"),
       page.getByRole("button", { name: "Download AutoCAD (.dxf)" }).click(),
@@ -393,6 +393,13 @@ test.describe.serial("Structural AI Office — Full Browser E2E (Modules 01 to 0
     expect(dxfText).toContain("SECTION");
     expect(dxfText).toContain("S-TITLEBLK");
     expect(dxfText).toContain("EOF");
+
+    const [cadPdfDl] = await Promise.all([
+      page.waitForEvent("download"),
+      page.getByRole("button", { name: "Download PDF" }).click(),
+    ]);
+    const cadPdfBytes = fs.readFileSync(await cadPdfDl.path());
+    expect(cadPdfBytes.subarray(0, 5).toString("ascii")).toBe("%PDF-");
 
     guards.assertClean();
   });
