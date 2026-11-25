@@ -82,19 +82,24 @@ def _wrap_staad_tokens(tokens: list[str], max_len: int = 72) -> list[str]:
     return lines
 
 
-def _format_member_loads_block(loads: list[BeamDistributedLoad]) -> list[str]:
+def _format_member_loads_block(
+    loads: list[BeamDistributedLoad],
+    scale: float = 1.0,
+) -> list[str]:
     """Group identical UNI / TRAP member loads cleanly with 72-char wrapping."""
-    if not loads:
+    if not loads or abs(scale) <= 1e-6:
         return []
     grouped: dict[str, list[int]] = {}
     for ld in loads:
+        w1 = ld.w1_kn_m * scale
+        w2 = ld.w2_kn_m * scale
         if ld.load_shape == "UNI":
             if abs(ld.d1_m) <= 1e-4 and abs(ld.d2_m) <= 1e-4:
-                spec = f"UNI GY {ld.w1_kn_m:.3f}"
+                spec = f"UNI GY {w1:.3f}"
             else:
-                spec = f"UNI GY {ld.w1_kn_m:.3f} {ld.d1_m:.3f} {ld.d2_m:.3f}"
+                spec = f"UNI GY {w1:.3f} {ld.d1_m:.3f} {ld.d2_m:.3f}"
         else:
-            spec = f"TRAP GY {ld.w1_kn_m:.3f} {ld.w2_kn_m:.3f} {ld.d1_m:.3f} {ld.d2_m:.3f}"
+            spec = f"TRAP GY {w1:.3f} {w2:.3f} {ld.d1_m:.3f} {ld.d2_m:.3f}"
         grouped.setdefault(spec, []).append(ld.member_id)
 
     out: list[str] = ["MEMBER LOAD"]
@@ -111,7 +116,7 @@ def _format_member_loads_block(loads: list[BeamDistributedLoad]) -> list[str]:
 
 
 def _append_phase5_loads(lines: list[str], project: ProjectState) -> None:
-    """Append Phase 5 NSCP 2015 diaphragms, UBC/explicit seismic, wind, gravity, and combos."""
+    """Append Phase 5 NSCP 2015 reference mass loads, diaphragms, UBC/explicit seismic, wind, gravity, and combos."""
     model = project.structural_model
     lg = project.load_generation
     seis = lg.seismic
@@ -123,21 +128,44 @@ def _append_phase5_loads(lines: list[str], project: ProjectState) -> None:
     base_elev = levels[0].elevation_m if levels else min(n.y_m for n in model.nodes)
     elevated_levels = [lv for lv in levels if lv.elevation_m > base_elev + 1e-4]
     valid_mids = {m.member_id for m in model.members}
-    member_len_by_id = {m.member_id: m.length_m for m in model.members}
 
-    # 1. Rigid Floor Diaphragms
-    if opts.include_rigid_diaphragm and elevated_levels:
-        lines.append("FLOOR DIAPHRAGM")
-        for idx, lv in enumerate(elevated_levels, start=1):
-            y_lo = lv.elevation_m - 0.05
-            y_hi = lv.elevation_m + 0.05
-            lines.append(f"DIA {idx} TYPE RIG YR {y_lo:.3f} {y_hi:.3f}")
-
-    # 2. DEFINE UBC LOAD (when ubc_auto is selected)
     dl_loads = [b for b in lg.beam_loads if b.load_case == "DL" and b.member_id in valid_mids]
     ll_loads = [b for b in lg.beam_loads if b.load_case == "LL" and b.member_id in valid_mids]
     lr_loads = [b for b in lg.beam_loads if b.load_case == "LR" and b.member_id in valid_mids]
 
+    # 1. DEFINE REFERENCE LOADS (must precede FLOOR DIAPHRAGM & DEFINE UBC LOAD for mass modeling)
+    lines.append("DEFINE REFERENCE LOADS")
+    lines.append("LOAD R1 LOADTYPE Dead TITLE REF DEAD MASS (DL)")
+    lines.append("SELFWEIGHT Y -1.0")
+    lines.extend(_format_member_loads_block(dl_loads))
+    if seis.live_load_seismic_fraction > 1e-6 and ll_loads:
+        lines.append("LOAD R2 LOADTYPE Live TITLE REF LIVE MASS (LL)")
+        lines.extend(_format_member_loads_block(ll_loads, scale=seis.live_load_seismic_fraction))
+    lines.append("END DEFINE REFERENCE LOADS")
+
+    # 2. Rigid Floor Diaphragms (strictly AFTER END DEFINE REFERENCE LOADS, excluding supported nodes)
+    if opts.include_rigid_diaphragm and elevated_levels:
+        dia_lines: list[str] = []
+        dia_idx = 1
+        for lv in elevated_levels:
+            lvl_nodes = [n for n in model.nodes if abs(n.y_m - lv.elevation_m) <= 0.05]
+            unsupported_ids = sorted(
+                n.node_id for n in lvl_nodes if not n.is_support and n.support_type == "NONE"
+            )
+            if len(unsupported_ids) < 2:
+                continue
+            dia_lines.extend(
+                _wrap_staad_ids(
+                    unsupported_ids,
+                    prefix=f"DIA {dia_idx} TYPE RIG HEI {lv.elevation_m:.3f} JOI",
+                )
+            )
+            dia_idx += 1
+        if dia_lines:
+            lines.append("FLOOR DIAPHRAGM")
+            lines.extend(dia_lines)
+
+    # 3. DEFINE UBC LOAD (parameters only; seismic mass comes from Reference Load R1/R2 to avoid double-counting)
     if seis.staad_seismic_method == "ubc_auto" and seis_sum is not None:
         styp = _SOIL_STYP.get(seis.soil_profile, 4)
         period_t = max(seis_sum.period_t_sec, 0.05)
@@ -150,32 +178,8 @@ def _append_phase5_loads(lines: list[str], project: ProjectState) -> None:
             f"NA {seis_sum.na:.3f} NV {seis_sum.nv:.3f} CT {seis.ct_coeff:.4f} "
             f"PX {period_t:.3f} PZ {period_t:.3f}"
         )
-        lines.append("SELFWEIGHT 1.0")
 
-        # Convert all DL member loads into equivalent positive uniform weights for STAAD seismic mass
-        dl_force_by_mid: dict[int, float] = {}
-        for ld in dl_loads:
-            length_m = member_len_by_id.get(ld.member_id, 0.0)
-            if ld.load_shape == "UNI":
-                span = (ld.d2_m - ld.d1_m) if ld.d2_m > ld.d1_m else length_m
-                force = abs(ld.w1_kn_m) * max(span, 0.0)
-            else:
-                force = 0.5 * (abs(ld.w1_kn_m) + abs(ld.w2_kn_m)) * max(ld.d2_m - ld.d1_m, 0.0)
-            dl_force_by_mid[ld.member_id] = dl_force_by_mid.get(ld.member_id, 0.0) + force
-
-        weight_groups: dict[float, list[int]] = {}
-        for mid, total_f in sorted(dl_force_by_mid.items()):
-            length_m = member_len_by_id.get(mid, 0.0)
-            if length_m > 1e-4 and total_f > 1e-4:
-                w_eq = round(total_f / length_m, 3)
-                weight_groups.setdefault(w_eq, []).append(mid)
-
-        if weight_groups:
-            lines.append("MEMBER WEIGHT")
-            for w_eq, mids in sorted(weight_groups.items()):
-                lines.extend(_wrap_staad_ids(mids, suffix=f"UNI {w_eq:.3f}"))
-
-    # 3. Primary Load Cases — SEISMIC FIRST (STAAD-safe ordering)
+    # 4. Primary Load Cases — SEISMIC FIRST (STAAD-safe ordering)
     seismic_specs = [
         (1, "SEISMIC +X (NSCP 2015)", "X", 1.0),
         (2, "SEISMIC -X (NSCP 2015)", "X", -1.0),
@@ -208,7 +212,7 @@ def _append_phase5_loads(lines: list[str], project: ProjectState) -> None:
                     lines.append("JOINT LOAD")
                     lines.extend(joint_lines)
 
-    # 4. Wind Primary Load Cases (5..8) — distributed to windward perimeter nodes per story
+    # 5. Wind Primary Load Cases (5..8) — distributed to windward perimeter nodes per story
     wind_specs = [
         (5, "WIND +X (NSCP 2015)", "X", 1.0),
         (6, "WIND -X (NSCP 2015)", "X", -1.0),
@@ -252,10 +256,10 @@ def _append_phase5_loads(lines: list[str], project: ProjectState) -> None:
                 lines.append("JOINT LOAD")
                 lines.extend(joint_lines)
 
-    # 5. Gravity Primary Load Cases (9: DL, 10: LL, 11: LR)
+    # 6. Gravity Primary Load Cases (9: DL via Reference Load R1, 10: LL, 11: LR)
     lines.append("LOAD 9 LOADTYPE Dead TITLE DEAD LOAD (DL)")
-    lines.append("SELFWEIGHT Y -1.0")
-    lines.extend(_format_member_loads_block(dl_loads))
+    lines.append("REFERENCE LOAD")
+    lines.append("R1 1.0")
 
     lines.append("LOAD 10 LOADTYPE Live TITLE FLOOR LIVE LOAD (LL)")
     if ll_loads:

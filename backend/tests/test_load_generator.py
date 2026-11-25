@@ -344,6 +344,16 @@ def test_full_staad_export_download_approval_and_legacy_json_compat(isolated_env
     pid = "P5-STD"
     _setup_sized_project(client, pid)
 
+    # Add a stepped support at 1F so we can verify supported nodes are excluded from FLOOR DIAPHRAGM
+    proj_before = client.get(f"/api/projects/{pid}").json()
+    f1_node = next(n for n in proj_before["structural_model"]["nodes"] if n["floor_level"] == "1F")
+    stepped_nid = f1_node["node_id"]
+    sup_resp = client.patch(
+        f"/api/projects/{pid}/geometry/nodes/{stepped_nid}/support",
+        json={"support_type": "FIXED"},
+    )
+    assert sup_resp.status_code == 200, sup_resp.text
+
     gen = client.post(f"/api/projects/{pid}/loads/generate")
     assert gen.status_code == 200, gen.text
 
@@ -364,12 +374,15 @@ def test_full_staad_export_download_approval_and_legacy_json_compat(isolated_env
     assert f'filename="{pid}.std"' in dl_resp.headers.get("content-disposition", "")
     assert dl_resp.text == std
 
-    # Verify required STAAD.Pro blocks and strict Seismic-before-Gravity ordering
+    # Verify required STAAD.Pro blocks and strict Reference-Load -> Diaphragm -> UBC -> Primary ordering
     required_blocks = [
+        "DEFINE REFERENCE LOADS",
+        "LOAD R1 LOADTYPE Dead TITLE REF DEAD MASS (DL)",
+        "SELFWEIGHT Y -1.0",
+        "MEMBER LOAD",
+        "END DEFINE REFERENCE LOADS",
         "FLOOR DIAPHRAGM",
         "DEFINE UBC LOAD",
-        "SELFWEIGHT 1.0",
-        "MEMBER WEIGHT",
         "LOAD 1 LOADTYPE Seismic TITLE SEISMIC +X (NSCP 2015)",
         "UBC LOAD X 1.0",
         "PERFORM ANALYSIS",
@@ -377,8 +390,8 @@ def test_full_staad_export_download_approval_and_legacy_json_compat(isolated_env
         "LOAD 5 LOADTYPE Wind TITLE WIND +X (NSCP 2015)",
         "JOINT LOAD",
         "LOAD 9 LOADTYPE Dead TITLE DEAD LOAD (DL)",
-        "SELFWEIGHT Y -1.0",
-        "MEMBER LOAD",
+        "REFERENCE LOAD",
+        "R1 1.0",
         "LOAD COMB 101 1.4 DL",
         "PERFORM ANALYSIS PRINT STATICS CHECK",
         "FINISH",
@@ -386,12 +399,59 @@ def test_full_staad_export_download_approval_and_legacy_json_compat(isolated_env
     for blk in required_blocks:
         assert blk in std, f"Missing expected STAAD block: {blk}"
 
-    # Verify Seismic cases come strictly BEFORE Gravity cases
-    assert std.index("LOAD 1 LOADTYPE Seismic") < std.index("LOAD 9 LOADTYPE Dead")
-    assert std.index("DEFINE UBC LOAD") < std.index("LOAD 1 LOADTYPE Seismic")
+    # 1 & 2. DEFINE REFERENCE LOADS & END DEFINE REFERENCE LOADS strictly BEFORE FLOOR DIAPHRAGM
+    assert std.index("SUPPORTS") < std.index("DEFINE REFERENCE LOADS")
+    assert std.index("DEFINE REFERENCE LOADS") < std.index("LOAD R1 LOADTYPE Dead")
+    assert std.index("END DEFINE REFERENCE LOADS") < std.index("FLOOR DIAPHRAGM")
     assert std.index("FLOOR DIAPHRAGM") < std.index("DEFINE UBC LOAD")
+    assert std.index("DEFINE UBC LOAD") < std.index("LOAD 1 LOADTYPE Seismic")
+    assert std.index("LOAD 1 LOADTYPE Seismic") < std.index("LOAD 9 LOADTYPE Dead")
     assert std.index("LOAD COMB 101") < std.index("PERFORM ANALYSIS PRINT STATICS CHECK")
     assert std.index("PERFORM ANALYSIS PRINT STATICS CHECK") < std.index("FINISH")
+
+    # 3. Supported base & stepped 1F nodes are excluded from FLOOR DIAPHRAGM joint lists
+    dia_block = std[std.index("FLOOR DIAPHRAGM") : std.index("DEFINE UBC LOAD")]
+    proj_after = client.get(f"/api/projects/{pid}").json()
+    supported_nids = {
+        str(n["node_id"])
+        for n in proj_after["structural_model"]["nodes"]
+        if n["is_support"] or n["support_type"] != "NONE"
+    }
+    assert str(stepped_nid) in supported_nids
+    assert "HEI 0.000 JOI" in dia_block
+    # None of the supported B1/stepped nodes should appear as diaphragm joints
+    dia_joint_tokens: set[str] = set()
+    for line in dia_block.splitlines():
+        if "JOI" in line:
+            after_joi = line.split("JOI", 1)[1]
+            dia_joint_tokens.update(tok for tok in after_joi.split() if tok.isdigit())
+        elif line.strip() and line.strip()[0].isdigit():
+            dia_joint_tokens.update(tok for tok in line.split() if tok.isdigit())
+    assert str(stepped_nid) not in dia_joint_tokens
+    assert dia_joint_tokens.isdisjoint(supported_nids)
+
+    # 4. DEFINE UBC LOAD does NOT duplicate SELFWEIGHT / MEMBER WEIGHT when DEFINE REFERENCE LOADS is emitted
+    ubc_block = std[std.index("DEFINE UBC LOAD") : std.index("LOAD 1 LOADTYPE Seismic")]
+    assert "SELFWEIGHT" not in ubc_block
+    assert "MEMBER WEIGHT" not in ubc_block
+
+    # 5. LOAD 9 references R1 1.0 cleanly (and does not duplicate SELFWEIGHT)
+    load9_block = std[std.index("LOAD 9 LOADTYPE Dead") : std.index("LOAD 10 LOADTYPE Live")]
+    assert "REFERENCE LOAD" in load9_block
+    assert "R1 1.0" in load9_block
+    assert "SELFWEIGHT" not in load9_block
+
+    # 6. Verify live_load_seismic_fraction > 0 adds scaled R2 inside DEFINE REFERENCE LOADS
+    r_ll_mass = client.patch(
+        f"/api/projects/{pid}/loads/config",
+        json={"seismic": {"live_load_seismic_fraction": 0.25}},
+    )
+    assert r_ll_mass.status_code == 200
+    std_ll = client.get(f"/api/projects/{pid}/staad/download").text
+    ref_block_ll = std_ll[
+        std_ll.index("DEFINE REFERENCE LOADS") : std_ll.index("END DEFINE REFERENCE LOADS")
+    ]
+    assert "LOAD R2 LOADTYPE Live TITLE REF LIVE MASS (LL)" in ref_block_ll
 
     # Verify explicit_story_forces + REPEAT LOAD option
     r_rep = client.patch(

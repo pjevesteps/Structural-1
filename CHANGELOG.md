@@ -4,6 +4,12 @@ All notable changes to **AI Structural Engineering Office** are documented in th
 
 ## [Unreleased]
 
+### Fixed
+- **STAAD.Pro Mass Modeling & `FLOOR DIAPHRAGM` Export Order (`backend/app/staad.py`, `backend/tests/test_load_generator.py`)**:
+  - Emits `DEFINE REFERENCE LOADS` (`LOAD R1 LOADTYPE Dead`, plus optional scaled `LOAD R2 LOADTYPE Live` when `live_load_seismic_fraction > 0`) immediately after `SUPPORTS` and strictly BEFORE `FLOOR DIAPHRAGM`, resolving STAAD.Pro's `NO REFERENCE LOAD CASE OF TYPE MASS/GRAVITY/DEAD/LIVE IS DEFINED FOR MASS MODELING` error.
+  - Emits `FLOOR DIAPHRAGM` using `DIA <idx> TYPE RIG HEI <elev> JOI <unsupported_nodes>` (skipping levels with `< 2` unsupported nodes) so base and stepped `1F` support nodes are never tied into rigid diaphragms.
+  - Removed duplicate `SELFWEIGHT 1.0` / `MEMBER WEIGHT` from `DEFINE UBC LOAD` (avoiding double-counted seismic mass when `R1` is present) and updated `LOAD 9` (`DEAD LOAD`) to reference `R1 1.0` directly.
+
 ### Added
 - **Phase 5 — Module 05 · NSCP 2015 Load Generation & Full STAAD.Pro Export**:
   - **Load Generation Schemas (`backend/app/models.py`, `backend/app/schemas.py`)**: Added backward-compatible `FloorGravityLoad`, `SeismicParameters`, `WindParameters`, `BeamDistributedLoad`, `StorySeismicResult`, `StoryWindResult`, `SeismicSummary`, `WindSummary`, `LoadCombinationDef`, `LoadGenerationOptions`, `LoadCheckIssue`, and `LoadGenerationState` attached to `ProjectState.load_generation` (respecting `extra="forbid"` and keeping all legacy `data/projects/*.json` files backward compatible).
