@@ -128,10 +128,10 @@ def validate_structural_model(model: StructuralModelState) -> list[GeometryCheck
             )
         )
 
-    # 4. Floating / transfer columns (warning)
+    # 4. Floating / transfer columns (warning) — exclude buried footing pedestals (is_pedestal=True)
     min_y = min(n.y_m for n in model.nodes)
     for m in model.members:
-        if m.member_type != "column":
+        if m.member_type != "column" or m.is_pedestal:
             continue
         start_n = node_by_id.get(m.start_node)
         if start_n is None:

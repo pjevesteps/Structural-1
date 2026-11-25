@@ -98,7 +98,12 @@ export default function DesignReview({ project, onClose, onUpdated }) {
       const p = await apiJson(`/api/projects/${pid}`);
       setFullProject(p);
       if (p.analysis_design?.params) {
-        setParams({ ...p.analysis_design.params });
+        const synced = { ...p.analysis_design.params };
+        const pedDrop = p.structural_model?.options?.footing_depth_m || 0;
+        if (pedDrop > 0 && !p.analysis_design.generated_at) {
+          synced.footing_embedment_m = pedDrop;
+        }
+        setParams(synced);
       }
     } catch (err) {
       setError(err.message);

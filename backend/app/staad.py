@@ -148,7 +148,11 @@ def _append_phase5_loads(lines: list[str], project: ProjectState) -> None:
         dia_lines: list[str] = []
         dia_idx = 1
         for lv in elevated_levels:
-            lvl_nodes = [n for n in model.nodes if abs(n.y_m - lv.elevation_m) <= 0.05]
+            lvl_nodes = [
+                n
+                for n in model.nodes
+                if not n.floor_level.startswith("FTG_") and abs(n.y_m - lv.elevation_m) <= 0.05
+            ]
             unsupported_ids = sorted(
                 n.node_id for n in lvl_nodes if not n.is_support and n.support_type == "NONE"
             )
@@ -197,7 +201,12 @@ def _append_phase5_loads(lines: list[str], project: ProjectState) -> None:
                 joint_lines: list[str] = []
                 for st in seis_sum.stories:
                     story_nodes = sorted(
-                        n.node_id for n in model.nodes if abs(n.y_m - st.elevation_m) <= 0.15
+                        n.node_id
+                        for n in model.nodes
+                        if not n.floor_level.startswith("FTG_")
+                        and not n.is_support
+                        and n.support_type == "NONE"
+                        and abs(n.y_m - st.elevation_m) <= 0.15
                     )
                     if not story_nodes:
                         continue
@@ -224,7 +233,11 @@ def _append_phase5_loads(lines: list[str], project: ProjectState) -> None:
         if wind_sum is not None and wind_sum.stories:
             joint_lines = []
             for st in wind_sum.stories:
-                story_nodes = [n for n in model.nodes if abs(n.y_m - st.elevation_m) <= 0.15]
+                story_nodes = [
+                    n
+                    for n in model.nodes
+                    if not n.floor_level.startswith("FTG_") and abs(n.y_m - st.elevation_m) <= 0.15
+                ]
                 if not story_nodes:
                     continue
                 total_f = (st.fx_kn if axis == "X" else st.fz_kn) * sign

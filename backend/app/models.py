@@ -84,6 +84,7 @@ class AnalyticalMember(BaseModel):
     grid_ref: str = ""
     length_m: float = Field(ge=0.0)
     manual_override: bool = False
+    is_pedestal: bool = False
 
 
 class SlabPanel(BaseModel):
@@ -116,6 +117,7 @@ class GeometryGenerationOptions(BaseModel):
     max_beam_span_m: float = Field(default=12.0, gt=0)
     skip_beams_through_openings: bool = True
     auto_detect_slab_panels: bool = True
+    footing_depth_m: float = Field(default=0.0, ge=0.0, le=6.0)
 
 
 class ManualBeamOverride(BaseModel):

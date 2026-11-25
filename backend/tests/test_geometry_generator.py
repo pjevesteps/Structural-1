@@ -473,3 +473,131 @@ def test_diagonal_manual_beam_replication_persistence_and_staad_export(isolated_
     assert gen3.status_code == 200
     remaining = [m for m in gen3.json()["members"] if m["manual_override"]]
     assert sorted(m["floor_level"] for m in remaining) == ["2F", "ROOF"]
+
+
+
+def test_footing_depth_pedestal_drop_and_full_downstream_pipeline(isolated_env):
+    """
+    Verify configurable footing_depth_m pedestal drop on a stepped-base frame (B1=0.0m, 1F=2.8m, 2F=5.8m):
+      1. Default footing_depth_m=0.0 produces identical baseline geometry with zero pedestals.
+      2. footing_depth_m=1.5 moves supports to -1.50m (FTG_B1) and +1.30m (FTG_1F), adds pedestal
+         columns (length_m=1.5, is_pedestal=True) from footing to grade, keeps tie beams at 0.00m,
+         and triggers zero errors and zero FLOATING_OR_TRANSFER_COLUMN / UNKNOWN_COLUMN_LEVEL warnings.
+      3. Phase 4 sizing assigns all pedestals to C1 (100% coverage), Phase 5 loads + STAAD .std
+         passes strict lint_staad_text (no buried TOF nodes in FLOOR DIAPHRAGM), and Phase 6 3D DSM
+         + RC design succeeds with vertical equilibrium and synced footing_embedment_m=1.5.
+    """
+    from backend.app.design.solver import solve_frame_dsm
+    from backend.tests.test_e2e_pipeline import lint_staad_text
+
+    client, _ = isolated_env
+    pid = "P3-PEDESTAL"
+
+    # Stepped frame: 2x1 bay (A/B/C x 1/2); partial Basement under A/B (4 cols at 0.0m), full 1F (6 cols at 2.8m)
+    cols = []
+    cid = 1
+    for gx, xm in [("A", 0.0), ("B", 4.0)]:
+        for gy, ym in [("1", 0.0), ("2", 4.0)]:
+            cols.append({"id": f"CB{cid}", "grid": f"{gx}-{gy}", "floor_level": "B1", "x_m": xm, "y_m": ym, "width_mm": 400, "depth_mm": 400})
+            cid += 1
+    for gx, xm in [("A", 0.0), ("B", 4.0), ("C", 8.0)]:
+        for gy, ym in [("1", 0.0), ("2", 4.0)]:
+            cols.append({"id": f"C1F{cid}", "grid": f"{gx}-{gy}", "floor_level": "1F", "x_m": xm, "y_m": ym, "width_mm": 400, "depth_mm": 400})
+            cid += 1
+            cols.append({"id": f"C2F{cid}", "grid": f"{gx}-{gy}", "floor_level": "2F", "x_m": xm, "y_m": ym, "width_mm": 400, "depth_mm": 400})
+            cid += 1
+
+    payload = {
+        "project_info": _base_project_info(pid),
+        "levels": [
+            {"id": "B1", "elevation_m": 0.0},
+            {"id": "1F", "elevation_m": 2.8},
+            {"id": "2F", "elevation_m": 5.8},
+            {"id": "RD", "elevation_m": 8.6},
+        ],
+        "columns": cols,
+    }
+    assert client.post("/api/projects", json=payload).status_code == 200
+
+    # 1. Baseline: footing_depth_m = 0.0 (default)
+    g0 = client.post(
+        f"/api/projects/{pid}/geometry/generate",
+        json={"default_support_type": "FIXED", "include_base_tie_beams": True},
+    )
+    assert g0.status_code == 200, g0.text
+    sm0 = g0.json()
+    assert sm0["options"]["footing_depth_m"] == 0.0
+    assert not any(m["is_pedestal"] for m in sm0["members"])
+    sup0 = [n for n in sm0["nodes"] if n["is_support"]]
+    assert len(sup0) == 6  # 4 at B1 (0.0m) + 2 stepped at 1F (2.8m)
+    assert sorted({n["y_m"] for n in sup0}) == [0.0, 2.8]
+
+    # 2. Pedestal drop: footing_depth_m = 1.5 m
+    g1 = client.post(
+        f"/api/projects/{pid}/geometry/generate",
+        json={"default_support_type": "FIXED", "include_base_tie_beams": True, "footing_depth_m": 1.5},
+    )
+    assert g1.status_code == 200, g1.text
+    sm1 = g1.json()
+    assert len(sm1["nodes"]) == len(sm0["nodes"]) + 6
+    assert len(sm1["members"]) == len(sm0["members"]) + 6
+
+    node_by_id = {n["node_id"]: n for n in sm1["nodes"]}
+    sup1 = [n for n in sm1["nodes"] if n["is_support"] and n["support_type"] == "FIXED"]
+    assert len(sup1) == 6
+    assert sorted({n["y_m"] for n in sup1}) == [-1.5, 1.3]
+    assert sorted({n["floor_level"] for n in sup1}) == ["FTG_1F", "FTG_B1"]
+
+    # Pedestal columns connect FTG_* -> grade node with length 1.5 m and is_pedestal=True
+    pedestals = [m for m in sm1["members"] if m["is_pedestal"]]
+    assert len(pedestals) == 6
+    for p in pedestals:
+        assert p["member_type"] == "column"
+        assert p["length_m"] == pytest.approx(1.5)
+        na, nb = node_by_id[p["start_node"]], node_by_id[p["end_node"]]
+        assert na["is_support"] is True and nb["is_support"] is False
+        assert nb["y_m"] - na["y_m"] == pytest.approx(1.5)
+
+    # Base tie beams MUST remain at 0.00 m (NOT dropped to -1.50 m)
+    tie_beams = [m for m in sm1["members"] if m["member_type"] == "tie_beam"]
+    assert len(tie_beams) > 0
+    for tb in tie_beams:
+        assert node_by_id[tb["start_node"]]["y_m"] == pytest.approx(0.0)
+        assert node_by_id[tb["end_node"]]["y_m"] == pytest.approx(0.0)
+
+    # Zero errors and zero false FLOATING_OR_TRANSFER_COLUMN / UNKNOWN_COLUMN_LEVEL warnings
+    assert not any(iss["severity"] == "error" for iss in sm1["validation_issues"])
+    assert not any(
+        iss["code"] in ("FLOATING_OR_TRANSFER_COLUMN", "UNKNOWN_COLUMN_LEVEL")
+        for iss in sm1["validation_issues"]
+    )
+
+    # 3. Full downstream Phases 4 -> 5 -> 6 with footing_depth_m = 1.5
+    sz = client.post(f"/api/projects/{pid}/sizing/auto-size")
+    assert sz.status_code == 200, sz.text
+    asgn_by_mid = {a["member_id"]: a["section_id"] for a in sz.json()["member_assignments"]}
+    assert len(asgn_by_mid) == len(sm1["members"])
+    for p in pedestals:
+        assert asgn_by_mid[p["member_id"]] == "C1"
+
+    lg = client.post(f"/api/projects/{pid}/loads/generate")
+    assert lg.status_code == 200, lg.text
+    assert lg.json()["seismic_summary"]["building_height_m"] == pytest.approx(8.6)
+    assert lg.json()["wind_summary"]["base_shear_x_kn"] > 0.0
+
+    std_text = client.get(f"/api/projects/{pid}/staad/download").text
+    assert lint_staad_text(std_text, require_ref_load_before_diaphragm=True) == []
+
+    des = client.post(f"/api/projects/{pid}/design/run")
+    assert des.status_code == 200, des.text
+    ad = des.json()
+    assert ad["params"]["footing_embedment_m"] == pytest.approx(1.5)
+    assert len(ad["footing_designs"]) == 6
+    assert sorted({f["base_elevation_m"] for f in ad["footing_designs"]}) == [-1.5, 1.3]
+
+    # Verify static vertical equilibrium under DL on pedestal-dropped frame
+    reloaded = ProjectState.model_validate(client.get(f"/api/projects/{pid}").json())
+    dsm = solve_frame_dsm(reloaded)
+    assert dsm.primary_vertical_reactions_kn["DL"] == pytest.approx(
+        dsm.primary_vertical_applied_kn["DL"], rel=0.02
+    )

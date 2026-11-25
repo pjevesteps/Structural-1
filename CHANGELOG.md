@@ -4,6 +4,13 @@ All notable changes to **AI Structural Engineering Office** are documented in th
 
 ## [Unreleased]
 
+### Added
+- **Configurable Column Pedestal Drop (`footing_depth_m`) Across Phases 3–6 (`backend/app/models.py`, `geometry/`, `sizing/`, `loads/`, `staad.py`, `design/`, `frontend/src/GeometryBuilder.jsx`, `DesignReview.jsx`)**:
+  - Added backward-compatible `footing_depth_m: float = 0.0` (`0.0–6.0 m`) to `GeometryGenerationOptions` and `is_pedestal: bool = False` to `AnalyticalMember`.
+  - When `footing_depth_m > 0`, `generate_structural_model` moves all ground supports (including stepped-base supports) downward to Top-of-Footing nodes (`FTG_<level>` at `y - footing_depth_m`) connected by `is_pedestal=True` vertical pedestal columns while keeping base tie beams strictly at grade elevation; `validator.py` excludes pedestals from false `FLOATING_OR_TRANSFER_COLUMN` warnings.
+  - Updated Phase 4 sizing (`col_story_index` assigns all pedestals to `C1`), Phase 5 wind/diaphragm/STAAD export and Phase 6 DSM/drift/footing design to exclude buried `FTG_*` nodes from diaphragms & lateral story loads and auto-sync `footing_embedment_m` with `footing_depth_m`.
+  - Added a `Footing Depth (m)` numeric control in Module 03 (`GeometryBuilder.jsx`), distinct deep-indigo (`#6366f1`) 3D pedestal rendering + legend entry, and end-to-end pedestal tests in `backend/tests/test_geometry_generator.py`.
+
 ### Changed
 - **Strict STAAD.Pro E2E Grammar & Mass-Modeling Linter (`backend/tests/test_e2e_pipeline.py`, `frontend/e2e/workflow.spec.js`)**:
   - Enabled `require_ref_load_before_diaphragm=True` by default in `lint_staad_text`, added `FLOOR DIAPHRAGM` `JOI` parsing to assert zero supported/stepped nodes appear in any rigid diaphragm joint list, enforced no duplicate `SELFWEIGHT`/`MEMBER WEIGHT` inside `DEFINE UBC LOAD` when `DEFINE REFERENCE LOADS` is active, and verified `DEFINE REFERENCE LOADS` -> `FLOOR DIAPHRAGM` ordering and `R1 1.0` in Playwright's `.std` download check.

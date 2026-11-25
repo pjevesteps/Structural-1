@@ -594,6 +594,44 @@ def generate_structural_model(
                         )
                     )
 
+    # 5. Column Pedestal Drop to Top of Footing (keeps base tie beams at grade elevation)
+    if opts.footing_depth_m > 1e-4:
+        drop_m = round(opts.footing_depth_m, 4)
+        supported_base_nodes = [
+            n for n in list(nodes) if n.is_support and n.support_type in ("FIXED", "PINNED")
+        ]
+        for grade_node in supported_base_nodes:
+            orig_support = grade_node.support_type
+            orig_floor = grade_node.floor_level
+            grade_node.is_support = False
+            grade_node.support_type = "NONE"
+
+            ftg_nid = len(nodes) + 1
+            ftg_node = AnalyticalNode(
+                node_id=ftg_nid,
+                x_m=grade_node.x_m,
+                y_m=round(grade_node.y_m - drop_m, 4),
+                z_m=grade_node.z_m,
+                floor_level=f"FTG_{orig_floor}",
+                grid_ref=grade_node.grid_ref,
+                is_support=True,
+                support_type=orig_support,
+            )
+            nodes.append(ftg_node)
+            members.append(
+                AnalyticalMember(
+                    member_id=len(members) + 1,
+                    start_node=ftg_nid,
+                    end_node=grade_node.node_id,
+                    member_type="column",
+                    floor_level=orig_floor,
+                    grid_ref=grade_node.grid_ref,
+                    length_m=drop_m,
+                    manual_override=False,
+                    is_pedestal=True,
+                )
+            )
+
     model = StructuralModelState(
         generated_at=_utc_now(),
         options=opts,

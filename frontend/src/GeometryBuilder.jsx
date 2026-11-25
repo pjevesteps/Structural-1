@@ -58,6 +58,7 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
   const [includeBaseTies, setIncludeBaseTies] = useState(true);
   const [skipOpenings, setSkipOpenings] = useState(true);
   const [snapTol, setSnapTol] = useState("0.05");
+  const [footingDepth, setFootingDepth] = useState("0.00");
 
   // Viewports & Interactive Editor state
   const [viewLayout, setViewLayout] = useState("split"); // split | 3d | 2d
@@ -93,6 +94,7 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
         setIncludeBaseTies(sm.options.include_base_tie_beams ?? true);
         setSkipOpenings(sm.options.skip_beams_through_openings ?? true);
         setSnapTol(String(sm.options.snap_tolerance_m ?? 0.05));
+        setFootingDepth(Number(sm.options.footing_depth_m ?? 0).toFixed(2));
       }
       const sortedLvls = (data.levels || []).slice().sort((a, b) => a.elevation_m - b.elevation_m);
       if (sortedLvls.length > 0) {
@@ -166,6 +168,7 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
           include_base_tie_beams: includeBaseTies,
           skip_beams_through_openings: skipOpenings,
           auto_detect_slab_panels: true,
+          footing_depth_m: Math.min(6.0, Math.max(0.0, parseFloat(footingDepth) || 0.0)),
         }),
       });
       await applyModelUpdate(
@@ -418,14 +421,18 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
 
     for (const item of projectedMembers) {
       const { member, pa, pb } = item;
-      ctx.strokeStyle = member.manual_override
-        ? "#c084fc"
-        : MEMBER_COLORS[member.member_type] || "#45c9a8";
-      ctx.lineWidth = member.manual_override
-        ? 2.9
-        : member.member_type === "column"
-          ? 2.8
-          : 2.1;
+      ctx.strokeStyle = member.is_pedestal
+        ? "#6366f1"
+        : member.manual_override
+          ? "#c084fc"
+          : MEMBER_COLORS[member.member_type] || "#45c9a8";
+      ctx.lineWidth = member.is_pedestal
+        ? 3.4
+        : member.manual_override
+          ? 2.9
+          : member.member_type === "column"
+            ? 2.8
+            : 2.1;
       ctx.beginPath();
       ctx.moveTo(pa.sx, pa.sy);
       ctx.lineTo(pb.sx, pb.sy);
@@ -434,7 +441,12 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
 
     // Draw nodes & support triangles
     for (const n of nodes) {
-      if (storyFilter !== "ALL" && n.floor_level !== storyFilter && !visibleManualNodeIds.has(n.node_id)) {
+      const matchesStory =
+        storyFilter === "ALL" ||
+        n.floor_level === storyFilter ||
+        n.floor_level === `FTG_${storyFilter}` ||
+        visibleManualNodeIds.has(n.node_id);
+      if (!matchesStory) {
         continue;
       }
       const p = project3D({ x: n.x_m, y: n.y_m, z: n.z_m }, center, yaw, pitch, scale, w, h);
@@ -640,6 +652,20 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
               onChange={(e) => setSnapTol(e.target.value)}
             />
           </label>
+          <label
+            className="pdf-field-chip"
+            title="Extends base columns downward to Top of Footing (e.g., 1.50 m) while keeping tie beams at grade"
+          >
+            <span>Footing Depth (m)</span>
+            <input
+              type="number"
+              step="0.1"
+              min="0"
+              max="6"
+              value={footingDepth}
+              onChange={(e) => setFootingDepth(e.target.value)}
+            />
+          </label>
         </div>
 
         <div className="pdf-modes">
@@ -742,6 +768,12 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
                 <span>
                   <i style={{ background: "#c084fc" }} /> Manual / Diagonal Beams
                 </span>
+                {((parseFloat(footingDepth) || 0) > 0 ||
+                  (model.members || []).some((m) => m.is_pedestal)) && (
+                  <span>
+                    <i style={{ background: "#6366f1" }} /> Pedestals / Footing Drop
+                  </span>
+                )}
                 <span>
                   <i style={{ background: "#f87171" }} /> Supports
                 </span>

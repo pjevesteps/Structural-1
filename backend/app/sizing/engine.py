@@ -94,6 +94,8 @@ def auto_size_members(
         num_tiers = 3 if num_stories >= 4 else (2 if num_stories >= 2 else 1)
 
         def col_story_index(m) -> int:
+            if getattr(m, "is_pedestal", False):
+                return 0
             if m.floor_level in level_idx_by_id:
                 return min(level_idx_by_id[m.floor_level], num_stories - 1)
             na = node_by_id.get(m.start_node)

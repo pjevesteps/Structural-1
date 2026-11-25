@@ -459,10 +459,14 @@ def solve_frame_dsm(project: ProjectState) -> AnalysisResults:
             }
         )
 
-    # Apply Nodal Seismic Story Forces (EX+, EX-, EZ+, EZ-)
+    # Apply Nodal Seismic Story Forces (EX+, EX-, EZ+, EZ-) — never apply to buried FTG_* nodes
     if lg.seismic_summary is not None:
         for st in lg.seismic_summary.stories:
-            lvl_nodes = [n for n in nodes if abs(n.y_m - st.elevation_m) <= 0.15]
+            lvl_nodes = [
+                n
+                for n in nodes
+                if not n.floor_level.startswith("FTG_") and abs(n.y_m - st.elevation_m) <= 0.15
+            ]
             free_nodes = [n for n in lvl_nodes if not n.is_support and n.support_type == "NONE"]
             target_nodes = free_nodes if free_nodes else lvl_nodes
             if not target_nodes:
@@ -476,10 +480,14 @@ def solve_frame_dsm(project: ProjectState) -> AnalysisResults:
                 F_glob[base_dof + 2, PRIMARY_IDX["EZ+"]] += fz_per
                 F_glob[base_dof + 2, PRIMARY_IDX["EZ-"]] -= fz_per
 
-    # Apply Nodal Wind Story Forces (WX+, WX-, WZ+, WZ-) on windward face nodes
+    # Apply Nodal Wind Story Forces (WX+, WX-, WZ+, WZ-) on windward face nodes — never buried FTG_* nodes
     if lg.wind_summary is not None:
         for st in lg.wind_summary.stories:
-            lvl_nodes = [n for n in nodes if abs(n.y_m - st.elevation_m) <= 0.15]
+            lvl_nodes = [
+                n
+                for n in nodes
+                if not n.floor_level.startswith("FTG_") and abs(n.y_m - st.elevation_m) <= 0.15
+            ]
             if not lvl_nodes:
                 continue
             min_x = min(n.x_m for n in lvl_nodes)

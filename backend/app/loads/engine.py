@@ -1058,8 +1058,12 @@ def generate_loads(
         h_above = 0.5 * max(next_elev - lv.elevation_m, 0.0) if next_elev is not None else 0.0
         h_trib = h_below + h_above
 
-        # Floor-specific width if nodes exist at this elevation, else overall building width
-        lvl_nodes = [n for n in model.nodes if abs(n.y_m - lv.elevation_m) <= 0.15]
+        # Floor-specific width if non-footing nodes exist at this elevation, else overall building width
+        lvl_nodes = [
+            n
+            for n in model.nodes
+            if not n.floor_level.startswith("FTG_") and abs(n.y_m - lv.elevation_m) <= 0.15
+        ]
         if len(lvl_nodes) >= 2:
             bx = max(max(n.x_m for n in lvl_nodes) - min(n.x_m for n in lvl_nodes), 0.0) or building_bx
             bz = max(max(n.z_m for n in lvl_nodes) - min(n.z_m for n in lvl_nodes), 0.0) or building_bz

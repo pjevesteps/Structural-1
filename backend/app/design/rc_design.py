@@ -68,7 +68,11 @@ def compute_story_drifts(
 
     for lv in elevated:
         h_m = max(lv.elevation_m - prev_elev, 0.1)
-        lvl_nodes = [n for n in model.nodes if abs(n.y_m - lv.elevation_m) <= 0.15]
+        lvl_nodes = [
+            n
+            for n in model.nodes
+            if not n.floor_level.startswith("FTG_") and abs(n.y_m - lv.elevation_m) <= 0.15
+        ]
         free_nodes = [n for n in lvl_nodes if not n.is_support and n.support_type == "NONE"]
         use_nodes = free_nodes if free_nodes else lvl_nodes
 
@@ -782,11 +786,13 @@ def run_analysis_and_design(
     params: DesignParameters | None = None,
 ) -> tuple[AnalysisDesignState, AnalysisResults]:
     """Run internal 3D DSM solver + NSCP 2015 drift & RC beam/column/footing design."""
-    active_params = (
-        params.model_copy(deep=True)
-        if params is not None
-        else project.analysis_design.params.model_copy(deep=True)
-    )
+    if params is not None:
+        active_params = params.model_copy(deep=True)
+    else:
+        active_params = project.analysis_design.params.model_copy(deep=True)
+        pedestal_drop = project.structural_model.options.footing_depth_m
+        if pedestal_drop > 1e-4 and project.analysis_design.generated_at is None:
+            active_params.footing_embedment_m = pedestal_drop
     results = solve_frame_dsm(project)
     state = _build_state_from_results(project, results, active_params, source="internal_dsm")
     return state, results
