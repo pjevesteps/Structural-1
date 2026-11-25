@@ -5,6 +5,9 @@ All notable changes to **AI Structural Engineering Office** are documented in th
 ## [Unreleased]
 
 ### Added
+- **Full Phase 1 -> Phase 6 End-to-End Pipeline Test Suite & STAAD.Pro Grammar Linter (`backend/tests/test_e2e_pipeline.py`)**:
+  - Added `test_full_pipeline_phase1_to_phase6` exercising the full workflow sequentially via real FastAPI endpoints in isolated `tmp_path` storage (never touching user data in `data/projects/` or `data/imports/`): synthetic 3-page architectural PDF generation (`fitz`), floor-to-floor elevation filtering, calibration, Master Grid stamping, shaded column scanning (zero text distractor overlaps), 2F stairwell opening tracing, multi-floor transfer, Phase 3 generation + manual diagonal beam persistence across regeneration, Phase 4 auto-sizing + `beta=90` bulk override, Phase 5 NSCP 2015 loads + `.std` download, Phase 6 3D DSM analysis + static vertical equilibrium + CSV schedule export, and strict `ProjectState` disk JSON round-trip validation.
+  - Added `lint_staad_text(std_text, require_ref_load_before_diaphragm=False)` validating real newlines, `<= 79`-char line lengths, strict STAAD.Pro block ordering, optional Reference Load before Floor Diaphragm ordering, and full joint/member referential integrity across `JOINT COORDINATES`, `MEMBER INCIDENCES`, `SUPPORTS`, and `MEMBER PROPERTY`.
 - **Phase 6 — Module 06 · Analysis Bridge, NSCP 2015 Drift Checks & RC Member Design**:
   - **Analysis & RC Design Schemas (`backend/app/models.py`, `backend/app/schemas.py`)**: Added backward-compatible `DesignParameters`, `StoryDriftResult`, `SupportReactionEnvelope`, `BeamDesignResult`, `ColumnDesignResult`, `FootingDesignResult`, `DesignCheckIssue`, and `AnalysisDesignState` attached to `ProjectState.analysis_design` (respecting `extra="forbid"` and keeping all legacy `data/projects/*.json` files backward compatible).
   - **Built-In 3D Direct Stiffness Method Solver & STAAD `.anl` Parser (`backend/app/design/`)**:
