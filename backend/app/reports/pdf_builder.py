@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from datetime import datetime, timezone
 import io
 
@@ -11,6 +12,7 @@ from reportlab.lib.units import mm
 from reportlab.pdfgen import canvas as rl_canvas
 from reportlab.platypus import (
     HRFlowable,
+    Image as RLImage,
     LongTable,
     PageBreak,
     Paragraph,
@@ -526,6 +528,31 @@ def build_calculation_report_pdf(project: ProjectState) -> bytes:
             col_weights=[9, 10, 18, 13, 13, 13, 12, 12],
             right_cols={3, 4, 5, 6, 7},
         )
+
+    if ad.pinned_design_views:
+        add_sub("4.3 Visual Design Verification & Utilization Maps")
+        for snap in ad.pinned_design_views:
+            title_txt = snap.get("title") or "Pinned Design View"
+            caption_txt = snap.get("caption") or ""
+            data_url = snap.get("image_data_url") or ""
+            story.append(Paragraph(_safe_pdf_text(f"<b>{title_txt}</b>"), st_body))
+            if "," in data_url:
+                try:
+                    raw_img = base64.b64decode(data_url.split(",", 1)[1])
+                    if raw_img:
+                        img = RLImage(io.BytesIO(raw_img))
+                        max_w = avail_w * 0.92
+                        max_h = 95 * mm
+                        iw, ih = float(img.imageWidth or 1.0), float(img.imageHeight or 1.0)
+                        scale = min(max_w / max(iw, 1.0), max_h / max(ih, 1.0))
+                        img.drawWidth = iw * scale
+                        img.drawHeight = ih * scale
+                        story.append(img)
+                except Exception:
+                    pass
+            if caption_txt:
+                story.append(Paragraph(_safe_pdf_text(caption_txt), st_note))
+            story.append(Spacer(1, 4))
 
     # =========================================================================
     # SECTION 5: RC MEMBER DESIGN SCHEDULES

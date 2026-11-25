@@ -10,11 +10,13 @@ from ..models import (
     DesignCheckIssue,
     DesignParameters,
     FootingDesignResult,
+    MemberOverrideRequest,
     ProjectState,
     SmrfJointCheckResult,
     StoryDriftResult,
     SupportReactionEnvelope,
 )
+from ..reports.bom_engine import parse_bar_callout, parse_spacing_callout
 from .anl_parser import parse_staad_anl
 from .retaining_wall import design_retaining_wall
 from .secondary_elements import design_roof_truss, design_slabs, design_stair
@@ -660,6 +662,272 @@ def design_footings(
     ]
 
 
+def detect_footing_clashes(
+    project: ProjectState,
+    footings: list[FootingDesignResult],
+) -> list[dict]:
+    """Detect plan overlaps between isolated footings within |y1 - y2| <= 0.6 m."""
+    node_by_id = {n.node_id: n for n in project.structural_model.nodes}
+    clashes: list[dict] = []
+    n_ftg = len(footings)
+    for i in range(n_ftg):
+        f1 = footings[i]
+        n1 = node_by_id.get(f1.node_id)
+        if n1 is None:
+            continue
+        for j in range(i + 1, n_ftg):
+            f2 = footings[j]
+            n2 = node_by_id.get(f2.node_id)
+            if n2 is None:
+                continue
+            if abs(n1.y_m - n2.y_m) > 0.6:
+                continue
+            dx = abs(n1.x_m - n2.x_m)
+            dz = abs(n1.z_m - n2.z_m)
+            ox = 0.5 * (f1.b_m + f2.b_m) - dx
+            oz = 0.5 * (f1.l_m + f2.l_m) - dz
+            if ox > 1e-4 and oz > 1e-4:
+                area = round(ox * oz, 3)
+                lbl_a = f"{f1.footing_tag} (N{f1.node_id})"
+                lbl_b = f"{f2.footing_tag} (N{f2.node_id})"
+                clashes.append(
+                    {
+                        "footing_a": lbl_a,
+                        "footing_b": lbl_b,
+                        "node_a": f1.node_id,
+                        "node_b": f2.node_id,
+                        "overlap_area_m2": area,
+                        "message": (
+                            f"Footings {lbl_a} and {lbl_b} overlap by {area:.2f} m² in plan; "
+                            "consider a combined or strap footing."
+                        ),
+                    }
+                )
+    return clashes
+
+
+def override_member_design(
+    project: ProjectState,
+    req: MemberOverrideRequest,
+) -> AnalysisDesignState:
+    """
+    Quickly override rebar/dimensions of a single beam, column, or footing and recompute
+    only that element's capacity, DCRs, status, and (for footings) plan clash list.
+    """
+    ad = project.analysis_design
+    if ad.generated_at is None:
+        raise ValueError("Run Analysis & RC Design before overriding member reinforcement.")
+
+    mat = project.member_sizing.material
+    fc = mat.fc_mpa
+    fy = mat.fy_main_mpa
+    fyt = mat.fy_tie_mpa
+    b1 = _beta1(fc)
+    dp = ad.params
+    upd = req.updates or {}
+
+    raw_id = str(req.target_id).strip()
+    num_id: int | None = None
+    digits = "".join(ch for ch in raw_id if ch.isdigit())
+    if digits:
+        try:
+            num_id = int(digits)
+        except ValueError:
+            num_id = None
+
+    if req.target_type == "beam":
+        target = next((b for b in ad.beam_designs if b.member_id == num_id), None)
+        if target is None:
+            raise ValueError(f"Beam '{req.target_id}' not found in analysis design results.")
+
+        if "width_mm" in upd:
+            target.width_mm = max(150.0, float(upd["width_mm"]))
+        if "depth_mm" in upd:
+            target.depth_mm = max(200.0, float(upd["depth_mm"]))
+        if "bars_top_start" in upd or "top_bars_start" in upd:
+            target.bars_top_start = str(upd.get("bars_top_start", upd.get("top_bars_start"))).strip()
+        if "bars_bot_mid" in upd or "bot_bars_mid" in upd:
+            target.bars_bot_mid = str(upd.get("bars_bot_mid", upd.get("bot_bars_mid"))).strip()
+        if "bars_top_end" in upd or "top_bars_end" in upd:
+            target.bars_top_end = str(upd.get("bars_top_end", upd.get("top_bars_end"))).strip()
+        if "stirrups_support" in upd or "stirrups" in upd:
+            target.stirrups_support = str(upd.get("stirrups_support", upd.get("stirrups"))).strip()
+        if "stirrups_midspan" in upd:
+            target.stirrups_midspan = str(upd["stirrups_midspan"]).strip()
+
+        b_mm = target.width_mm
+        h_mm = target.depth_mm
+        ds, s_sup = parse_spacing_callout(target.stirrups_support, dp.stirrup_tie_dia_mm, 100.0)
+        av = 2.0 * _bar_area_mm2(ds)
+
+        def _zone_dcr(mu_knm: float, callout: str) -> float:
+            n_b, d_b = parse_bar_callout(callout, 2, dp.main_bar_dia_beam_mm)
+            d_eff = max(50.0, h_mm - dp.clear_cover_beam_mm - ds - 0.5 * d_b)
+            as_prov = n_b * _bar_area_mm2(d_b)
+            a_prov = (as_prov * fy) / max(0.85 * fc * b_mm, 1.0)
+            c_max = 0.375 * d_eff
+            a_max = b1 * c_max
+            as_max = (0.85 * fc * b_mm * a_max) / fy
+            phi_mn_max = 0.90 * as_max * fy * max(d_eff - 0.5 * a_max, 10.0) / 1e6
+            phi_mn_prov = min(
+                phi_mn_max,
+                0.90 * as_prov * fy * max(d_eff - 0.5 * a_prov, 10.0) / 1e6,
+            )
+            return max(0.0, mu_knm) / max(phi_mn_prov, 1e-6)
+
+        flex_dcr = max(
+            _zone_dcr(target.mu_neg_start_knm, target.bars_top_start),
+            _zone_dcr(target.mu_pos_mid_knm, target.bars_bot_mid),
+            _zone_dcr(target.mu_neg_end_knm, target.bars_top_end),
+        )
+        d_shear = max(50.0, h_mm - dp.clear_cover_beam_mm - ds - 0.5 * dp.main_bar_dia_beam_mm)
+        vc_kn = 0.17 * math.sqrt(fc) * b_mm * d_shear / 1000.0
+        vs_max_kn = 0.66 * math.sqrt(fc) * b_mm * d_shear / 1000.0
+        phi_vn_max = 0.75 * (vc_kn + vs_max_kn)
+        phi_vs_prov = 0.75 * (av * fyt * d_shear / max(s_sup, 25.0)) / 1000.0
+        phi_vn_prov = min(phi_vn_max, 0.75 * vc_kn + phi_vs_prov)
+        shear_dcr = max(
+            target.vu_max_kn / max(phi_vn_max, 1e-6),
+            target.vu_max_kn / max(phi_vn_prov, 1e-6),
+        )
+        target.flexure_dcr = round(flex_dcr, 3)
+        target.shear_dcr = round(shear_dcr, 3)
+        target.governing_dcr = round(max(flex_dcr, shear_dcr), 3)
+        target.status = "PASS" if target.governing_dcr <= 1.0 else "FAIL"
+
+    elif req.target_type == "column":
+        target = next((c for c in ad.column_designs if c.member_id == num_id), None)
+        if target is None:
+            raise ValueError(f"Column '{req.target_id}' not found in analysis design results.")
+
+        if "width_mm" in upd:
+            target.width_mm = max(200.0, float(upd["width_mm"]))
+        if "depth_mm" in upd:
+            target.depth_mm = max(200.0, float(upd["depth_mm"]))
+        if "main_bars" in upd:
+            target.main_bars = str(upd["main_bars"]).strip()
+        if "ties_confined" in upd or "ties" in upd:
+            target.ties_confined = str(upd.get("ties_confined", upd.get("ties"))).strip()
+        if "ties_mid" in upd:
+            target.ties_mid = str(upd["ties_mid"]).strip()
+
+        b_mm = target.width_mm
+        h_mm = target.depth_mm
+        ag = b_mm * h_mm
+        n_bars, d_bar = parse_bar_callout(target.main_bars, 8, dp.main_bar_dia_col_mm)
+        ds, s_conf = parse_spacing_callout(target.ties_confined, dp.stirrup_tie_dia_mm, 100.0)
+        ast_mm2 = n_bars * _bar_area_mm2(d_bar)
+        target.rho_provided = round(ast_mm2 / max(ag, 1.0), 4)
+
+        worst_pm = 0.0
+        for pu_val in (target.pu_max_kn, target.pu_min_kn):
+            phi_pn_max, phi_pt, phi_mnx = _uniaxial_column_moment_capacity(
+                pu_val, b_mm, h_mm, ast_mm2, fc, fy, b1, dp.clear_cover_column_mm, ds, d_bar
+            )
+            _, _, phi_mny = _uniaxial_column_moment_capacity(
+                pu_val, h_mm, b_mm, ast_mm2, fc, fy, b1, dp.clear_cover_column_mm, ds, d_bar
+            )
+            if pu_val > phi_pn_max:
+                dcr = pu_val / max(phi_pn_max, 1e-6)
+            elif pu_val < phi_pt:
+                dcr = abs(pu_val / min(phi_pt, -1e-6))
+            else:
+                rx = abs(target.mux_max_knm) / max(phi_mnx, 1e-6)
+                ry = abs(target.muy_max_knm) / max(phi_mny, 1e-6)
+                biaxial = ((rx ** 1.5) + (ry ** 1.5)) ** (1.0 / 1.5)
+                axial = max(0.0, pu_val / max(phi_pn_max, 1e-6))
+                dcr = max(biaxial, axial)
+            worst_pm = max(worst_pm, dcr)
+
+        d_mm = max(50.0, max(b_mm, h_mm) - dp.clear_cover_column_mm - ds - 0.5 * d_bar)
+        nu_n = max(0.0, target.pu_min_kn * 1000.0)
+        vc_kn = 0.17 * (1.0 + nu_n / (14.0 * ag)) * math.sqrt(fc) * min(b_mm, h_mm) * d_mm / 1000.0
+        av = 2.0 * _bar_area_mm2(ds)
+        vs_prov_kn = (av * fyt * d_mm / max(s_conf, 25.0)) / 1000.0
+        vs_max_kn = 0.66 * math.sqrt(fc) * min(b_mm, h_mm) * d_mm / 1000.0
+        phi_vn = 0.75 * (vc_kn + min(vs_prov_kn, vs_max_kn))
+        shear_dcr = target.vu_max_kn / max(phi_vn, 1e-6)
+
+        target.pm_dcr = round(worst_pm, 3)
+        target.shear_dcr = round(shear_dcr, 3)
+        target.governing_dcr = round(max(target.pm_dcr, target.shear_dcr), 3)
+        target.status = "PASS" if (target.governing_dcr <= 1.0 and target.rho_provided <= 0.06) else "FAIL"
+
+    elif req.target_type == "footing":
+        target = next(
+            (f for f in ad.footing_designs if f.node_id == num_id or f.footing_tag == raw_id),
+            None,
+        )
+        if target is None:
+            raise ValueError(f"Footing '{req.target_id}' not found in analysis design results.")
+
+        if "b_m" in upd:
+            target.b_m = max(0.6, round(float(upd["b_m"]), 2))
+        if "l_m" in upd:
+            target.l_m = max(0.6, round(float(upd["l_m"]), 2))
+        if "thickness_mm" in upd:
+            target.thickness_mm = max(250.0, float(upd["thickness_mm"]))
+        if "bottom_bars_x" in upd or "bars_x" in upd:
+            target.bottom_bars_x = str(upd.get("bottom_bars_x", upd.get("bars_x"))).strip()
+        if "bottom_bars_z" in upd or "bars_z" in upd:
+            target.bottom_bars_z = str(upd.get("bottom_bars_z", upd.get("bars_z"))).strip()
+
+        sec_by_id = {s.section_id: s for s in project.member_sizing.sections}
+        asgn_by_mid = {a.member_id: a for a in project.member_sizing.member_assignments}
+        cx_m, cz_m = 0.40, 0.40
+        for m in project.structural_model.members:
+            if m.member_type == "column" and (m.start_node == target.node_id or m.end_node == target.node_id):
+                asgn = asgn_by_mid.get(m.member_id)
+                sec = sec_by_id.get(asgn.section_id) if asgn else None
+                if sec is not None:
+                    cx_m, cz_m = sec.width_mm / 1000.0, sec.depth_mm / 1000.0
+                    break
+
+        t_m = target.thickness_mm / 1000.0
+        overburden = dp.footing_embedment_m * dp.soil_unit_weight_kn_m3 + t_m * max(
+            mat.density_kn_m3 - dp.soil_unit_weight_kn_m3, 0.0
+        )
+        area = max(target.b_m * target.l_m, 0.1)
+        q_actual = target.p_service_kn / area + overburden
+        bearing_dcr = q_actual / max(target.q_allow_kpa, 1e-6)
+
+        d_mm = max(100.0, target.thickness_mm - dp.clear_cover_footing_mm - dp.main_bar_dia_beam_mm)
+        d_m = d_mm / 1000.0
+        qu_kpa = target.pu_kn / area
+        c_min = min(cx_m, cz_m)
+        cant_1w = max(0.0, 0.5 * (max(target.b_m, target.l_m) - c_min) - d_m)
+        vu_1w = qu_kpa * min(target.b_m, target.l_m) * cant_1w
+        phi_vc_1w = 0.75 * 0.17 * math.sqrt(fc) * (min(target.b_m, target.l_m) * 1000.0) * d_mm / 1000.0
+        dcr_1w = vu_1w / max(phi_vc_1w, 1e-6)
+
+        bx = cx_m + d_m
+        bz = cz_m + d_m
+        bo_mm = 2.0 * (bx + bz) * 1000.0
+        vu_2w = max(0.0, target.pu_kn - qu_kpa * bx * bz)
+        phi_vc_2w = 0.75 * 0.33 * math.sqrt(fc) * bo_mm * d_mm / 1000.0
+        dcr_2w = vu_2w / max(phi_vc_2w, 1e-6)
+
+        target.q_actual_kpa = round(q_actual, 2)
+        target.bearing_dcr = round(bearing_dcr, 3)
+        target.one_way_shear_dcr = round(dcr_1w, 3)
+        target.punching_shear_dcr = round(dcr_2w, 3)
+        target.governing_dcr = round(max(bearing_dcr, dcr_1w, dcr_2w), 3)
+        target.status = "PASS" if target.governing_dcr <= 1.0 else "FAIL"
+        ad.footing_clashes = detect_footing_clashes(project, ad.footing_designs)
+    else:
+        raise ValueError(f"Unsupported target_type: {req.target_type}")
+
+    ad.validation_issues = _collect_design_issues(
+        ad.story_drifts,
+        ad.support_reactions,
+        ad.beam_designs,
+        ad.column_designs,
+        ad.footing_designs,
+        ad.smrf_joint_checks,
+    )
+    return ad
+
+
 def _collect_design_issues(
     drifts: list[StoryDriftResult],
     reactions: list[SupportReactionEnvelope],
@@ -798,9 +1066,11 @@ def _build_state_from_results(
     beams = design_beams(project, results, params)
     columns = design_columns(project, results, params)
     footings = design_footings(project, results.support_reactions, params)
+    footing_clashes = detect_footing_clashes(project, footings)
     smrf_joints = evaluate_smrf_joints(project, beams, columns, params)
     slabs = design_slabs(project, params)
     prev_ad = project.analysis_design
+    pinned_views = list(prev_ad.pinned_design_views)
     rw_inputs = list(prev_ad.retaining_wall_inputs)
     rw_designs = [design_retaining_wall(project, rw) for rw in rw_inputs]
     st_inputs = list(prev_ad.stair_inputs)
@@ -822,6 +1092,8 @@ def _build_state_from_results(
         beam_designs=beams,
         column_designs=columns,
         footing_designs=footings,
+        footing_clashes=footing_clashes,
+        pinned_design_views=pinned_views,
         smrf_joint_checks=smrf_joints,
         retaining_wall_inputs=rw_inputs,
         retaining_wall_designs=rw_designs,

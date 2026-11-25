@@ -657,6 +657,20 @@ class RoofTrussDesign(BaseModel):
     status: Literal["PASS", "FAIL"]
 
 
+class MemberOverrideRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    target_type: Literal["beam", "column", "footing"]
+    target_id: str
+    updates: dict[str, Any] = Field(default_factory=dict)
+
+
+class PinDesignSnapshotRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    title: str = Field(min_length=1, max_length=200)
+    caption: str = ""
+    image_data_url: str = Field(min_length=10)
+
+
 class AnalysisDesignState(BaseModel):
     model_config = ConfigDict(extra="forbid")
     generated_at: str | None = None
@@ -668,6 +682,8 @@ class AnalysisDesignState(BaseModel):
     beam_designs: list[BeamDesignResult] = Field(default_factory=list)
     column_designs: list[ColumnDesignResult] = Field(default_factory=list)
     footing_designs: list[FootingDesignResult] = Field(default_factory=list)
+    footing_clashes: list[dict[str, Any]] = Field(default_factory=list)
+    pinned_design_views: list[dict[str, str]] = Field(default_factory=list)
     smrf_joint_checks: list[SmrfJointCheckResult] = Field(default_factory=list)
     retaining_wall_inputs: list[RetainingWallInput] = Field(default_factory=list)
     retaining_wall_designs: list[RetainingWallDesign] = Field(default_factory=list)

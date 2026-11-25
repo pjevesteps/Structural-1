@@ -1,3 +1,6 @@
+from datetime import datetime, timezone
+import uuid
+
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, ConfigDict
@@ -6,12 +9,19 @@ from .. import storage
 from ..models import (
     AnalysisDesignState,
     DesignParameters,
+    MemberOverrideRequest,
+    PinDesignSnapshotRequest,
     RetainingWallInput,
     RoofTrussInput,
     StairDesignInput,
 )
 from .auto_resolve import AutoResolveRequest, AutoResolveResponse, run_auto_resolve
-from .rc_design import export_schedules_csv, run_analysis_and_design, run_design_from_anl
+from .rc_design import (
+    export_schedules_csv,
+    override_member_design,
+    run_analysis_and_design,
+    run_design_from_anl,
+)
 from .retaining_wall import design_retaining_wall
 from .secondary_elements import design_roof_truss, design_stair, design_strap_footing
 
@@ -229,5 +239,33 @@ def delete_strap_footing(project_id: str, strap_id: str):
     project = _load_or_404(project_id)
     ad = project.analysis_design
     ad.strap_footing_designs = [x for x in ad.strap_footing_designs if x.strap_id != strap_id]
+    storage.save_project(project)
+    return ad
+
+
+@router.patch("/override-member", response_model=AnalysisDesignState)
+def patch_override_member(project_id: str, payload: MemberOverrideRequest):
+    project = _load_or_404(project_id)
+    try:
+        ad = override_member_design(project, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    storage.save_project(project)
+    return ad
+
+
+@router.post("/pin-snapshot", response_model=AnalysisDesignState)
+def post_pin_snapshot(project_id: str, payload: PinDesignSnapshotRequest):
+    project = _load_or_404(project_id)
+    ad = project.analysis_design
+    ad.pinned_design_views.append(
+        {
+            "id": f"snap-{uuid.uuid4().hex[:8]}",
+            "title": payload.title.strip(),
+            "caption": payload.caption.strip(),
+            "image_data_url": payload.image_data_url,
+            "captured_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
     storage.save_project(project)
     return ad

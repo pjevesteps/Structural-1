@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from datetime import datetime, timezone
 import io
 
@@ -543,6 +544,34 @@ def build_calculation_report_docx(project: ProjectState) -> bytes:
             right_align_cols={3, 4, 5, 6, 7},
             font_size=7.8,
         )
+
+    if ad.pinned_design_views:
+        _add_subheading(doc, "4.3 Visual Design Verification & Utilization Maps")
+        for snap in ad.pinned_design_views:
+            title_txt = snap.get("title") or "Pinned Design View"
+            caption_txt = snap.get("caption") or ""
+            data_url = snap.get("image_data_url") or ""
+            p_t = doc.add_paragraph()
+            p_t.paragraph_format.space_before = Pt(4)
+            p_t.paragraph_format.space_after = Pt(2)
+            rt = p_t.add_run(title_txt)
+            rt.bold = True
+            rt.font.size = Pt(9.0)
+            rt.font.color.rgb = NAVY_RGB
+            if "," in data_url:
+                try:
+                    raw_img = base64.b64decode(data_url.split(",", 1)[1])
+                    if raw_img:
+                        doc.add_picture(io.BytesIO(raw_img), width=Inches(6.2))
+                except Exception:
+                    pass
+            if caption_txt:
+                p_c = doc.add_paragraph()
+                p_c.paragraph_format.space_after = Pt(4)
+                rc = p_c.add_run(caption_txt)
+                rc.italic = True
+                rc.font.size = Pt(8.0)
+                rc.font.color.rgb = MUTED_RGB
 
     # =========================================================================
     # SECTION 5: RC MEMBER DESIGN SCHEDULES
