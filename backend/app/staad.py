@@ -607,6 +607,15 @@ def write_staad_preview(project: ProjectState, destination: Path):
     }
 
 
+def build_staad_text(project: ProjectState) -> str:
+    """Render STAAD.Pro .std input text in memory without persisting to workspace exports."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        res = write_staad_preview(project, Path(tmpdir) / "snippet.std")
+        return res["std_preview"]
+
+
 def simulate_placeholder(project: ProjectState):
     return {
         "mode": "PLACEHOLDER",

@@ -947,6 +947,51 @@ def test_full_pipeline_phase1_to_phase6(isolated_env, tmp_path: Path):
     assert len(csv_rows) == expected_csv_rows
 
     # =========================================================================
+    # PHASE 8: Calculation Reports (DOCX & PDF) & Structural BOM Export
+    # =========================================================================
+    rep_res = client.post(
+        f"/api/projects/{pid}/reports/generate",
+        json={
+            "signatory": {
+                "engineer_name": "Engr. E2E Reviewer, CE",
+                "prc_license_no": "0998877",
+                "project_owner": "E2E Test Owner",
+                "geotech_report_ref": "GEO-E2E-2026-01",
+            },
+            "bom_params": {
+                "commercial_bar_length_m": 6.0,
+                "labor_pct_of_materials": 35.0,
+            },
+        },
+    )
+    assert rep_res.status_code == 200, rep_res.text
+    rep = rep_res.json()
+    assert rep["generated_at"] is not None
+    assert rep["bom"] is not None
+    assert rep["bom"]["total_concrete_gross_m3"] > 0
+    assert rep["bom"]["total_rebar_kg"] > 0
+    assert rep["bom"]["grand_total_cost_php"] == pytest.approx(
+        rep["bom"]["total_material_cost_php"] + rep["bom"]["total_labor_cost_php"],
+        abs=0.02,
+    )
+
+    docx_resp = client.get(f"/api/projects/{pid}/reports/download/docx")
+    assert docx_resp.status_code == 200
+    assert docx_resp.content[:2] == b"PK"
+
+    pdf_resp = client.get(f"/api/projects/{pid}/reports/download/pdf")
+    assert pdf_resp.status_code == 200
+    assert pdf_resp.content.startswith(b"%PDF-")
+    e2e_pdf = pymupdf.open(stream=pdf_resp.content, filetype="pdf")
+    assert e2e_pdf.page_count >= 2
+    e2e_pdf.close()
+
+    bom_csv_resp = client.get(f"/api/projects/{pid}/reports/download/bom-csv")
+    assert bom_csv_resp.status_code == 200
+    assert "=== CONCRETE & FORMWORK TAKEOFF ===" in bom_csv_resp.text
+    assert "=== PNS 49:2020 REINFORCING STEEL BREAKDOWN ===" in bom_csv_resp.text
+
+    # =========================================================================
     # PERSISTENCE ROUND-TRIP CHECK (Strict ProjectState extra="forbid")
     # =========================================================================
     persisted_json = data_root / "projects" / f"{pid}.json"
@@ -966,3 +1011,6 @@ def test_full_pipeline_phase1_to_phase6(isolated_env, tmp_path: Path):
     assert len(reloaded.analysis_design.beam_designs) == len(ad["beam_designs"])
     assert len(reloaded.analysis_design.column_designs) == len(ad["column_designs"])
     assert len(reloaded.analysis_design.footing_designs) == len(ad["footing_designs"])
+    assert reloaded.reporting.generated_at is not None
+    assert reloaded.reporting.bom is not None
+    assert reloaded.reporting.bom.grand_total_cost_php > 0

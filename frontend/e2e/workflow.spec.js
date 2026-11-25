@@ -305,4 +305,55 @@ test.describe.serial("Structural AI Office — Full Browser E2E (Modules 01 to 0
 
     guards.assertClean();
   });
+
+  test("Test 6 — Module 08: Calculation Reports (DOCX & PDF) & Structural BOM", async ({ page }) => {
+    const guards = attachRuntimeGuards(page);
+    await openProjectModule(page, "Reports & BOM");
+    await expect(
+      page.getByText("MODULE 08 · CALCULATION REPORTS (DOCX & PDF) & STRUCTURAL BOM")
+    ).toBeVisible();
+
+    // 1. Fill signatory details and generate Report & BOM
+    await page.getByLabel("Engineer Name").fill("Engr. Playwright Verifier, CE");
+    await page.getByLabel("PRC License No.").fill("0192837");
+    await page.getByRole("button", { name: "Generate Report & BOM" }).click();
+    await expect(page.locator(".notice")).toContainText(/generated/i);
+
+    // 2. Switch to BOM & Cost Estimate tab and verify all 3 tables render
+    await page.getByRole("button", { name: "2. Bill of Materials & Cost Estimate (PHP)" }).click();
+    await expect(page.locator(".report-grand-banner")).toBeVisible();
+    await expect(page.locator("table.sizing-table").nth(0)).toContainText("Isolated Footings");
+    await expect(page.locator("table.sizing-table").nth(1)).toContainText("Grade");
+    await expect(page.locator("table.sizing-table").nth(2)).toContainText("GRAND TOTAL");
+
+    // 3. Switch to Report Preview tab and verify A4 executive summary renders
+    await page.getByRole("button", { name: "3. Report Preview" }).click();
+    await expect(page.locator(".report-paper")).toContainText(PROJECT_NAME);
+    await expect(page.locator(".report-paper")).toContainText("Engr. Playwright Verifier, CE");
+
+    // 4. Download DOCX, PDF, and BOM CSV and verify magic headers / content
+    const [docxDl] = await Promise.all([
+      page.waitForEvent("download"),
+      page.getByRole("button", { name: "Download DOCX" }).click(),
+    ]);
+    const docxBytes = fs.readFileSync(await docxDl.path());
+    expect(docxBytes.subarray(0, 2).toString("ascii")).toBe("PK");
+
+    const [pdfDl] = await Promise.all([
+      page.waitForEvent("download"),
+      page.getByRole("button", { name: "Download PDF" }).click(),
+    ]);
+    const pdfBytes = fs.readFileSync(await pdfDl.path());
+    expect(pdfBytes.subarray(0, 5).toString("ascii")).toBe("%PDF-");
+
+    const [bomDl] = await Promise.all([
+      page.waitForEvent("download"),
+      page.getByRole("button", { name: "Export BOM (CSV)" }).click(),
+    ]);
+    const bomCsv = fs.readFileSync(await bomDl.path(), "utf-8");
+    expect(bomCsv).toContain("=== CONCRETE & FORMWORK TAKEOFF ===");
+    expect(bomCsv).toContain("=== PNS 49:2020 REINFORCING STEEL BREAKDOWN ===");
+
+    guards.assertClean();
+  });
 });

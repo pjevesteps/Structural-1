@@ -1,6 +1,6 @@
 import math
 from typing import Any, Literal
-from pydantic import BaseModel, Field, ConfigDict, model_validator
+from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator
 
 
 class ProjectMaterialProperties(BaseModel):
@@ -527,6 +527,116 @@ class AnalysisDesignState(BaseModel):
     engineer_approved: bool = False
 
 
+class EngineerSignatory(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    engineer_name: str = ""
+    title: str = "Civil / Structural Engineer"
+    prc_license_no: str = ""
+    prc_validity: str = ""
+    ptr_no: str = ""
+    ptr_date: str = ""
+    ptr_place: str = ""
+    tin: str = ""
+    project_owner: str = ""
+    project_address: str = ""
+    geotech_report_ref: str = (
+        "Pending geotechnical / soil boring report (required for >= 3 storeys per NBCP Sec. 302-5)"
+    )
+
+
+class BomCostParameters(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    concrete_waste_pct: float = Field(default=5.0, ge=0.0, le=50.0)
+    rebar_waste_splice_pct: float = Field(default=12.0, ge=0.0, le=50.0)
+    commercial_bar_length_m: Literal[6.0, 7.5, 9.0, 10.5, 12.0] = 6.0
+    tie_wire_pct_of_rebar: float = Field(default=1.5, ge=0.0, le=10.0)
+    rate_concrete_php_m3: float = Field(default=6500.0, ge=0.0)
+    rate_rebar_php_kg: float = Field(default=52.0, ge=0.0)
+    rate_tie_wire_php_kg: float = Field(default=95.0, ge=0.0)
+    rate_formwork_php_m2: float = Field(default=650.0, ge=0.0)
+    rate_chb_wall_php_m2: float = Field(default=950.0, ge=0.0)
+    labor_pct_of_materials: float = Field(default=35.0, ge=0.0, le=200.0)
+    include_chb_masonry: bool = True
+
+    @field_validator("commercial_bar_length_m", mode="before")
+    @classmethod
+    def coerce_bar_length_float(cls, v: Any):
+        if isinstance(v, (int, str)):
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return v
+        return v
+
+
+class ConcreteQuantityRow(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    element_group: str
+    member_count: int = Field(ge=0)
+    net_volume_m3: float = Field(ge=0.0)
+    gross_volume_m3: float = Field(ge=0.0)
+    formwork_area_m2: float = Field(ge=0.0)
+
+
+class RebarQuantityRow(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    diameter_mm: int = Field(gt=0)
+    grade_label: str
+    unit_mass_kg_m: float = Field(gt=0.0)
+    net_length_m: float = Field(ge=0.0)
+    gross_length_m: float = Field(ge=0.0)
+    total_weight_kg: float = Field(ge=0.0)
+    commercial_pieces: int = Field(ge=0)
+
+
+class BomCostLine(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    item_no: str
+    description: str
+    quantity: float = Field(ge=0.0)
+    unit: str
+    unit_cost_php: float = Field(ge=0.0)
+    material_cost_php: float = Field(ge=0.0)
+    labor_cost_php: float = Field(ge=0.0)
+    total_cost_php: float = Field(ge=0.0)
+
+
+class BomSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    total_concrete_net_m3: float = 0.0
+    total_concrete_gross_m3: float = 0.0
+    total_rebar_kg: float = 0.0
+    rebar_ratio_kg_per_m3: float = 0.0
+    total_tie_wire_kg: float = 0.0
+    total_formwork_m2: float = 0.0
+    total_chb_area_m2: float = 0.0
+    total_material_cost_php: float = 0.0
+    total_labor_cost_php: float = 0.0
+    grand_total_cost_php: float = 0.0
+    concrete_rows: list[ConcreteQuantityRow] = Field(default_factory=list)
+    rebar_rows: list[RebarQuantityRow] = Field(default_factory=list)
+    cost_lines: list[BomCostLine] = Field(default_factory=list)
+
+
+class ReportGenerationOptions(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    include_load_combinations: bool = True
+    include_full_member_schedules: bool = True
+    include_bom_cost_estimate: bool = True
+    include_staad_snippet: bool = False
+    report_revision: str = "Rev. 0 — For Building Permit Submission"
+
+
+class ReportState(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    generated_at: str | None = None
+    signatory: EngineerSignatory = Field(default_factory=EngineerSignatory)
+    bom_params: BomCostParameters = Field(default_factory=BomCostParameters)
+    options: ReportGenerationOptions = Field(default_factory=ReportGenerationOptions)
+    bom: BomSummary | None = None
+    readiness_warnings: list[str] = Field(default_factory=list)
+
+
 class ProjectState(BaseModel):
     model_config = ConfigDict(extra="forbid")
     project_info: ProjectInfo
@@ -539,6 +649,7 @@ class ProjectState(BaseModel):
     member_sizing: MemberSizingState = Field(default_factory=MemberSizingState)
     load_generation: LoadGenerationState = Field(default_factory=LoadGenerationState)
     analysis_design: AnalysisDesignState = Field(default_factory=AnalysisDesignState)
+    reporting: ReportState = Field(default_factory=ReportState)
 
     @model_validator(mode="after")
     def check_references(self):
