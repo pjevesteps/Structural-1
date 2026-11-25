@@ -74,6 +74,15 @@ Connect tablet and PC to the same trusted Wi-Fi. Run `ipconfig` on Windows, then
 - Full STAAD.Pro `.std` property exporter (`backend/app/staad.py`) emitting `DEFINE MATERIAL START`, `MEMBER PROPERTY` (`PRIS YD/ZD`), `CONSTANTS` (`MATERIAL` + `BETA`), `MEMBER CRACKED`, `MEMBER RELEASE`, `_SEC_*` groups, and 72-char `-` line continuations
 - Interactive Module 04 UI (`frontend/src/MemberSizing.jsx`): color-coded 3D property viewer, Section Catalog CRUD, filterable Member Schedule with Bulk Assign, Slab Thickness Schedule, live concrete volume (`m³`), and NSCP 2015 check sidebar
 
+### Phase 5 — NSCP 2015 Load Generation & Full STAAD.Pro Export (Module 05)
+- NSCP 2015 gravity, seismic, wind & load combination engine (`backend/app/loads/engine.py`):
+  - One-way (`UNI`) and two-way (`TRAP`) tributary slab-to-beam loads honoring traced floor opening deductions plus perimeter/interior CHB wall line loads
+  - NSCP 2015 Section 208 static seismic calculation (`Na`/`Nv` Tables 208-5 & 208-6 interpolation, `Ca`/`Cv` Tables 208-7 & 208-8, story seismic weights `W_i`, `V_max`/`V_min`/`V_min_z4` bounds, top force `Ft`, cumulative shears)
+  - NSCP 2015 Section 207 MWFRS directional wind loads (`Kz` Table 207B.3-1, `qz`, story lateral forces `Fx`/`Fz`)
+  - NSCP 2015 Sec. 203.3.1 LRFD (`101+`) and Sec. 203.4.2 ASD (`201+`) load combinations with vertical seismic `Ev = 0.5 * Ca * I`
+- Full analysis-ready STAAD.Pro `.std` exporter (`backend/app/staad.py`) appending `FLOOR DIAPHRAGM`, `DEFINE UBC LOAD` (or explicit `JOINT LOAD`), Seismic-before-Gravity primary cases (`1–11`), `LOAD COMB` / `REPEAT LOAD`, and `PERFORM ANALYSIS PRINT STATICS CHECK`, plus downloadable `<project_id>.std`
+- Interactive Module 05 UI (`frontend/src/LoadGenerator.jsx`): regional quick presets, 4-tab Gravity/Seismic/Wind/Combinations workspace, story force charts, NSCP check sidebar, live `.std` preview drawer, and one-click download
+
 ## API
 
 ### Phase 1 Endpoints
@@ -133,6 +142,12 @@ Connect tablet and PC to the same trusted Wi-Fi. Run `ipconfig` on Windows, then
 - `POST /api/projects/{project_id}/sizing/assign` — Bulk assign `member_ids` to a section with optional `beta_angle_deg` and `MY/MZ` releases
 - `PATCH /api/projects/{project_id}/sizing/slabs/{panel_id}` — Update slab panel thickness or tag and re-validate
 - `POST /api/projects/{project_id}/sizing/approve` — Approve preliminary properties (blocked if any `error` issues remain)
+
+### Phase 5 NSCP 2015 Load Generation & STAAD Export Endpoints (`/api/projects/{project_id}`)
+- `POST /api/projects/{project_id}/loads/generate` — Generate NSCP 2015 gravity tributary beam loads, seismic, wind, LRFD/ASD combinations, and validation checks
+- `PATCH /api/projects/{project_id}/loads/config` — Update floor loads, seismic, wind, or export options and recalculate cleanly
+- `POST /api/projects/{project_id}/loads/approve` — Record engineer approval for generated loads (blocked if any `error` issues remain)
+- `GET /api/projects/{project_id}/staad/download` — Download the full STAAD.Pro input file as `<project_id>.std`
 
 ## Documentation & History
 See [CHANGELOG.md](CHANGELOG.md) for a chronological record of changes.

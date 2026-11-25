@@ -1,7 +1,23 @@
 from pathlib import Path
 import re
-from .models import ProjectState
+from .models import BeamDistributedLoad, ProjectState
 from .geometry import build_node_map
+
+_SOIL_STYP = {"SA": 1, "SB": 2, "SC": 3, "SD": 4, "SE": 5}
+
+_COMBO_CASE_ID = {
+    "EX+": 1,
+    "EX-": 2,
+    "EZ+": 3,
+    "EZ-": 4,
+    "WX+": 5,
+    "WX-": 6,
+    "WZ+": 7,
+    "WZ-": 8,
+    "DL": 9,
+    "LL": 10,
+    "LR": 11,
+}
 
 
 def _safe_group_name(prefix: str, label: str) -> str:
@@ -48,23 +64,253 @@ def _wrap_staad_ids(
     return lines
 
 
+def _wrap_staad_tokens(tokens: list[str], max_len: int = 72) -> list[str]:
+    """Wrap arbitrary STAAD token list onto lines <= max_len using '-' continuations."""
+    if not tokens:
+        return []
+    lines: list[str] = []
+    cur = ""
+    for tok in tokens:
+        cand = f"{cur} {tok}" if cur else tok
+        if cur and len(cand) > max_len - 2:
+            lines.append(f"{cur} -")
+            cur = tok
+        else:
+            cur = cand
+    if cur:
+        lines.append(cur)
+    return lines
+
+
+def _format_member_loads_block(loads: list[BeamDistributedLoad]) -> list[str]:
+    """Group identical UNI / TRAP member loads cleanly with 72-char wrapping."""
+    if not loads:
+        return []
+    grouped: dict[str, list[int]] = {}
+    for ld in loads:
+        if ld.load_shape == "UNI":
+            if abs(ld.d1_m) <= 1e-4 and abs(ld.d2_m) <= 1e-4:
+                spec = f"UNI GY {ld.w1_kn_m:.3f}"
+            else:
+                spec = f"UNI GY {ld.w1_kn_m:.3f} {ld.d1_m:.3f} {ld.d2_m:.3f}"
+        else:
+            spec = f"TRAP GY {ld.w1_kn_m:.3f} {ld.w2_kn_m:.3f} {ld.d1_m:.3f} {ld.d2_m:.3f}"
+        grouped.setdefault(spec, []).append(ld.member_id)
+
+    out: list[str] = ["MEMBER LOAD"]
+    for spec, mids in grouped.items():
+        # Preserve multiplicity if a member receives identical loads from adjacent panels
+        counts: dict[int, int] = {}
+        for mid in mids:
+            counts[mid] = counts.get(mid, 0) + 1
+        max_mult = max(counts.values())
+        for layer in range(1, max_mult + 1):
+            layer_mids = sorted(mid for mid, c in counts.items() if c >= layer)
+            out.extend(_wrap_staad_ids(layer_mids, suffix=spec))
+    return out
+
+
+def _append_phase5_loads(lines: list[str], project: ProjectState) -> None:
+    """Append Phase 5 NSCP 2015 diaphragms, UBC/explicit seismic, wind, gravity, and combos."""
+    model = project.structural_model
+    lg = project.load_generation
+    seis = lg.seismic
+    seis_sum = lg.seismic_summary
+    wind_sum = lg.wind_summary
+    opts = lg.options
+
+    levels = sorted(project.levels, key=lambda lv: lv.elevation_m)
+    base_elev = levels[0].elevation_m if levels else min(n.y_m for n in model.nodes)
+    elevated_levels = [lv for lv in levels if lv.elevation_m > base_elev + 1e-4]
+    valid_mids = {m.member_id for m in model.members}
+    member_len_by_id = {m.member_id: m.length_m for m in model.members}
+
+    # 1. Rigid Floor Diaphragms
+    if opts.include_rigid_diaphragm and elevated_levels:
+        lines.append("FLOOR DIAPHRAGM")
+        for idx, lv in enumerate(elevated_levels, start=1):
+            y_lo = lv.elevation_m - 0.05
+            y_hi = lv.elevation_m + 0.05
+            lines.append(f"DIA {idx} TYPE RIG YR {y_lo:.3f} {y_hi:.3f}")
+
+    # 2. DEFINE UBC LOAD (when ubc_auto is selected)
+    dl_loads = [b for b in lg.beam_loads if b.load_case == "DL" and b.member_id in valid_mids]
+    ll_loads = [b for b in lg.beam_loads if b.load_case == "LL" and b.member_id in valid_mids]
+    lr_loads = [b for b in lg.beam_loads if b.load_case == "LR" and b.member_id in valid_mids]
+
+    if seis.staad_seismic_method == "ubc_auto" and seis_sum is not None:
+        styp = _SOIL_STYP.get(seis.soil_profile, 4)
+        period_t = max(seis_sum.period_t_sec, 0.05)
+        lines.append("DEFINE UBC LOAD")
+        lines.append(
+            f"ZONE {seis_sum.z_factor:.2f} I {seis.importance_factor_i:.2f} "
+            f"RWX {seis.r_factor_x:.2f} RWZ {seis.r_factor_z:.2f} STYP {styp} -"
+        )
+        lines.append(
+            f"NA {seis_sum.na:.3f} NV {seis_sum.nv:.3f} CT {seis.ct_coeff:.4f} "
+            f"PX {period_t:.3f} PZ {period_t:.3f}"
+        )
+        lines.append("SELFWEIGHT 1.0")
+
+        # Convert all DL member loads into equivalent positive uniform weights for STAAD seismic mass
+        dl_force_by_mid: dict[int, float] = {}
+        for ld in dl_loads:
+            length_m = member_len_by_id.get(ld.member_id, 0.0)
+            if ld.load_shape == "UNI":
+                span = (ld.d2_m - ld.d1_m) if ld.d2_m > ld.d1_m else length_m
+                force = abs(ld.w1_kn_m) * max(span, 0.0)
+            else:
+                force = 0.5 * (abs(ld.w1_kn_m) + abs(ld.w2_kn_m)) * max(ld.d2_m - ld.d1_m, 0.0)
+            dl_force_by_mid[ld.member_id] = dl_force_by_mid.get(ld.member_id, 0.0) + force
+
+        weight_groups: dict[float, list[int]] = {}
+        for mid, total_f in sorted(dl_force_by_mid.items()):
+            length_m = member_len_by_id.get(mid, 0.0)
+            if length_m > 1e-4 and total_f > 1e-4:
+                w_eq = round(total_f / length_m, 3)
+                weight_groups.setdefault(w_eq, []).append(mid)
+
+        if weight_groups:
+            lines.append("MEMBER WEIGHT")
+            for w_eq, mids in sorted(weight_groups.items()):
+                lines.extend(_wrap_staad_ids(mids, suffix=f"UNI {w_eq:.3f}"))
+
+    # 3. Primary Load Cases — SEISMIC FIRST (STAAD-safe ordering)
+    seismic_specs = [
+        (1, "SEISMIC +X (NSCP 2015)", "X", 1.0),
+        (2, "SEISMIC -X (NSCP 2015)", "X", -1.0),
+        (3, "SEISMIC +Z (NSCP 2015)", "Z", 1.0),
+        (4, "SEISMIC -Z (NSCP 2015)", "Z", -1.0),
+    ]
+    for cid, title, axis, sign in seismic_specs:
+        lines.append(f"LOAD {cid} LOADTYPE Seismic TITLE {title}")
+        if seis.staad_seismic_method == "ubc_auto":
+            lines.append(f"UBC LOAD {axis} {sign:.1f}")
+            lines.append("PERFORM ANALYSIS")
+            lines.append("CHANGE")
+        else:
+            if seis_sum is not None and seis_sum.stories:
+                joint_lines: list[str] = []
+                for st in seis_sum.stories:
+                    story_nodes = sorted(
+                        n.node_id for n in model.nodes if abs(n.y_m - st.elevation_m) <= 0.15
+                    )
+                    if not story_nodes:
+                        continue
+                    total_f = (st.fx_kn if axis == "X" else st.fz_kn) * sign
+                    if abs(total_f) <= 1e-6:
+                        continue
+                    f_per = total_f / len(story_nodes)
+                    joint_lines.extend(
+                        _wrap_staad_ids(story_nodes, suffix=f"F{axis} {f_per:.3f}")
+                    )
+                if joint_lines:
+                    lines.append("JOINT LOAD")
+                    lines.extend(joint_lines)
+
+    # 4. Wind Primary Load Cases (5..8) — distributed to windward perimeter nodes per story
+    wind_specs = [
+        (5, "WIND +X (NSCP 2015)", "X", 1.0),
+        (6, "WIND -X (NSCP 2015)", "X", -1.0),
+        (7, "WIND +Z (NSCP 2015)", "Z", 1.0),
+        (8, "WIND -Z (NSCP 2015)", "Z", -1.0),
+    ]
+    for cid, title, axis, sign in wind_specs:
+        lines.append(f"LOAD {cid} LOADTYPE Wind TITLE {title}")
+        if wind_sum is not None and wind_sum.stories:
+            joint_lines = []
+            for st in wind_sum.stories:
+                story_nodes = [n for n in model.nodes if abs(n.y_m - st.elevation_m) <= 0.15]
+                if not story_nodes:
+                    continue
+                total_f = (st.fx_kn if axis == "X" else st.fz_kn) * sign
+                if abs(total_f) <= 1e-6:
+                    continue
+                if axis == "X":
+                    target_coord = (
+                        min(n.x_m for n in story_nodes)
+                        if sign > 0
+                        else max(n.x_m for n in story_nodes)
+                    )
+                    face_nids = sorted(
+                        n.node_id for n in story_nodes if abs(n.x_m - target_coord) <= 0.25
+                    )
+                else:
+                    target_coord = (
+                        min(n.z_m for n in story_nodes)
+                        if sign > 0
+                        else max(n.z_m for n in story_nodes)
+                    )
+                    face_nids = sorted(
+                        n.node_id for n in story_nodes if abs(n.z_m - target_coord) <= 0.25
+                    )
+                if not face_nids:
+                    face_nids = sorted(n.node_id for n in story_nodes)
+                f_per = total_f / len(face_nids)
+                joint_lines.extend(_wrap_staad_ids(face_nids, suffix=f"F{axis} {f_per:.3f}"))
+            if joint_lines:
+                lines.append("JOINT LOAD")
+                lines.extend(joint_lines)
+
+    # 5. Gravity Primary Load Cases (9: DL, 10: LL, 11: LR)
+    lines.append("LOAD 9 LOADTYPE Dead TITLE DEAD LOAD (DL)")
+    lines.append("SELFWEIGHT Y -1.0")
+    lines.extend(_format_member_loads_block(dl_loads))
+
+    lines.append("LOAD 10 LOADTYPE Live TITLE FLOOR LIVE LOAD (LL)")
+    if ll_loads:
+        lines.extend(_format_member_loads_block(ll_loads))
+    else:
+        lines.append("* No floor live loads assigned")
+
+    lines.append("LOAD 11 LOADTYPE Roof Live TITLE ROOF LIVE LOAD (LR)")
+    if lr_loads:
+        lines.extend(_format_member_loads_block(lr_loads))
+    else:
+        lines.append("* No roof live loads assigned")
+
+    # 6. Load Combinations (LRFD 101+ & ASD 201+)
+    for combo in lg.combinations:
+        pair_tokens: list[str] = []
+        for key, factor in combo.factors.items():
+            ref_id = _COMBO_CASE_ID.get(key)
+            if ref_id is not None and abs(factor) > 1e-6:
+                pair_tokens.append(f"{ref_id} {factor:.3f}")
+        if not pair_tokens:
+            continue
+        if opts.use_repeat_load_combos:
+            lines.append(f"LOAD {combo.combo_id} LOADTYPE None TITLE {combo.name}")
+            lines.append("REPEAT LOAD")
+            lines.extend(_wrap_staad_tokens(pair_tokens))
+        else:
+            lines.append(f"LOAD COMB {combo.combo_id} {combo.name}")
+            lines.extend(_wrap_staad_tokens(pair_tokens))
+
+    # 7. Analysis Trailer
+    lines.append("PERFORM ANALYSIS PRINT STATICS CHECK")
+
+
 def write_staad_preview(project: ProjectState, destination: Path):
     """
     Write STAAD.Pro .std file with real newlines and 72-character '-' line continuations.
-    - When Phase 4 member_sizing (sections + member_assignments) is populated, emits full
-      DEFINE MATERIAL, MEMBER PROPERTY (PRIS YD/ZD), CONSTANTS (MATERIAL + BETA),
-      MEMBER CRACKED, MEMBER RELEASE, per-section groups, and SUPPORTS.
+    - When Phase 5 load_generation is populated (with Phase 3 + Phase 4), emits complete
+      analysis-ready STAAD.Pro input including FLOOR DIAPHRAGM, DEFINE UBC LOAD, Seismic/Wind/
+      Gravity primary cases, LRFD/ASD LOAD COMB or REPEAT LOAD, and PERFORM ANALYSIS PRINT STATICS CHECK.
+    - When Phase 4 member_sizing is populated without loads, emits geometry + material/sections/
+      cracked modifiers/releases + supports.
     - When Phase 3 structural_model is populated without sizing, emits Phase 3 geometry + groups + supports.
     - Falls back cleanly to Phase 1 column/beam mapping when structural_model is empty.
     """
     model = project.structural_model
     sizing = project.member_sizing
+    lg = project.load_generation
     has_sizing = bool(
         model.nodes
         and model.members
         and sizing.sections
         and sizing.member_assignments
     )
+    has_loads = bool(has_sizing and lg.generated_at is not None)
 
     if model.nodes and model.members:
         lines = ["STAAD SPACE", "UNIT METER KN", "JOINT COORDINATES"]
@@ -202,23 +448,40 @@ def write_staad_preview(project: ProjectState, destination: Path):
             if pinned_ids:
                 lines.extend(_wrap_staad_ids(pinned_ids, suffix="PINNED"))
 
+        # Phase 5: NSCP 2015 Diaphragms, Loads, Combinations & Analysis
+        if has_loads:
+            _append_phase5_loads(lines, project)
+
         lines += ["FINISH", ""]
         content = "\n".join(lines)
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(content, encoding="utf-8")
+
+        if has_loads:
+            source = "structural_model_full_analysis"
+            notice = (
+                "Full analysis-ready STAAD.Pro .std exported (geometry, material, cracked sections, "
+                "releases, diaphragms, NSCP 2015 seismic/wind/gravity loads & LRFD/ASD combinations). "
+                "Engineer review required prior to STAAD.Pro execution."
+            )
+        elif has_sizing:
+            source = "structural_model_with_sizing"
+            notice = (
+                "STAAD.Pro geometry + preliminary member properties, material, cracked modifiers & releases exported; "
+                "loads and design parameters required before analysis."
+            )
+        else:
+            source = "structural_model"
+            notice = "Geometry-only STAAD.Pro preview from analytical model; sections and loads required before analysis."
+
         return {
             "path": str(destination),
             "nodes": len(model.nodes),
             "members": len(model.members),
             "supports": len(fixed_ids) + len(pinned_ids),
-            "source": "structural_model_with_sizing" if has_sizing else "structural_model",
+            "source": source,
             "std_preview": content,
-            "notice": (
-                "STAAD.Pro geometry + preliminary member properties, material, cracked modifiers & releases exported; "
-                "loads and design parameters required before analysis."
-                if has_sizing
-                else "Geometry-only STAAD.Pro preview from analytical model; sections and loads required before analysis."
-            ),
+            "notice": notice,
         }
 
     # Phase 1 fallback when structural_model is empty

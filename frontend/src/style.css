@@ -208,3 +208,39 @@
 .sizing-table tbody tr.selected{background:#182d46}
 .sizing-tag-pill{display:inline-block;padding:2px 7px;border-radius:12px;border:1px solid;font-weight:800;font-size:10px}
 @media(max-width:1100px){.sizing-split{grid-template-columns:1fr}}
+
+/* Phase 5: Module 05 NSCP 2015 Load Generation & Full STAAD Export */
+.loads-launch-btn{border-color:#d97706;color:#fcd34d}
+.loads-download-btn{border-color:#10b981;color:#6ee7b7}
+.loads-builder{padding:26px 0 12px}
+.loads-preset-bar{flex-direction:column;align-items:stretch;gap:10px}
+.loads-presets-row,.loads-toggles-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.loads-bar-label{font-size:11px;font-weight:700;color:#9baabe;text-transform:uppercase;letter-spacing:.5px}
+.loads-inline-field{display:inline-flex;align-items:center;gap:6px;font-size:11px;color:#cbd5e1}
+.loads-inline-field select{background:#0b1320;color:#eaf0f6;border:1px solid #2b3c55;border-radius:6px;padding:3px 7px;font-size:11px}
+.loads-tabs{margin-bottom:12px}
+.loads-kpi-strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;padding:10px 12px;background:#0e1828;border-bottom:1px solid #223147}
+.loads-kpi-strip div{background:#111d2e;border:1px solid #223147;border-radius:8px;padding:8px 10px}
+.loads-kpi-strip small{display:block;font-size:9px;color:#8999ae;text-transform:uppercase;letter-spacing:.4px}
+.loads-kpi-strip strong{display:block;font-size:14px;color:#eaf0f6;margin-top:3px}
+.loads-edit-table input[type="number"]{width:64px;background:#0b1320;color:#eaf0f6;border:1px solid #2b3c55;border-radius:5px;padding:3px 6px;font-size:11px}
+.loads-edit-table input[type="number"]:disabled{opacity:.4}
+.loads-edit-table select{background:#0b1320;color:#eaf0f6;border:1px solid #2b3c55;border-radius:5px;padding:3px 6px;font-size:11px;max-width:170px}
+.loads-wall-cell{display:flex;align-items:center;gap:5px}
+.loads-form-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(165px,1fr));gap:10px;padding:12px;border-bottom:1px solid #223147;background:#0e1828}
+.loads-form-grid label{display:flex;flex-direction:column;gap:4px;font-size:10px;color:#9baabe;text-transform:uppercase;letter-spacing:.4px}
+.loads-form-grid input[type="number"],.loads-form-grid select{background:#0b1320;color:#eaf0f6;border:1px solid #2b3c55;border-radius:6px;padding:5px 7px;font-size:12px}
+.loads-check-field{flex-direction:row!important;align-items:center;gap:7px!important;text-transform:none!important;font-size:11px!important;color:#cbd5e1!important;grid-column:span 2}
+.loads-bar-cell{min-width:140px}
+.loads-bar-track{width:100%;height:10px;background:#0b1320;border:1px solid #1e2d42;border-radius:6px;overflow:hidden}
+.loads-bar-fill{height:100%;border-radius:5px}
+.loads-bar-fill.seismic{background:linear-gradient(90deg,#f59e0b,#ef4444)}
+.loads-bar-fill.wind{background:linear-gradient(90deg,#0ea5e9,#38bdf8)}
+.loads-total-row{background:#132438}
+.loads-search{background:#0b1320;color:#eaf0f6;border:1px solid #2b3c55;border-radius:6px;padding:4px 8px;font-size:11px;min-width:140px}
+.loads-pill-lrfd{color:#fcd34d;border-color:#d97706;background:#332412}
+.loads-pill-asd{color:#93c5fd;border-color:#2563eb;background:#14283e}
+.loads-factor-pills{display:flex;gap:5px;flex-wrap:wrap}
+.loads-factor-pills code{background:#0b1320;border:1px solid #233349;border-radius:5px;padding:2px 6px;font-size:10px;color:#a7f3d0}
+.loads-kpi-sidebar{grid-template-columns:repeat(2,1fr)}
+.loads-empty{padding:24px;text-align:center;color:#8999ae;font-size:12px}

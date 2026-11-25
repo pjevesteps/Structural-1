@@ -230,6 +230,154 @@ class MemberSizingState(BaseModel):
     engineer_approved: bool = False
 
 
+class FloorGravityLoad(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    floor_level: str = Field(min_length=1)
+    occupancy_preset: str = "residential"
+    sdl_finish_kpa: float = Field(default=1.20, ge=0.0)
+    sdl_ceiling_mep_kpa: float = Field(default=0.50, ge=0.0)
+    sdl_partitions_kpa: float = Field(default=1.00, ge=0.0)
+    live_load_kpa: float = Field(default=1.90, ge=0.0)
+    is_roof: bool = False
+    exterior_wall_line_kn_m: float = Field(default=7.50, ge=0.0)
+    interior_wall_line_kn_m: float = Field(default=4.50, ge=0.0)
+    apply_exterior_wall_perimeter: bool = True
+    apply_interior_wall_beams: bool = False
+
+
+class SeismicParameters(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    zone: Literal[2, 4] = 4
+    soil_profile: Literal["SA", "SB", "SC", "SD", "SE"] = "SD"
+    occupancy_category: Literal[
+        "I_ESSENTIAL", "II_HAZARDOUS", "III_SPECIAL", "IV_STANDARD", "V_MISC"
+    ] = "IV_STANDARD"
+    importance_factor_i: float = Field(default=1.0, gt=0.0)
+    seismic_source_type: Literal["A", "B", "C"] = "A"
+    fault_distance_km: float = Field(default=5.0, ge=0.0)
+    r_factor_x: float = Field(default=8.5, gt=0.0)
+    r_factor_z: float = Field(default=8.5, gt=0.0)
+    ct_coeff: float = Field(default=0.0731, gt=0.0)
+    redundancy_rho: float = Field(default=1.0, ge=1.0, le=1.5)
+    include_vertical_ev: bool = True
+    live_load_seismic_fraction: float = Field(default=0.0, ge=0.0, le=1.0)
+    staad_seismic_method: Literal["ubc_auto", "explicit_story_forces"] = "ubc_auto"
+
+
+class WindParameters(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    basic_wind_speed_kph: float = Field(default=250.0, gt=0.0)
+    exposure_category: Literal["B", "C", "D"] = "B"
+    topographic_kzt: float = Field(default=1.0, ge=1.0)
+    directionality_kd: float = Field(default=0.85, gt=0.0, le=1.0)
+    gust_factor_g: float = Field(default=0.85, gt=0.0)
+    cp_windward: float = Field(default=0.80, gt=0.0)
+    cp_leeward_x: float = Field(default=-0.50)
+    cp_leeward_z: float = Field(default=-0.50)
+
+
+class BeamDistributedLoad(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    member_id: int = Field(ge=1)
+    load_case: Literal["DL", "LL", "LR"]
+    load_shape: Literal["UNI", "TRAP"]
+    w1_kn_m: float
+    w2_kn_m: float = 0.0
+    d1_m: float = 0.0
+    d2_m: float = 0.0
+    source: str
+
+
+class StorySeismicResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    floor_level: str
+    elevation_m: float
+    weight_kn: float
+    fx_kn: float
+    fz_kn: float
+    cumulative_shear_x_kn: float
+    cumulative_shear_z_kn: float
+
+
+class StoryWindResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    floor_level: str
+    elevation_m: float
+    kz: float
+    qz_kpa: float
+    fx_kn: float
+    fz_kn: float
+
+
+class SeismicSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    z_factor: float = 0.40
+    na: float = 1.0
+    nv: float = 1.0
+    ca: float = 0.44
+    cv: float = 0.64
+    building_height_m: float = 0.0
+    period_t_sec: float = 0.0
+    total_seismic_weight_kn: float = 0.0
+    v_design_x_kn: float = 0.0
+    v_design_z_kn: float = 0.0
+    v_max_kn: float = 0.0
+    v_min_kn: float = 0.0
+    v_min_z4_kn: float = 0.0
+    ft_x_kn: float = 0.0
+    ft_z_kn: float = 0.0
+    base_shear_ratio_x: float = 0.0
+    base_shear_ratio_z: float = 0.0
+    stories: list[StorySeismicResult] = Field(default_factory=list)
+
+
+class WindSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    base_shear_x_kn: float = 0.0
+    base_shear_z_kn: float = 0.0
+    stories: list[StoryWindResult] = Field(default_factory=list)
+
+
+class LoadCombinationDef(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    combo_id: int = Field(ge=1)
+    name: str = Field(min_length=1)
+    design_basis: Literal["LRFD", "ASD"]
+    factors: dict[str, float] = Field(default_factory=dict)
+
+
+class LoadGenerationOptions(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    include_rigid_diaphragm: bool = True
+    use_repeat_load_combos: bool = False
+    include_lrfd_combos: bool = True
+    include_asd_combos: bool = True
+    f1_live_load_factor: float = Field(default=0.5, ge=0.0, le=1.0)
+
+
+class LoadCheckIssue(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    severity: Literal["error", "warning", "info"]
+    code: str
+    message: str
+    floor_level: str = ""
+
+
+class LoadGenerationState(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    generated_at: str | None = None
+    floor_loads: list[FloorGravityLoad] = Field(default_factory=list)
+    seismic: SeismicParameters = Field(default_factory=SeismicParameters)
+    wind: WindParameters = Field(default_factory=WindParameters)
+    options: LoadGenerationOptions = Field(default_factory=LoadGenerationOptions)
+    beam_loads: list[BeamDistributedLoad] = Field(default_factory=list)
+    seismic_summary: SeismicSummary | None = None
+    wind_summary: WindSummary | None = None
+    combinations: list[LoadCombinationDef] = Field(default_factory=list)
+    validation_issues: list[LoadCheckIssue] = Field(default_factory=list)
+    engineer_approved: bool = False
+
+
 class ProjectState(BaseModel):
     model_config = ConfigDict(extra="forbid")
     project_info: ProjectInfo
@@ -240,6 +388,7 @@ class ProjectState(BaseModel):
     openings: list[FloorOpening] = Field(default_factory=list)
     structural_model: StructuralModelState = Field(default_factory=StructuralModelState)
     member_sizing: MemberSizingState = Field(default_factory=MemberSizingState)
+    load_generation: LoadGenerationState = Field(default_factory=LoadGenerationState)
 
     @model_validator(mode="after")
     def check_references(self):
