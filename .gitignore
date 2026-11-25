@@ -13,6 +13,8 @@ npm-debug.log*
 # Generated runtime data (keep sample data/projects/)
 data/exports/
 data/imports/
+data/logs/
+.structural_ai_pids.json
 
 # Playwright E2E artifacts
 frontend/e2e/.tmp-data/

@@ -12,11 +12,76 @@ from ..models import (
     BomSummary,
     ConcreteQuantityRow,
     EngineerSignatory,
+    ProjectRevisionSnapshot,
     ProjectState,
     RebarQuantityRow,
     ReportGenerationOptions,
     ReportState,
 )
+
+REGIONAL_COST_PRESETS: dict[str, dict] = {
+    "car_baguio": {
+        "key": "car_baguio",
+        "label": "CAR / Baguio City (Mountain Hauling)",
+        "notes": "Includes mountain hauling premium for ready-mix concrete, steel bars & aggregates.",
+        "rate_concrete_php_m3": 6850.0,
+        "rate_rebar_php_kg": 54.0,
+        "rate_tie_wire_php_kg": 98.0,
+        "rate_formwork_php_m2": 680.0,
+        "rate_chb_wall_php_m2": 980.0,
+        "labor_pct_of_materials": 35.0,
+        "labor_concrete_pct": 32.0,
+        "labor_rebar_pct": 38.0,
+        "labor_formwork_pct": 42.0,
+    },
+    "ncr_manila": {
+        "key": "ncr_manila",
+        "label": "NCR / Metro Manila",
+        "notes": "Direct batching plant supply with Metro Manila skilled labor wage rates.",
+        "rate_concrete_php_m3": 6200.0,
+        "rate_rebar_php_kg": 50.0,
+        "rate_tie_wire_php_kg": 92.0,
+        "rate_formwork_php_m2": 640.0,
+        "rate_chb_wall_php_m2": 920.0,
+        "labor_pct_of_materials": 38.0,
+        "labor_concrete_pct": 35.0,
+        "labor_rebar_pct": 40.0,
+        "labor_formwork_pct": 45.0,
+    },
+    "cebu_visayas": {
+        "key": "cebu_visayas",
+        "label": "Central Visayas / Cebu",
+        "notes": "Metro Cebu commercial ready-mix & PNS 49 rebar supply with regional labor rates.",
+        "rate_concrete_php_m3": 6400.0,
+        "rate_rebar_php_kg": 52.0,
+        "rate_tie_wire_php_kg": 95.0,
+        "rate_formwork_php_m2": 630.0,
+        "rate_chb_wall_php_m2": 940.0,
+        "labor_pct_of_materials": 34.0,
+        "labor_concrete_pct": 30.0,
+        "labor_rebar_pct": 36.0,
+        "labor_formwork_pct": 40.0,
+    },
+    "davao_mindanao": {
+        "key": "davao_mindanao",
+        "label": "Davao Region / Mindanao",
+        "notes": "Davao City ready-mix & reinforcing steel supply with competitive local labor rates.",
+        "rate_concrete_php_m3": 6100.0,
+        "rate_rebar_php_kg": 51.0,
+        "rate_tie_wire_php_kg": 94.0,
+        "rate_formwork_php_m2": 600.0,
+        "rate_chb_wall_php_m2": 900.0,
+        "labor_pct_of_materials": 32.0,
+        "labor_concrete_pct": 28.0,
+        "labor_rebar_pct": 34.0,
+        "labor_formwork_pct": 38.0,
+    },
+}
+
+
+def get_regional_cost_presets() -> list[dict]:
+    """Return all Philippine regional cost & trade-split labor presets."""
+    return [dict(v) for v in REGIONAL_COST_PRESETS.values()]
 
 _BAR_CALLOUT_RE = re.compile(r"(\d+)\s*[-xX]\s*(\d+)\s*mm", re.IGNORECASE)
 _SPACING_CALLOUT_RE = re.compile(
@@ -363,16 +428,27 @@ def compute_bom_summary(
     total_chb_area = round(total_chb_area, 2)
 
     # ------------------------------------------------------------------
-    # 4. NBCP Sec. 302-5f Cost Estimate Lines (PHP)
+    # 4. NBCP Sec. 302-5f Cost Estimate Lines (PHP, with trade-split labor)
     # ------------------------------------------------------------------
-    labor_mult = bom_params.labor_pct_of_materials / 100.0
-    raw_items: list[tuple[str, str, float, str, float]] = [
+    base_labor_pct = bom_params.labor_pct_of_materials
+    conc_labor_pct = (
+        bom_params.labor_concrete_pct if bom_params.labor_concrete_pct is not None else base_labor_pct
+    )
+    rebar_labor_pct = (
+        bom_params.labor_rebar_pct if bom_params.labor_rebar_pct is not None else base_labor_pct
+    )
+    fw_labor_pct = (
+        bom_params.labor_formwork_pct if bom_params.labor_formwork_pct is not None else base_labor_pct
+    )
+
+    raw_items: list[tuple[str, str, float, str, float, float]] = [
         (
             "01",
             f"Ready-Mix Structural Concrete (f'c = {ms.material.fc_mpa:.0f} MPa, incl. {bom_params.concrete_waste_pct:.1f}% waste)",
             total_conc_gross,
             "m³",
             bom_params.rate_concrete_php_m3,
+            conc_labor_pct,
         ),
         (
             "02",
@@ -380,6 +456,7 @@ def compute_bom_summary(
             total_rebar_kg,
             "kg",
             bom_params.rate_rebar_php_kg,
+            rebar_labor_pct,
         ),
         (
             "03",
@@ -387,6 +464,7 @@ def compute_bom_summary(
             total_tie_wire_kg,
             "kg",
             bom_params.rate_tie_wire_php_kg,
+            rebar_labor_pct,
         ),
         (
             "04",
@@ -394,6 +472,7 @@ def compute_bom_summary(
             total_formwork,
             "m²",
             bom_params.rate_formwork_php_m2,
+            fw_labor_pct,
         ),
     ]
     if bom_params.include_chb_masonry and total_chb_area > 0.0:
@@ -404,13 +483,14 @@ def compute_bom_summary(
                 total_chb_area,
                 "m²",
                 bom_params.rate_chb_wall_php_m2,
+                base_labor_pct,
             )
         )
 
     cost_lines: list[BomCostLine] = []
-    for item_no, desc, qty, unit, unit_rate in raw_items:
+    for item_no, desc, qty, unit, unit_rate, item_labor_pct in raw_items:
         mat_cost = round(qty * unit_rate, 2)
-        lab_cost = round(mat_cost * labor_mult, 2)
+        lab_cost = round(mat_cost * (item_labor_pct / 100.0), 2)
         tot_cost = round(mat_cost + lab_cost, 2)
         cost_lines.append(
             BomCostLine(
@@ -656,3 +736,112 @@ def export_bom_csv(project: ProjectState) -> str:
     )
 
     return buf.getvalue()
+
+
+def _pct_delta(cur: float, base: float) -> float:
+    if abs(base) < 1e-6:
+        return 0.0
+    return round(((cur - base) / base) * 100.0, 2)
+
+
+def _live_bom_or_none(project: ProjectState) -> BomSummary | None:
+    try:
+        return compute_bom_summary(project, project.reporting.bom_params)
+    except ValueError:
+        return project.reporting.bom
+
+
+def create_revision_snapshot(
+    project: ProjectState,
+    label: str,
+    notes: str = "",
+) -> ProjectRevisionSnapshot:
+    """Capture an immutable revision snapshot of the working project state (excluding nested revisions)."""
+    existing_ids = {r.revision_id for r in project.revisions}
+    rev_num = len(project.revisions)
+    while f"REV-{rev_num}" in existing_ids:
+        rev_num += 1
+    rev_id = f"REV-{rev_num}"
+
+    bom = _live_bom_or_none(project)
+    # Persist computed BOM into reporting if Phase 6 exists and reporting.bom wasn't populated yet
+    if bom is not None and project.reporting.bom is None:
+        project.reporting.bom = bom
+
+    frozen = project.model_dump(exclude={"project_info", "revisions"})
+    assert "revisions" not in frozen
+
+    return ProjectRevisionSnapshot(
+        revision_id=rev_id,
+        label=label.strip() or f"Rev. {rev_num} Snapshot",
+        created_at=_utc_now(),
+        notes=notes.strip(),
+        node_count=len(project.structural_model.nodes),
+        member_count=len(project.structural_model.members),
+        total_concrete_m3=bom.total_concrete_gross_m3 if bom is not None else 0.0,
+        total_rebar_kg=bom.total_rebar_kg if bom is not None else 0.0,
+        grand_total_cost_php=bom.grand_total_cost_php if bom is not None else 0.0,
+        frozen_state=frozen,
+    )
+
+
+def restore_revision_snapshot(project: ProjectState, revision_id: str) -> ProjectState:
+    """Restore working state from `revision_id` while preserving full `revisions` history."""
+    snap = next((r for r in project.revisions if r.revision_id == revision_id), None)
+    if snap is None:
+        raise KeyError(f"Revision '{revision_id}' not found.")
+
+    restored_dict = {
+        "project_info": project.project_info.model_dump(),
+        **{k: v for k, v in snap.frozen_state.items() if k not in ("project_info", "revisions")},
+        "revisions": [r.model_dump() for r in project.revisions],
+    }
+    return ProjectState.model_validate(restored_dict)
+
+
+def compare_against_revision(project: ProjectState, base_rev: str) -> dict:
+    """Compute Concrete, Rebar, Cost, Member, and Footing deltas between `base_rev` and current state."""
+    snap = next((r for r in project.revisions if r.revision_id == base_rev), None)
+    if snap is None:
+        raise KeyError(f"Revision '{base_rev}' not found.")
+
+    cur_bom = _live_bom_or_none(project)
+    cur_conc = cur_bom.total_concrete_gross_m3 if cur_bom is not None else 0.0
+    cur_rebar = cur_bom.total_rebar_kg if cur_bom is not None else 0.0
+    cur_cost = cur_bom.grand_total_cost_php if cur_bom is not None else 0.0
+
+    base_conc = snap.total_concrete_m3
+    base_rebar = snap.total_rebar_kg
+    base_cost = snap.grand_total_cost_php
+
+    base_members = snap.member_count
+    cur_members = len(project.structural_model.members)
+
+    base_ftgs = len(
+        (snap.frozen_state.get("analysis_design") or {}).get("footing_designs") or []
+    )
+    cur_ftgs = len(project.analysis_design.footing_designs)
+
+    return {
+        "base_rev": snap.revision_id,
+        "base_label": snap.label,
+        "base_created_at": snap.created_at,
+        "concrete_base_m3": round(base_conc, 3),
+        "concrete_current_m3": round(cur_conc, 3),
+        "concrete_delta_m3": round(cur_conc - base_conc, 3),
+        "concrete_delta_pct": _pct_delta(cur_conc, base_conc),
+        "rebar_base_kg": round(base_rebar, 2),
+        "rebar_current_kg": round(cur_rebar, 2),
+        "rebar_delta_kg": round(cur_rebar - base_rebar, 2),
+        "rebar_delta_pct": _pct_delta(cur_rebar, base_rebar),
+        "cost_base_php": round(base_cost, 2),
+        "cost_current_php": round(cur_cost, 2),
+        "cost_delta_php": round(cur_cost - base_cost, 2),
+        "cost_delta_pct": _pct_delta(cur_cost, base_cost),
+        "member_count_base": base_members,
+        "member_count_current": cur_members,
+        "member_count_delta": cur_members - base_members,
+        "footing_count_base": base_ftgs,
+        "footing_count_current": cur_ftgs,
+        "footing_count_delta": cur_ftgs - base_ftgs,
+    }

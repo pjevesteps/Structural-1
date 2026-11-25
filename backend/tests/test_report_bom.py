@@ -350,3 +350,109 @@ def test_report_generate_rejects_missing_phase6_with_400(report_client):
     res = client.post(f"/api/projects/{pid}/reports/generate")
     assert res.status_code == 400
     assert "Phase 6" in res.json()["detail"]
+
+
+def test_regional_cost_presets_and_trade_split_labor_rates(report_client):
+    client, _ = report_client
+    pid = "REP-REG-01"
+    _run_phases_3_to_6(client, pid, footing_depth_m=0.0)
+
+    # 1. Fetch Philippine regional presets endpoint
+    pr = client.get("/api/reports/cost-presets")
+    assert pr.status_code == 200
+    presets = {p["key"]: p for p in pr.json()["presets"]}
+    assert set(presets.keys()) == {"car_baguio", "ncr_manila", "cebu_visayas", "davao_mindanao"}
+    # Baguio mountain hauling concrete rate exceeds Metro Manila
+    assert presets["car_baguio"]["rate_concrete_php_m3"] > presets["ncr_manila"]["rate_concrete_php_m3"]
+
+    # 2. Apply trade-split labor overrides and verify exact per-line labor math
+    baguio = presets["car_baguio"]
+    gen = client.post(
+        f"/api/projects/{pid}/reports/generate",
+        json={
+            "bom_params": {
+                "region_preset": "car_baguio",
+                "rate_concrete_php_m3": baguio["rate_concrete_php_m3"],
+                "rate_rebar_php_kg": baguio["rate_rebar_php_kg"],
+                "rate_formwork_php_m2": baguio["rate_formwork_php_m2"],
+                "labor_pct_of_materials": 35.0,
+                "labor_concrete_pct": 25.0,
+                "labor_rebar_pct": 40.0,
+                "labor_formwork_pct": 50.0,
+            }
+        },
+    )
+    assert gen.status_code == 200, gen.text
+    lines = {ln["item_no"]: ln for ln in gen.json()["bom"]["cost_lines"]}
+    assert lines["01"]["labor_cost_php"] == pytest.approx(lines["01"]["material_cost_php"] * 0.25, abs=0.02)
+    assert lines["02"]["labor_cost_php"] == pytest.approx(lines["02"]["material_cost_php"] * 0.40, abs=0.02)
+    assert lines["04"]["labor_cost_php"] == pytest.approx(lines["04"]["material_cost_php"] * 0.50, abs=0.02)
+
+
+def test_project_revision_snapshots_restore_no_recursion_and_bom_delta(report_client):
+    client, data_dir = report_client
+    pid = "REP-REV-01"
+    _run_phases_3_to_6(client, pid, footing_depth_m=1.2)
+    assert client.post(f"/api/projects/{pid}/reports/generate").status_code == 200
+
+    # 1. Freeze Rev. 0 snapshot
+    r0 = client.post(
+        f"/api/projects/{pid}/revisions",
+        json={"label": "Rev. 0 — Initial Permit Submission", "notes": "Baseline 400mm columns"},
+    )
+    assert r0.status_code == 200, r0.text
+    rev0 = r0.json()
+    assert rev0["revision_id"] == "REV-0"
+    assert rev0["total_concrete_m3"] > 0
+    assert rev0["total_rebar_kg"] > 0
+    assert rev0["grand_total_cost_php"] > 0
+    assert "revisions" not in rev0["frozen_state"]
+
+    # 2. Upsize column section C1 by +150mm & re-run Phase 6 + Module 08
+    proj = ProjectState.model_validate(client.get(f"/api/projects/{pid}").json())
+    c1 = next(s for s in proj.member_sizing.sections if s.section_id == "C1")
+    orig_w, orig_d = c1.width_mm, c1.depth_mm
+    upd_sec = client.post(
+        f"/api/projects/{pid}/sizing/sections",
+        json=c1.model_copy(
+            update={"width_mm": orig_w + 150.0, "depth_mm": orig_d + 150.0}
+        ).model_dump(),
+    )
+    assert upd_sec.status_code == 200, upd_sec.text
+    assert client.post(f"/api/projects/{pid}/design/run").status_code == 200
+    assert client.post(f"/api/projects/{pid}/reports/generate").status_code == 200
+
+    # 3. Compare modified working state against REV-0 -> positive concrete & cost deltas
+    cmp_res = client.get(f"/api/projects/{pid}/revisions/compare", params={"base_rev": "REV-0"})
+    assert cmp_res.status_code == 200, cmp_res.text
+    delta = cmp_res.json()
+    assert delta["base_rev"] == "REV-0"
+    assert delta["concrete_delta_m3"] > 0.5
+    assert delta["concrete_delta_pct"] > 0.0
+    assert delta["cost_delta_php"] > 0.0
+    assert delta["cost_delta_pct"] > 0.0
+
+    # 4. Freeze Rev. 1, then restore Rev. 0 -> working state reverts while BOTH REV-0 & REV-1 remain intact
+    r1 = client.post(
+        f"/api/projects/{pid}/revisions",
+        json={"label": "Rev. 1 — Upsized Columns", "notes": "+150mm column C1"},
+    )
+    assert r1.status_code == 200
+    assert r1.json()["revision_id"] == "REV-1"
+    assert "revisions" not in r1.json()["frozen_state"]
+
+    rest = client.post(f"/api/projects/{pid}/revisions/REV-0/restore")
+    assert rest.status_code == 200, rest.text
+    restored = ProjectState.model_validate(rest.json())
+    assert [r.revision_id for r in restored.revisions] == ["REV-0", "REV-1"]
+    restored_c1 = next(s for s in restored.member_sizing.sections if s.section_id == "C1")
+    assert restored_c1.width_mm == pytest.approx(orig_w)
+    assert restored_c1.depth_mm == pytest.approx(orig_d)
+    # Zero recursive nesting on disk
+    disk_raw = json.loads((data_dir / f"{pid}.json").read_text(encoding="utf-8"))
+    for rev in disk_raw["revisions"]:
+        assert "revisions" not in rev["frozen_state"]
+    # Delta vs REV-0 is now 0 after restoring
+    zero_delta = client.get(f"/api/projects/{pid}/revisions/compare", params={"base_rev": "REV-0"}).json()
+    assert zero_delta["concrete_delta_m3"] == pytest.approx(0.0, abs=0.01)
+    assert zero_delta["cost_delta_php"] == pytest.approx(0.0, abs=0.1)

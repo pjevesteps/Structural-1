@@ -546,6 +546,7 @@ class EngineerSignatory(BaseModel):
 
 class BomCostParameters(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    region_preset: Literal["custom", "car_baguio", "ncr_manila", "cebu_visayas", "davao_mindanao"] = "car_baguio"
     concrete_waste_pct: float = Field(default=5.0, ge=0.0, le=50.0)
     rebar_waste_splice_pct: float = Field(default=12.0, ge=0.0, le=50.0)
     commercial_bar_length_m: Literal[6.0, 7.5, 9.0, 10.5, 12.0] = 6.0
@@ -556,6 +557,9 @@ class BomCostParameters(BaseModel):
     rate_formwork_php_m2: float = Field(default=650.0, ge=0.0)
     rate_chb_wall_php_m2: float = Field(default=950.0, ge=0.0)
     labor_pct_of_materials: float = Field(default=35.0, ge=0.0, le=200.0)
+    labor_concrete_pct: float | None = Field(default=None, ge=0.0, le=200.0)
+    labor_rebar_pct: float | None = Field(default=None, ge=0.0, le=200.0)
+    labor_formwork_pct: float | None = Field(default=None, ge=0.0, le=200.0)
     include_chb_masonry: bool = True
 
     @field_validator("commercial_bar_length_m", mode="before")
@@ -681,6 +685,20 @@ class CadDrawingState(BaseModel):
     available_items: list[dict[str, str]] = Field(default_factory=list)
 
 
+class ProjectRevisionSnapshot(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    revision_id: str = Field(min_length=1, max_length=40)
+    label: str = Field(min_length=1, max_length=200)
+    created_at: str
+    notes: str = ""
+    node_count: int = Field(default=0, ge=0)
+    member_count: int = Field(default=0, ge=0)
+    total_concrete_m3: float = Field(default=0.0, ge=0.0)
+    total_rebar_kg: float = Field(default=0.0, ge=0.0)
+    grand_total_cost_php: float = Field(default=0.0, ge=0.0)
+    frozen_state: dict[str, Any] = Field(default_factory=dict)
+
+
 class ProjectState(BaseModel):
     model_config = ConfigDict(extra="forbid")
     project_info: ProjectInfo
@@ -695,6 +713,7 @@ class ProjectState(BaseModel):
     analysis_design: AnalysisDesignState = Field(default_factory=AnalysisDesignState)
     reporting: ReportState = Field(default_factory=ReportState)
     cad_drawings: CadDrawingState = Field(default_factory=CadDrawingState)
+    revisions: list[ProjectRevisionSnapshot] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def check_references(self):

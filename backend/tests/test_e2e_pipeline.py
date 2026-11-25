@@ -991,6 +991,21 @@ def test_full_pipeline_phase1_to_phase6(isolated_env, tmp_path: Path):
     assert "=== CONCRETE & FORMWORK TAKEOFF ===" in bom_csv_resp.text
     assert "=== PNS 49:2020 REINFORCING STEEL BREAKDOWN ===" in bom_csv_resp.text
 
+    presets_resp = client.get("/api/reports/cost-presets")
+    assert presets_resp.status_code == 200
+    assert len(presets_resp.json()["presets"]) == 4
+
+    rev0_resp = client.post(
+        f"/api/projects/{pid}/revisions",
+        json={"label": "Rev. 0 — E2E Baseline", "notes": "Automated E2E snapshot"},
+    )
+    assert rev0_resp.status_code == 200
+    assert rev0_resp.json()["revision_id"] == "REV-0"
+
+    cmp_resp = client.get(f"/api/projects/{pid}/revisions/compare", params={"base_rev": "REV-0"})
+    assert cmp_resp.status_code == 200
+    assert cmp_resp.json()["concrete_delta_m3"] == pytest.approx(0.0, abs=0.02)
+
     # =========================================================================
     # PHASE 7: Structural Drawings (AutoCAD .dxf Plans, Schedules & SVG Preview)
     # =========================================================================

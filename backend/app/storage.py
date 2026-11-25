@@ -47,7 +47,10 @@ def list_projects():
         return items
     for path in sorted(DATA_DIR.glob("*.json")):
         try:
-            items.append(json.loads(path.read_text(encoding="utf-8"))["project_info"])
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            info = dict(raw["project_info"])
+            info["revision_count"] = len(raw.get("revisions") or [])
+            items.append(info)
         except Exception:
             continue
     return items

@@ -16,6 +16,7 @@ const DEFAULT_SIGNATORY = {
 };
 
 const DEFAULT_BOM_PARAMS = {
+  region_preset: "car_baguio",
   concrete_waste_pct: 5.0,
   rebar_waste_splice_pct: 12.0,
   commercial_bar_length_m: 6.0,
@@ -26,6 +27,9 @@ const DEFAULT_BOM_PARAMS = {
   rate_formwork_php_m2: 650.0,
   rate_chb_wall_php_m2: 950.0,
   labor_pct_of_materials: 35.0,
+  labor_concrete_pct: null,
+  labor_rebar_pct: null,
+  labor_formwork_pct: null,
   include_chb_masonry: true,
 };
 
@@ -61,6 +65,9 @@ export default function ReportBuilder({ project, onClose, onUpdated }) {
   const [signatory, setSignatory] = useState(DEFAULT_SIGNATORY);
   const [bomParams, setBomParams] = useState(DEFAULT_BOM_PARAMS);
   const [options, setOptions] = useState(DEFAULT_OPTIONS);
+  const [regionalPresets, setRegionalPresets] = useState([]);
+  const [compareRevId, setCompareRevId] = useState("");
+  const [revDelta, setRevDelta] = useState(null);
 
   async function apiJson(url, opts) {
     const res = await fetch(url, opts);
@@ -75,16 +82,31 @@ export default function ReportBuilder({ project, onClose, onUpdated }) {
     setBusy(true);
     setError("");
     try {
-      const p = await apiJson(`/api/projects/${pid}`);
+      const [p, presetRes] = await Promise.all([
+        apiJson(`/api/projects/${pid}`),
+        apiJson("/api/reports/cost-presets").catch(() => ({ presets: [] })),
+      ]);
       setFullProject(p);
+      setRegionalPresets(presetRes.presets || []);
       if (p.reporting?.signatory) {
         const sig = { ...DEFAULT_SIGNATORY, ...p.reporting.signatory };
         if (!sig.project_address && p.project_info?.location) {
           sig.project_address = p.project_info.location;
         }
-        setSignatory(sig);
+        setSignatory((prev) => {
+          const merged = { ...sig };
+          for (const key of Object.keys(merged)) {
+            if (prev[key] && prev[key] !== DEFAULT_SIGNATORY[key]) {
+              merged[key] = prev[key];
+            }
+          }
+          return merged;
+        });
       } else if (p.project_info?.location) {
-        setSignatory((prev) => ({ ...prev, project_address: p.project_info.location }));
+        setSignatory((prev) => ({
+          ...prev,
+          project_address: prev.project_address || p.project_info.location,
+        }));
       }
       if (p.reporting?.bom_params) {
         setBomParams({ ...DEFAULT_BOM_PARAMS, ...p.reporting.bom_params });
@@ -137,16 +159,29 @@ export default function ReportBuilder({ project, onClose, onUpdated }) {
     };
   }, [ad]);
 
-  async function handleGenerate(switchTab = null) {
+  async function handleGenerate(switchTab = null, overrideBomParams = null) {
     setBusy(true);
     setError("");
     setNotice("");
     try {
+      const activeBp = overrideBomParams || bomParams;
       const payload = {
         signatory,
         bom_params: {
-          ...bomParams,
-          commercial_bar_length_m: Number(bomParams.commercial_bar_length_m),
+          ...activeBp,
+          commercial_bar_length_m: Number(activeBp.commercial_bar_length_m),
+          labor_concrete_pct:
+            activeBp.labor_concrete_pct === "" || activeBp.labor_concrete_pct == null
+              ? null
+              : Number(activeBp.labor_concrete_pct),
+          labor_rebar_pct:
+            activeBp.labor_rebar_pct === "" || activeBp.labor_rebar_pct == null
+              ? null
+              : Number(activeBp.labor_rebar_pct),
+          labor_formwork_pct:
+            activeBp.labor_formwork_pct === "" || activeBp.labor_formwork_pct == null
+              ? null
+              : Number(activeBp.labor_formwork_pct),
         },
         options,
       };
@@ -160,7 +195,83 @@ export default function ReportBuilder({ project, onClose, onUpdated }) {
         `Calculation report & BOM generated: ${fmtNum(updated.bom?.total_concrete_gross_m3, 2)} m³ concrete, ` +
           `${fmtNum(updated.bom?.total_rebar_kg, 0)} kg rebar, Est. ${fmtPhp(updated.bom?.grand_total_cost_php)}.`
       );
+      if (compareRevId) {
+        const delta = await apiJson(
+          `/api/projects/${pid}/revisions/compare?base_rev=${encodeURIComponent(compareRevId)}`
+        ).catch(() => null);
+        setRevDelta(delta);
+      }
       if (switchTab) setActiveTab(switchTab);
+      if (onUpdated) await onUpdated();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function handleSelectRegionPreset(presetKey) {
+    if (presetKey === "custom") {
+      setBomParams({ ...bomParams, region_preset: "custom" });
+      return;
+    }
+    const found = regionalPresets.find((p) => p.key === presetKey);
+    if (!found) {
+      setBomParams({ ...bomParams, region_preset: presetKey });
+      return;
+    }
+    const next = {
+      ...bomParams,
+      region_preset: presetKey,
+      rate_concrete_php_m3: found.rate_concrete_php_m3,
+      rate_rebar_php_kg: found.rate_rebar_php_kg,
+      rate_tie_wire_php_kg: found.rate_tie_wire_php_kg,
+      rate_formwork_php_m2: found.rate_formwork_php_m2,
+      rate_chb_wall_php_m2: found.rate_chb_wall_php_m2,
+      labor_pct_of_materials: found.labor_pct_of_materials,
+      labor_concrete_pct: found.labor_concrete_pct,
+      labor_rebar_pct: found.labor_rebar_pct,
+      labor_formwork_pct: found.labor_formwork_pct,
+    };
+    setBomParams(next);
+    if (hasPrereqs) {
+      handleGenerate(null, next);
+    }
+  }
+
+  async function handleCompareRevision(revId) {
+    setCompareRevId(revId);
+    if (!revId) {
+      setRevDelta(null);
+      return;
+    }
+    try {
+      const delta = await apiJson(
+        `/api/projects/${pid}/revisions/compare?base_rev=${encodeURIComponent(revId)}`
+      );
+      setRevDelta(delta);
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  async function handleQuickSaveRevision() {
+    setBusy(true);
+    setError("");
+    try {
+      const nextNum = (fullProject?.revisions || []).length;
+      const snap = await apiJson(`/api/projects/${pid}/revisions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          label: `Rev. ${nextNum} — ${options.report_revision || "BOM Snapshot"}`,
+          notes: `Region: ${bomParams.region_preset}`,
+        }),
+      });
+      setFullProject((prev) =>
+        prev ? { ...prev, revisions: [...(prev.revisions || []), snap] } : prev
+      );
+      setNotice(`Saved ${snap.revision_id} (${snap.label}) for future BOM delta comparisons.`);
       if (onUpdated) await onUpdated();
     } catch (err) {
       setError(err.message);
@@ -472,8 +583,23 @@ export default function ReportBuilder({ project, onClose, onUpdated }) {
           {/* TAB 2: BILL OF MATERIALS & COST ESTIMATE */}
           {activeTab === "bom" && (
             <div style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
-              {/* Editable Unit-Rate & Waste Bar */}
+              {/* Editable Unit-Rate, Regional Preset & Trade-Split Labor Bar */}
               <div className="sizing-bulk-bar design-param-bar">
+                <label className="design-param-field">
+                  <span>Regional Rate Preset</span>
+                  <select
+                    aria-label="Regional Rate Preset"
+                    style={{ width: "170px" }}
+                    value={bomParams.region_preset || "car_baguio"}
+                    onChange={(e) => handleSelectRegionPreset(e.target.value)}
+                  >
+                    <option value="car_baguio">CAR / Baguio City</option>
+                    <option value="ncr_manila">NCR / Metro Manila</option>
+                    <option value="cebu_visayas">Central Visayas / Cebu</option>
+                    <option value="davao_mindanao">Davao / Mindanao</option>
+                    <option value="custom">Custom Rates</option>
+                  </select>
+                </label>
                 <label className="design-param-field">
                   <span>Concrete ₱/m³</span>
                   <input
@@ -481,7 +607,11 @@ export default function ReportBuilder({ project, onClose, onUpdated }) {
                     step="100"
                     value={bomParams.rate_concrete_php_m3}
                     onChange={(e) =>
-                      setBomParams({ ...bomParams, rate_concrete_php_m3: Number(e.target.value) })
+                      setBomParams({
+                        ...bomParams,
+                        region_preset: "custom",
+                        rate_concrete_php_m3: Number(e.target.value),
+                      })
                     }
                   />
                 </label>
@@ -492,7 +622,11 @@ export default function ReportBuilder({ project, onClose, onUpdated }) {
                     step="1"
                     value={bomParams.rate_rebar_php_kg}
                     onChange={(e) =>
-                      setBomParams({ ...bomParams, rate_rebar_php_kg: Number(e.target.value) })
+                      setBomParams({
+                        ...bomParams,
+                        region_preset: "custom",
+                        rate_rebar_php_kg: Number(e.target.value),
+                      })
                     }
                   />
                 </label>
@@ -503,7 +637,11 @@ export default function ReportBuilder({ project, onClose, onUpdated }) {
                     step="25"
                     value={bomParams.rate_formwork_php_m2}
                     onChange={(e) =>
-                      setBomParams({ ...bomParams, rate_formwork_php_m2: Number(e.target.value) })
+                      setBomParams({
+                        ...bomParams,
+                        region_preset: "custom",
+                        rate_formwork_php_m2: Number(e.target.value),
+                      })
                     }
                   />
                 </label>
@@ -514,18 +652,71 @@ export default function ReportBuilder({ project, onClose, onUpdated }) {
                     step="25"
                     value={bomParams.rate_chb_wall_php_m2}
                     onChange={(e) =>
-                      setBomParams({ ...bomParams, rate_chb_wall_php_m2: Number(e.target.value) })
+                      setBomParams({
+                        ...bomParams,
+                        region_preset: "custom",
+                        rate_chb_wall_php_m2: Number(e.target.value),
+                      })
                     }
                   />
                 </label>
                 <label className="design-param-field">
-                  <span>Labor %</span>
+                  <span>Base Labor %</span>
                   <input
                     type="number"
                     step="1"
                     value={bomParams.labor_pct_of_materials}
                     onChange={(e) =>
-                      setBomParams({ ...bomParams, labor_pct_of_materials: Number(e.target.value) })
+                      setBomParams({
+                        ...bomParams,
+                        region_preset: "custom",
+                        labor_pct_of_materials: Number(e.target.value),
+                      })
+                    }
+                  />
+                </label>
+                <label className="design-param-field">
+                  <span>Conc Lab %</span>
+                  <input
+                    type="number"
+                    placeholder="Base"
+                    value={bomParams.labor_concrete_pct ?? ""}
+                    onChange={(e) =>
+                      setBomParams({
+                        ...bomParams,
+                        region_preset: "custom",
+                        labor_concrete_pct: e.target.value === "" ? null : Number(e.target.value),
+                      })
+                    }
+                  />
+                </label>
+                <label className="design-param-field">
+                  <span>Rebar Lab %</span>
+                  <input
+                    type="number"
+                    placeholder="Base"
+                    value={bomParams.labor_rebar_pct ?? ""}
+                    onChange={(e) =>
+                      setBomParams({
+                        ...bomParams,
+                        region_preset: "custom",
+                        labor_rebar_pct: e.target.value === "" ? null : Number(e.target.value),
+                      })
+                    }
+                  />
+                </label>
+                <label className="design-param-field">
+                  <span>Form Lab %</span>
+                  <input
+                    type="number"
+                    placeholder="Base"
+                    value={bomParams.labor_formwork_pct ?? ""}
+                    onChange={(e) =>
+                      setBomParams({
+                        ...bomParams,
+                        region_preset: "custom",
+                        labor_formwork_pct: e.target.value === "" ? null : Number(e.target.value),
+                      })
                     }
                   />
                 </label>
@@ -582,6 +773,70 @@ export default function ReportBuilder({ project, onClose, onUpdated }) {
                 <button disabled={busy || !hasPrereqs} onClick={() => handleGenerate()}>
                   Recalculate BOM
                 </button>
+              </div>
+
+              {/* Revision Snapshot & BOM Delta Comparison Bar */}
+              <div className="sizing-bulk-bar rev-compare-bar">
+                <div className="loads-presets-row">
+                  <span className="loads-bar-label">Compare Against Revision:</span>
+                  <select
+                    aria-label="Compare Against Revision"
+                    className="loads-search"
+                    value={compareRevId}
+                    onChange={(e) => handleCompareRevision(e.target.value)}
+                  >
+                    <option value="">— Select baseline revision —</option>
+                    {(fullProject?.revisions || []).map((r) => (
+                      <option key={r.revision_id} value={r.revision_id}>
+                        {r.revision_id} · {r.label}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    className="secondary"
+                    disabled={busy || !hasPrereqs}
+                    onClick={handleQuickSaveRevision}
+                  >
+                    + Save Snapshot (Rev. {(fullProject?.revisions || []).length})
+                  </button>
+                </div>
+                {revDelta && (
+                  <div className="rev-delta-strip">
+                    <div>
+                      <small>Concrete Delta vs {revDelta.base_rev}</small>
+                      <strong className={revDelta.concrete_delta_m3 > 0 ? "delta-up" : "delta-down"}>
+                        {revDelta.concrete_delta_m3 >= 0 ? "+" : ""}
+                        {fmtNum(revDelta.concrete_delta_m3, 2)} m³ ({revDelta.concrete_delta_pct >= 0 ? "+" : ""}
+                        {fmtNum(revDelta.concrete_delta_pct, 1)}%)
+                      </strong>
+                    </div>
+                    <div>
+                      <small>Rebar Delta vs {revDelta.base_rev}</small>
+                      <strong className={revDelta.rebar_delta_kg > 0 ? "delta-up" : "delta-down"}>
+                        {revDelta.rebar_delta_kg >= 0 ? "+" : ""}
+                        {fmtNum(revDelta.rebar_delta_kg, 0)} kg ({revDelta.rebar_delta_pct >= 0 ? "+" : ""}
+                        {fmtNum(revDelta.rebar_delta_pct, 1)}%)
+                      </strong>
+                    </div>
+                    <div>
+                      <small>Cost Delta vs {revDelta.base_rev}</small>
+                      <strong className={revDelta.cost_delta_php > 0 ? "delta-up" : "delta-down"}>
+                        {revDelta.cost_delta_php >= 0 ? "+" : ""}
+                        {fmtPhp(revDelta.cost_delta_php)} ({revDelta.cost_delta_pct >= 0 ? "+" : ""}
+                        {fmtNum(revDelta.cost_delta_pct, 1)}%)
+                      </strong>
+                    </div>
+                    <div>
+                      <small>Members / Footings</small>
+                      <strong>
+                        {revDelta.member_count_delta >= 0 ? "+" : ""}
+                        {revDelta.member_count_delta} / {revDelta.footing_count_delta >= 0 ? "+" : ""}
+                        {revDelta.footing_count_delta}
+                      </strong>
+                    </div>
+                  </div>
+                )}
               </div>
 
               {!bom ? (
