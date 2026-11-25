@@ -35,11 +35,14 @@ const STATIC_SCHED_DETAIL_ITEMS = [
   { key: "schedule_footings", label: "Footing Schedule", group: "Schedules & Details" },
   { key: "schedule_columns", label: "Column Schedule", group: "Schedules & Details" },
   { key: "schedule_beams", label: "Beam Schedule", group: "Schedules & Details" },
+  { key: "schedule_slabs_stairs", label: "Slabs & Stairs Schedule", group: "Schedules & Details" },
   { key: "detail_footing_section", label: "Footing Detail", group: "Schedules & Details" },
   { key: "detail_column_section", label: "Column Section", group: "Schedules & Details" },
   { key: "detail_beam_section", label: "Beam Section", group: "Schedules & Details" },
   { key: "detail_beam_longitudinal", label: "Beam Longitudinal (SMRF)", group: "Schedules & Details" },
   { key: "detail_column_longitudinal", label: "Column Longitudinal (SMRF)", group: "Schedules & Details" },
+  { key: "detail_retaining_wall", label: "Retaining Wall Section", group: "Schedules & Details" },
+  { key: "detail_roof_truss", label: "Steel Roof Truss Detail", group: "Schedules & Details" },
 ];
 
 function renumberSheets(sheetList, prefix) {

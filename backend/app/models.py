@@ -532,6 +532,131 @@ class SmrfJointCheckResult(BaseModel):
     joint_shear_status: Literal["PASS", "FAIL"]
 
 
+class RetainingWallInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    wall_id: str = "RW-1"
+    label: str = "Perimeter Basement Retaining Wall"
+    retained_height_m: float = Field(default=2.8, gt=0.3, le=12.0)
+    total_length_m: float = Field(default=12.0, gt=0.5, le=500.0)
+    stem_thickness_mm: float = Field(default=250.0, ge=150.0, le=1200.0)
+    base_width_m: float = Field(default=1.8, gt=0.5, le=10.0)
+    toe_width_m: float = Field(default=0.45, ge=0.0, le=5.0)
+    base_thickness_mm: float = Field(default=300.0, ge=200.0, le=1200.0)
+    soil_unit_weight_kn_m3: float = Field(default=18.0, gt=10.0, le=26.0)
+    friction_angle_deg: float = Field(default=30.0, ge=15.0, le=45.0)
+    surcharge_kpa: float = Field(default=10.0, ge=0.0, le=100.0)
+    water_table_height_m: float = Field(default=0.0, ge=0.0, le=12.0)
+    allowable_bearing_kpa: float = Field(default=150.0, gt=20.0, le=1000.0)
+    is_restrained_top: bool = True
+
+
+class RetainingWallDesign(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    wall_id: str
+    label: str = ""
+    retained_height_m: float
+    total_length_m: float
+    ka: float
+    k0: float
+    k_ae_seismic: float
+    max_lateral_pressure_kpa: float
+    stem_mu_knm_per_m: float
+    stem_vu_kn_per_m: float
+    fs_overturning: float
+    fs_sliding: float
+    max_toe_bearing_kpa: float
+    stem_vertical_bars: str
+    stem_horizontal_bars: str
+    base_heel_toe_bars: str
+    status: Literal["PASS", "FAIL"]
+
+
+class SlabDesignSchedule(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    panel_id: str
+    floor_level: str
+    lx_m: float
+    ly_m: float
+    thickness_mm: float
+    short_span_cont_neg: str
+    short_span_disc_neg: str
+    short_span_pos: str
+    long_span_neg: str
+    long_span_pos: str
+    status: Literal["PASS", "FAIL"]
+
+
+class StairDesignInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    stair_id: str = "ST-1"
+    flight_span_m: float = Field(default=3.6, gt=1.0, le=10.0)
+    riser_mm: float = Field(default=175.0, ge=100.0, le=220.0)
+    tread_mm: float = Field(default=275.0, ge=200.0, le=400.0)
+    width_m: float = Field(default=1.2, gt=0.6, le=5.0)
+    waist_thickness_mm: float = Field(default=150.0, ge=100.0, le=350.0)
+    live_load_kpa: float = Field(default=4.8, ge=1.5, le=12.0)
+
+
+class StairDesignResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    stair_id: str
+    flight_span_m: float
+    riser_mm: float
+    tread_mm: float
+    width_m: float
+    waist_thickness_mm: float
+    live_load_kpa: float
+    mu_knm_per_m: float
+    main_bars: str
+    dist_bars: str
+    deflection_status: Literal["PASS", "FAIL"]
+
+
+class StrapFootingDesign(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    strap_id: str
+    exterior_node_id: int = Field(ge=1)
+    interior_node_id: int = Field(ge=1)
+    eccentricity_m: float
+    ext_pad_b_m: float
+    ext_pad_l_m: float
+    int_pad_b_m: float
+    int_pad_l_m: float
+    strap_b_mm: float
+    strap_h_mm: float
+    strap_top_bars: str
+    strap_bot_bars: str
+    strap_stirrups: str
+    status: Literal["PASS", "FAIL"]
+
+
+class RoofTrussInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    truss_id: str = "TR-1"
+    span_m: float = Field(default=8.0, gt=2.0, le=40.0)
+    truss_spacing_m: float = Field(default=3.0, gt=0.5, le=10.0)
+    pitch_deg: float = Field(default=18.0, ge=5.0, le=45.0)
+    truss_type: Literal["Pratt", "Howe", "Fink"] = "Pratt"
+    steel_fy_mpa: float = Field(default=248.0, ge=200.0, le=500.0)
+
+
+class RoofTrussDesign(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    truss_id: str
+    span_m: float
+    truss_spacing_m: float
+    pitch_deg: float
+    truss_type: Literal["Pratt", "Howe", "Fink"]
+    steel_fy_mpa: float
+    top_chord_section: str
+    bottom_chord_section: str
+    web_section: str
+    max_chord_dcr: float
+    max_web_dcr: float
+    estimated_steel_kg: float
+    status: Literal["PASS", "FAIL"]
+
+
 class AnalysisDesignState(BaseModel):
     model_config = ConfigDict(extra="forbid")
     generated_at: str | None = None
@@ -544,6 +669,14 @@ class AnalysisDesignState(BaseModel):
     column_designs: list[ColumnDesignResult] = Field(default_factory=list)
     footing_designs: list[FootingDesignResult] = Field(default_factory=list)
     smrf_joint_checks: list[SmrfJointCheckResult] = Field(default_factory=list)
+    retaining_wall_inputs: list[RetainingWallInput] = Field(default_factory=list)
+    retaining_wall_designs: list[RetainingWallDesign] = Field(default_factory=list)
+    slab_designs: list[SlabDesignSchedule] = Field(default_factory=list)
+    stair_inputs: list[StairDesignInput] = Field(default_factory=list)
+    stair_designs: list[StairDesignResult] = Field(default_factory=list)
+    strap_footing_designs: list[StrapFootingDesign] = Field(default_factory=list)
+    roof_truss_inputs: list[RoofTrussInput] = Field(default_factory=list)
+    roof_truss_designs: list[RoofTrussDesign] = Field(default_factory=list)
     validation_issues: list[DesignCheckIssue] = Field(default_factory=list)
     engineer_approved: bool = False
 
@@ -577,6 +710,7 @@ class BomCostParameters(BaseModel):
     rate_tie_wire_php_kg: float = Field(default=95.0, ge=0.0)
     rate_formwork_php_m2: float = Field(default=650.0, ge=0.0)
     rate_chb_wall_php_m2: float = Field(default=950.0, ge=0.0)
+    rate_structural_steel_php_kg: float = Field(default=95.0, ge=0.0)
     labor_pct_of_materials: float = Field(default=35.0, ge=0.0, le=200.0)
     labor_concrete_pct: float | None = Field(default=None, ge=0.0, le=200.0)
     labor_rebar_pct: float | None = Field(default=None, ge=0.0, le=200.0)
@@ -635,6 +769,7 @@ class BomSummary(BaseModel):
     total_tie_wire_kg: float = 0.0
     total_formwork_m2: float = 0.0
     total_chb_area_m2: float = 0.0
+    total_structural_steel_kg: float = 0.0
     total_material_cost_php: float = 0.0
     total_labor_cost_php: float = 0.0
     grand_total_cost_php: float = 0.0

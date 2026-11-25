@@ -292,6 +292,67 @@ def compute_bom_summary(
         ),
     ]
 
+    # Optional Pass C-2 secondary RC elements (only appended when configured so legacy BOM stays identical)
+    if ad.retaining_wall_inputs:
+        rw_vol = 0.0
+        rw_fw = 0.0
+        for rw in ad.retaining_wall_inputs:
+            stem_v = (rw.stem_thickness_mm / 1000.0) * rw.retained_height_m * rw.total_length_m
+            base_v = rw.base_width_m * (rw.base_thickness_mm / 1000.0) * rw.total_length_m
+            rw_vol += stem_v + base_v
+            rw_fw += (2.0 * rw.retained_height_m + 2.0 * (rw.base_thickness_mm / 1000.0)) * rw.total_length_m
+        concrete_rows.append(
+            ConcreteQuantityRow(
+                element_group="Retaining Walls",
+                member_count=len(ad.retaining_wall_inputs),
+                net_volume_m3=round(rw_vol, 3),
+                gross_volume_m3=round(rw_vol * waste_conc_mult, 3),
+                formwork_area_m2=round(rw_fw, 2),
+            )
+        )
+
+    if ad.stair_inputs:
+        st_vol = 0.0
+        st_fw = 0.0
+        for st in ad.stair_inputs:
+            t_m = st.waist_thickness_mm / 1000.0
+            n_steps = max(1, int(round((st.flight_span_m * 1000.0) / max(st.tread_mm, 150.0))))
+            step_vol = n_steps * 0.5 * (st.riser_mm / 1000.0) * (st.tread_mm / 1000.0) * st.width_m
+            slope_len = math.hypot(st.flight_span_m, n_steps * (st.riser_mm / 1000.0))
+            st_vol += slope_len * t_m * st.width_m + step_vol
+            st_fw += slope_len * st.width_m + n_steps * (st.riser_mm / 1000.0) * st.width_m
+        concrete_rows.append(
+            ConcreteQuantityRow(
+                element_group="RC Stairs",
+                member_count=len(ad.stair_inputs),
+                net_volume_m3=round(st_vol, 3),
+                gross_volume_m3=round(st_vol * waste_conc_mult, 3),
+                formwork_area_m2=round(st_fw, 2),
+            )
+        )
+
+    if ad.strap_footing_designs:
+        node_by_id = {n.node_id: n for n in sm.nodes}
+        sf_vol = 0.0
+        sf_fw = 0.0
+        for sf in ad.strap_footing_designs:
+            n1 = node_by_id.get(sf.exterior_node_id)
+            n2 = node_by_id.get(sf.interior_node_id)
+            span_m = math.hypot(n2.x_m - n1.x_m, n2.z_m - n1.z_m) if (n1 and n2) else 4.0
+            sb = sf.strap_b_mm / 1000.0
+            sh = sf.strap_h_mm / 1000.0
+            sf_vol += sb * sh * span_m
+            sf_fw += 2.0 * sh * span_m
+        concrete_rows.append(
+            ConcreteQuantityRow(
+                element_group="Strap Beams",
+                member_count=len(ad.strap_footing_designs),
+                net_volume_m3=round(sf_vol, 3),
+                gross_volume_m3=round(sf_vol * waste_conc_mult, 3),
+                formwork_area_m2=round(sf_fw, 2),
+            )
+        )
+
     total_conc_net = round(sum(r.net_volume_m3 for r in concrete_rows), 3)
     total_conc_gross = round(sum(r.gross_volume_m3 for r in concrete_rows), 3)
     total_formwork = round(sum(r.formwork_area_m2 for r in concrete_rows), 2)
@@ -384,6 +445,41 @@ def compute_bom_summary(
         # 2 orthogonal directions * 1.5 layers (full bottom mat + 50% top support strips)
         bars_per_m_both_ways = 2.0 * 1.5 * (1000.0 / s_mm)
         _add_bar(dia_slab, area_sqm * bars_per_m_both_ways)
+
+    # 2e. Optional Pass C-2 Secondary RC Elements Rebar (only when configured)
+    if ad.retaining_wall_designs:
+        rw_in_by_id = {x.wall_id: x for x in ad.retaining_wall_inputs}
+        for rw in ad.retaining_wall_designs:
+            rwi = rw_in_by_id.get(rw.wall_id)
+            b_base_m = rwi.base_width_m if rwi else 1.8
+            dv, sv = parse_spacing_callout(rw.stem_vertical_bars, 12, 150.0)
+            dh, sh = parse_spacing_callout(rw.stem_horizontal_bars, 12, 200.0)
+            db, sb = parse_spacing_callout(rw.base_heel_toe_bars, 12, 175.0)
+            # 2 faces of stem vertical + horizontal, 2 layers of base slab
+            _add_bar(dv, 2.0 * (rw.total_length_m / (sv / 1000.0)) * (rw.retained_height_m + 0.5))
+            _add_bar(dh, 2.0 * (rw.retained_height_m / (sh / 1000.0)) * rw.total_length_m)
+            _add_bar(db, 2.0 * (rw.total_length_m / (sb / 1000.0)) * b_base_m)
+
+    if ad.stair_designs:
+        for st in ad.stair_designs:
+            dm, sm_s = parse_spacing_callout(st.main_bars, 12, 150.0)
+            dd, sd_s = parse_spacing_callout(st.dist_bars, 10, 250.0)
+            _add_bar(dm, (st.width_m / (sm_s / 1000.0)) * (st.flight_span_m * 1.25))
+            _add_bar(dd, (st.flight_span_m * 1.15 / (sd_s / 1000.0)) * st.width_m)
+
+    if ad.strap_footing_designs:
+        node_by_id = {n.node_id: n for n in sm.nodes}
+        for sf in ad.strap_footing_designs:
+            n1 = node_by_id.get(sf.exterior_node_id)
+            n2 = node_by_id.get(sf.interior_node_id)
+            span_m = math.hypot(n2.x_m - n1.x_m, n2.z_m - n1.z_m) if (n1 and n2) else 4.0
+            nt, dt = parse_bar_callout(sf.strap_top_bars, 4, 20)
+            nb, db_s = parse_bar_callout(sf.strap_bot_bars, 3, 20)
+            ds_s, ss_s = parse_spacing_callout(sf.strap_stirrups, 10, 150.0)
+            _add_bar(dt, nt * (span_m + 0.8))
+            _add_bar(db_s, nb * (span_m + 0.8))
+            perim_m = 2.0 * ((sf.strap_b_mm + sf.strap_h_mm) / 1000.0)
+            _add_bar(ds_s, (span_m / (ss_s / 1000.0)) * perim_m)
 
     rebar_rows: list[RebarQuantityRow] = []
     for dia in sorted(rebar_net_m.keys()):
@@ -487,6 +583,20 @@ def compute_bom_summary(
             )
         )
 
+    # Optional structural steel from configured roof trusses
+    total_steel_kg = round(sum(t.estimated_steel_kg for t in ad.roof_truss_designs), 2)
+    if total_steel_kg > 0.0:
+        raw_items.append(
+            (
+                f"{len(raw_items) + 1:02d}",
+                f"Structural Steel Roof Trusses ({len(ad.roof_truss_designs)} truss type(s), incl. gussets)",
+                total_steel_kg,
+                "kg",
+                bom_params.rate_structural_steel_php_kg,
+                base_labor_pct,
+            )
+        )
+
     cost_lines: list[BomCostLine] = []
     for item_no, desc, qty, unit, unit_rate, item_labor_pct in raw_items:
         mat_cost = round(qty * unit_rate, 2)
@@ -517,6 +627,7 @@ def compute_bom_summary(
         total_tie_wire_kg=total_tie_wire_kg,
         total_formwork_m2=total_formwork,
         total_chb_area_m2=total_chb_area,
+        total_structural_steel_kg=total_steel_kg,
         total_material_cost_php=total_mat,
         total_labor_cost_php=total_lab,
         grand_total_cost_php=grand_total,

@@ -680,6 +680,124 @@ def build_calculation_report_docx(project: ProjectState) -> bytes:
                 font_size=7.3,
             )
 
+        if (
+            ad.retaining_wall_designs
+            or ad.slab_designs
+            or ad.stair_designs
+            or ad.strap_footing_designs
+            or ad.roof_truss_designs
+        ):
+            _add_subheading(doc, "5.5 Secondary Elements & Retaining Walls")
+            if ad.retaining_wall_designs:
+                rw_rows = [
+                    [
+                        r.wall_id,
+                        f"{r.retained_height_m:.2f}m x {r.total_length_m:.1f}m",
+                        f"{r.ka:.2f} / {r.k_ae_seismic:.2f}",
+                        f"{r.fs_overturning:.2f} / {r.fs_sliding:.2f}",
+                        f"{r.max_toe_bearing_kpa:.1f}",
+                        r.stem_vertical_bars,
+                        r.base_heel_toe_bars,
+                        r.status,
+                    ]
+                    for r in ad.retaining_wall_designs
+                ]
+                _add_styled_table(
+                    doc,
+                    ["Wall", "H x L", "Ka / Kae", "FS OT/Sl", "q_toe (kPa)", "Stem Vert", "Base Bars", "Status"],
+                    rw_rows,
+                    right_align_cols={2, 3, 4},
+                    status_col=7,
+                    font_size=7.2,
+                )
+            if ad.slab_designs:
+                sl_rows = [
+                    [
+                        s.panel_id,
+                        s.floor_level,
+                        f"{s.lx_m:.2f} x {s.ly_m:.2f}",
+                        f"{s.thickness_mm:.0f}",
+                        s.short_span_cont_neg,
+                        s.short_span_pos,
+                        s.long_span_pos,
+                        s.status,
+                    ]
+                    for s in ad.slab_designs[:24]
+                ]
+                _add_styled_table(
+                    doc,
+                    ["Panel", "Floor", "Lx x Ly (m)", "t (mm)", "Short Cont (-)", "Short Pos (+)", "Long Pos (+)", "Status"],
+                    sl_rows,
+                    right_align_cols={2, 3},
+                    status_col=7,
+                    font_size=7.1,
+                )
+            if ad.stair_designs:
+                st_rows = [
+                    [
+                        s.stair_id,
+                        f"{s.flight_span_m:.2f} m",
+                        f"{s.riser_mm:.0f} / {s.tread_mm:.0f}",
+                        f"{s.waist_thickness_mm:.0f} mm",
+                        f"{s.mu_knm_per_m:.1f}",
+                        s.main_bars,
+                        s.dist_bars,
+                        s.deflection_status,
+                    ]
+                    for s in ad.stair_designs
+                ]
+                _add_styled_table(
+                    doc,
+                    ["Stair", "Span", "R/T (mm)", "Waist", "Mu (kNm/m)", "Main Bars", "Dist Bars", "Defl"],
+                    st_rows,
+                    right_align_cols={1, 4},
+                    status_col=7,
+                    font_size=7.2,
+                )
+            if ad.roof_truss_designs:
+                tr_rows = [
+                    [
+                        t.truss_id,
+                        f"{t.truss_type} ({t.span_m:.1f}m @ {t.pitch_deg:.0f}°)",
+                        t.top_chord_section,
+                        t.bottom_chord_section,
+                        t.web_section,
+                        f"{t.max_chord_dcr:.2f} / {t.max_web_dcr:.2f}",
+                        f"{t.estimated_steel_kg:.1f} kg",
+                        t.status,
+                    ]
+                    for t in ad.roof_truss_designs
+                ]
+                _add_styled_table(
+                    doc,
+                    ["Truss", "Type / Span", "Top Chord", "Bot Chord", "Webs", "DCR (C/W)", "Est. Steel", "Status"],
+                    tr_rows,
+                    right_align_cols={5, 6},
+                    status_col=7,
+                    font_size=7.2,
+                )
+            if ad.strap_footing_designs:
+                sf_rows = [
+                    [
+                        s.strap_id,
+                        f"N{s.exterior_node_id} -> N{s.interior_node_id}",
+                        f"{s.ext_pad_b_m:.2f}x{s.ext_pad_l_m:.2f}",
+                        f"{s.int_pad_b_m:.2f}x{s.int_pad_l_m:.2f}",
+                        f"{s.strap_b_mm:.0f}x{s.strap_h_mm:.0f}",
+                        s.strap_top_bars,
+                        s.strap_stirrups,
+                        s.status,
+                    ]
+                    for s in ad.strap_footing_designs
+                ]
+                _add_styled_table(
+                    doc,
+                    ["Strap", "Ext -> Int", "Ext Pad (m)", "Int Pad (m)", "Beam (mm)", "Top Bars", "Stirrups", "Status"],
+                    sf_rows,
+                    status_col=7,
+                    font_size=7.2,
+                )
+
     # =========================================================================
     # SECTION 6: BILL OF MATERIALS & COST ESTIMATE
     # =========================================================================

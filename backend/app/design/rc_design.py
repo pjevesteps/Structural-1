@@ -16,6 +16,8 @@ from ..models import (
     SupportReactionEnvelope,
 )
 from .anl_parser import parse_staad_anl
+from .retaining_wall import design_retaining_wall
+from .secondary_elements import design_roof_truss, design_slabs, design_stair
 from .smrf_joints import evaluate_smrf_joints
 from .solver import AnalysisResults, BeamForceEnvelope, ColumnForceEnvelope, solve_frame_dsm
 
@@ -797,6 +799,15 @@ def _build_state_from_results(
     columns = design_columns(project, results, params)
     footings = design_footings(project, results.support_reactions, params)
     smrf_joints = evaluate_smrf_joints(project, beams, columns, params)
+    slabs = design_slabs(project, params)
+    prev_ad = project.analysis_design
+    rw_inputs = list(prev_ad.retaining_wall_inputs)
+    rw_designs = [design_retaining_wall(project, rw) for rw in rw_inputs]
+    st_inputs = list(prev_ad.stair_inputs)
+    st_designs = [design_stair(project, st) for st in st_inputs]
+    tr_inputs = list(prev_ad.roof_truss_inputs)
+    tr_designs = [design_roof_truss(project, tr) for tr in tr_inputs]
+    strap_designs = list(prev_ad.strap_footing_designs)
     issues = _collect_design_issues(
         drifts, results.support_reactions, beams, columns, footings, smrf_joints
     )
@@ -812,6 +823,14 @@ def _build_state_from_results(
         column_designs=columns,
         footing_designs=footings,
         smrf_joint_checks=smrf_joints,
+        retaining_wall_inputs=rw_inputs,
+        retaining_wall_designs=rw_designs,
+        slab_designs=slabs,
+        stair_inputs=st_inputs,
+        stair_designs=st_designs,
+        strap_footing_designs=strap_designs,
+        roof_truss_inputs=tr_inputs,
+        roof_truss_designs=tr_designs,
         validation_issues=issues,
         engineer_approved=False,
     )

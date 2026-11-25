@@ -52,7 +52,47 @@ export default function DesignReview({ project, onClose, onUpdated }) {
   const [autoLog, setAutoLog] = useState(null);
   const [enforceScwb, setEnforceScwb] = useState(false);
 
-  // Active tab: util3d | drift | beams | columns | footings | smrf
+  // Pass C-2 Secondary Element Forms
+  const [rwForm, setRwForm] = useState({
+    wall_id: "RW-1",
+    label: "Perimeter Basement Retaining Wall",
+    retained_height_m: 2.8,
+    total_length_m: 12.0,
+    stem_thickness_mm: 250,
+    base_width_m: 1.8,
+    toe_width_m: 0.45,
+    base_thickness_mm: 300,
+    soil_unit_weight_kn_m3: 18.0,
+    friction_angle_deg: 30.0,
+    surcharge_kpa: 10.0,
+    water_table_height_m: 0.0,
+    allowable_bearing_kpa: 150.0,
+    is_restrained_top: true,
+  });
+  const [stairForm, setStairForm] = useState({
+    stair_id: "ST-1",
+    flight_span_m: 3.6,
+    riser_mm: 175,
+    tread_mm: 275,
+    width_m: 1.2,
+    waist_thickness_mm: 150,
+    live_load_kpa: 4.8,
+  });
+  const [trussForm, setTrussForm] = useState({
+    truss_id: "TR-1",
+    span_m: 8.0,
+    truss_spacing_m: 3.0,
+    pitch_deg: 18.0,
+    truss_type: "Pratt",
+    steel_fy_mpa: 248.0,
+  });
+  const [strapForm, setStrapForm] = useState({
+    strap_id: "SF-1",
+    exterior_node_id: 1,
+    interior_node_id: 2,
+  });
+
+  // Active tab: util3d | drift | beams | columns | footings | smrf | slabs | retwalls | trusses
   const [activeTab, setActiveTab] = useState("util3d");
 
   // Design parameters state
@@ -482,6 +522,44 @@ export default function DesignReview({ project, onClose, onUpdated }) {
     }
   }
 
+  async function postSecondary(endpoint, body, msg) {
+    setBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      const updated = await apiJson(`/api/projects/${pid}/design/${endpoint}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      setFullProject((prev) => (prev ? { ...prev, analysis_design: updated } : prev));
+      setNotice(msg);
+      if (onUpdated) await onUpdated();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function deleteSecondary(endpoint, msg) {
+    setBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      const updated = await apiJson(`/api/projects/${pid}/design/${endpoint}`, {
+        method: "DELETE",
+      });
+      setFullProject((prev) => (prev ? { ...prev, analysis_design: updated } : prev));
+      setNotice(msg);
+      if (onUpdated) await onUpdated();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const selectedBeam = selectedMemberId != null ? beamByMid[selectedMemberId] : null;
   const selectedCol = selectedMemberId != null ? colByMid[selectedMemberId] : null;
 
@@ -696,7 +774,7 @@ export default function DesignReview({ project, onClose, onUpdated }) {
       {/* Main Split Workspace */}
       <div className="geom-workspace">
         <div className="sizing-main-col">
-          {/* 6 Workspace Tabs */}
+          {/* 9 Workspace Tabs */}
           <div className="geom-floor-tabs loads-tabs">
             {[
               ["util3d", "1. 3D Utilization View"],
@@ -705,6 +783,9 @@ export default function DesignReview({ project, onClose, onUpdated }) {
               ["columns", `4. Column Schedule (${kpis.colTotal})`],
               ["footings", `5. Footing Schedule (${kpis.ftgTotal})`],
               ["smrf", `6. SMRF Joints (SCWB) (${kpis.jointTotal})`],
+              ["slabs", `7. Slabs & Stairs (${(ad?.slab_designs || []).length}/${(ad?.stair_designs || []).length})`],
+              ["retwalls", `8. Retaining Walls (${(ad?.retaining_wall_designs || []).length})`],
+              ["trusses", `9. Roof Trusses & Straps (${(ad?.roof_truss_designs || []).length}/${(ad?.strap_footing_designs || []).length})`],
             ].map(([key, label]) => (
               <button
                 key={key}
@@ -1377,6 +1458,411 @@ export default function DesignReview({ project, onClose, onUpdated }) {
                     )}
                   </tbody>
                 </table>
+              </div>
+            </div>
+          )}
+
+          {/* TAB 7: SLABS & STAIRS */}
+          {activeTab === "slabs" && (
+            <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+              <div className="geom-panel">
+                <div className="geom-panel-head">
+                  <div>
+                    <strong>2-Way / 1-Way RC Slab Schedule (ACI 318 Coefficient Method)</strong>
+                    <small>Auto-generated for all active slab panels on every Module 06 run.</small>
+                  </div>
+                </div>
+                <div className="sizing-table-wrap">
+                  <table className="sizing-table">
+                    <thead>
+                      <tr>
+                        <th>Panel</th>
+                        <th>Floor</th>
+                        <th>Lx × Ly (m)</th>
+                        <th>t (mm)</th>
+                        <th>Short Cont (-)</th>
+                        <th>Short Disc (-)</th>
+                        <th>Short Pos (+)</th>
+                        <th>Long Neg (-)</th>
+                        <th>Long Pos (+)</th>
+                        <th>Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(ad?.slab_designs || []).map((s) => (
+                        <tr key={`${s.floor_level}-${s.panel_id}`}>
+                          <td><b>{s.panel_id}</b></td>
+                          <td>{s.floor_level}</td>
+                          <td>{s.lx_m.toFixed(2)} × {s.ly_m.toFixed(2)}</td>
+                          <td>{s.thickness_mm.toFixed(0)}</td>
+                          <td>{s.short_span_cont_neg}</td>
+                          <td>{s.short_span_disc_neg}</td>
+                          <td><b>{s.short_span_pos}</b></td>
+                          <td>{s.long_span_neg}</td>
+                          <td>{s.long_span_pos}</td>
+                          <td>
+                            <span className={`design-status-pill ${s.status === "PASS" ? "pass" : "fail"}`}>
+                              {s.status}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                      {!(ad?.slab_designs || []).length && (
+                        <tr>
+                          <td colSpan={10} className="loads-empty">
+                            Run Analysis &amp; RC Design to auto-generate slab reinforcement schedules.
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div className="geom-panel">
+                <div className="geom-panel-head">
+                  <div>
+                    <strong>Waist-Slab RC Stair Design (NSCP 2015)</strong>
+                    <small>Add or update stair flights to design main/distribution rebar &amp; check L/20 deflection.</small>
+                  </div>
+                </div>
+                <div className="geom-toolbar design-param-bar" style={{ margin: "10px 12px" }}>
+                  <label className="design-param-field">
+                    <span>ID</span>
+                    <input value={stairForm.stair_id} onChange={(e) => setStairForm({ ...stairForm, stair_id: e.target.value })} />
+                  </label>
+                  <label className="design-param-field">
+                    <span>Span (m)</span>
+                    <input type="number" step="0.1" value={stairForm.flight_span_m} onChange={(e) => setStairForm({ ...stairForm, flight_span_m: parseFloat(e.target.value) || 3.6 })} />
+                  </label>
+                  <label className="design-param-field">
+                    <span>Riser (mm)</span>
+                    <input type="number" value={stairForm.riser_mm} onChange={(e) => setStairForm({ ...stairForm, riser_mm: parseFloat(e.target.value) || 175 })} />
+                  </label>
+                  <label className="design-param-field">
+                    <span>Tread (mm)</span>
+                    <input type="number" value={stairForm.tread_mm} onChange={(e) => setStairForm({ ...stairForm, tread_mm: parseFloat(e.target.value) || 275 })} />
+                  </label>
+                  <label className="design-param-field">
+                    <span>Waist (mm)</span>
+                    <input type="number" step="25" value={stairForm.waist_thickness_mm} onChange={(e) => setStairForm({ ...stairForm, waist_thickness_mm: parseFloat(e.target.value) || 150 })} />
+                  </label>
+                  <label className="design-param-field">
+                    <span>LL (kPa)</span>
+                    <input type="number" step="0.2" value={stairForm.live_load_kpa} onChange={(e) => setStairForm({ ...stairForm, live_load_kpa: parseFloat(e.target.value) || 4.8 })} />
+                  </label>
+                  <button
+                    disabled={busy}
+                    onClick={() => postSecondary("stairs", stairForm, `Designed RC stair ${stairForm.stair_id}.`)}
+                  >
+                    Design Stair
+                  </button>
+                </div>
+                <div className="sizing-table-wrap">
+                  <table className="sizing-table">
+                    <thead>
+                      <tr>
+                        <th>ID</th>
+                        <th>Span (m)</th>
+                        <th>Riser/Tread</th>
+                        <th>Waist (mm)</th>
+                        <th>Mu (kN·m/m)</th>
+                        <th>Main Bars</th>
+                        <th>Dist Bars</th>
+                        <th>Deflection</th>
+                        <th>Action</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(ad?.stair_designs || []).map((st) => (
+                        <tr key={st.stair_id}>
+                          <td><b>{st.stair_id}</b></td>
+                          <td>{st.flight_span_m.toFixed(2)}</td>
+                          <td>{st.riser_mm.toFixed(0)} / {st.tread_mm.toFixed(0)}</td>
+                          <td>{st.waist_thickness_mm.toFixed(0)}</td>
+                          <td>{st.mu_knm_per_m.toFixed(2)}</td>
+                          <td><b>{st.main_bars}</b></td>
+                          <td>{st.dist_bars}</td>
+                          <td>
+                            <span className={`design-status-pill ${st.deflection_status === "PASS" ? "pass" : "fail"}`}>
+                              {st.deflection_status}
+                            </span>
+                          </td>
+                          <td>
+                            <button
+                              className="secondary mini"
+                              disabled={busy}
+                              onClick={() => deleteSecondary(`stairs/${encodeURIComponent(st.stair_id)}`, `Removed stair ${st.stair_id}.`)}
+                            >
+                              Delete
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* TAB 8: RETAINING WALLS */}
+          {activeTab === "retwalls" && (
+            <div className="geom-panel">
+              <div className="geom-panel-head">
+                <div>
+                  <strong>NSCP Sec. 209 Basement / Cantilever Retaining Walls</strong>
+                  <small>Rankine Ka / Jaky K0 + Mononobe-Okabe Kae seismic thrust, stability &amp; RC stem/base rebar.</small>
+                </div>
+              </div>
+              <div className="geom-toolbar design-param-bar" style={{ margin: "10px 12px" }}>
+                <label className="design-param-field">
+                  <span>Wall ID</span>
+                  <input value={rwForm.wall_id} onChange={(e) => setRwForm({ ...rwForm, wall_id: e.target.value })} />
+                </label>
+                <label className="design-param-field">
+                  <span>Height H (m)</span>
+                  <input type="number" step="0.1" value={rwForm.retained_height_m} onChange={(e) => setRwForm({ ...rwForm, retained_height_m: parseFloat(e.target.value) || 2.8 })} />
+                </label>
+                <label className="design-param-field">
+                  <span>Length (m)</span>
+                  <input type="number" step="0.5" value={rwForm.total_length_m} onChange={(e) => setRwForm({ ...rwForm, total_length_m: parseFloat(e.target.value) || 12.0 })} />
+                </label>
+                <label className="design-param-field">
+                  <span>Stem (mm)</span>
+                  <input type="number" step="25" value={rwForm.stem_thickness_mm} onChange={(e) => setRwForm({ ...rwForm, stem_thickness_mm: parseFloat(e.target.value) || 250 })} />
+                </label>
+                <label className="design-param-field">
+                  <span>Base B (m)</span>
+                  <input type="number" step="0.1" value={rwForm.base_width_m} onChange={(e) => setRwForm({ ...rwForm, base_width_m: parseFloat(e.target.value) || 1.8 })} />
+                </label>
+                <label className="design-param-field">
+                  <span>Phi (deg)</span>
+                  <input type="number" step="1" value={rwForm.friction_angle_deg} onChange={(e) => setRwForm({ ...rwForm, friction_angle_deg: parseFloat(e.target.value) || 30 })} />
+                </label>
+                <label className="design-param-field">
+                  <span>Surcharge (kPa)</span>
+                  <input type="number" step="1" value={rwForm.surcharge_kpa} onChange={(e) => setRwForm({ ...rwForm, surcharge_kpa: parseFloat(e.target.value) || 10 })} />
+                </label>
+                <label className="pdf-check">
+                  <input type="checkbox" checked={rwForm.is_restrained_top} onChange={(e) => setRwForm({ ...rwForm, is_restrained_top: e.target.checked })} />
+                  Restrained Top
+                </label>
+                <button
+                  disabled={busy}
+                  onClick={() => postSecondary("retaining-walls", rwForm, `Designed retaining wall ${rwForm.wall_id}.`)}
+                >
+                  Design Wall
+                </button>
+              </div>
+              <div className="sizing-table-wrap">
+                <table className="sizing-table">
+                  <thead>
+                    <tr>
+                      <th>Wall</th>
+                      <th>H × L (m)</th>
+                      <th>Ka / K0 / Kae</th>
+                      <th>Stem Mu (kN·m/m)</th>
+                      <th>FS OT / Slide</th>
+                      <th>q_toe (kPa)</th>
+                      <th>Stem Vert</th>
+                      <th>Base Bars</th>
+                      <th>Status</th>
+                      <th>Action</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(ad?.retaining_wall_designs || []).map((r) => (
+                      <tr key={r.wall_id}>
+                        <td><b>{r.wall_id}</b></td>
+                        <td>{r.retained_height_m.toFixed(2)} × {r.total_length_m.toFixed(1)}</td>
+                        <td>{r.ka.toFixed(2)} / {r.k0.toFixed(2)} / {r.k_ae_seismic.toFixed(2)}</td>
+                        <td>{r.stem_mu_knm_per_m.toFixed(1)}</td>
+                        <td>{r.fs_overturning.toFixed(2)} / {r.fs_sliding.toFixed(2)}</td>
+                        <td>{r.max_toe_bearing_kpa.toFixed(1)}</td>
+                        <td><b>{r.stem_vertical_bars}</b></td>
+                        <td>{r.base_heel_toe_bars}</td>
+                        <td>
+                          <span className={`design-status-pill ${r.status === "PASS" ? "pass" : "fail"}`}>
+                            {r.status}
+                          </span>
+                        </td>
+                        <td>
+                          <button
+                            className="secondary mini"
+                            disabled={busy}
+                            onClick={() => deleteSecondary(`retaining-walls/${encodeURIComponent(r.wall_id)}`, `Removed wall ${r.wall_id}.`)}
+                          >
+                            Delete
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* TAB 9: ROOF TRUSSES & STRAP FOOTINGS */}
+          {activeTab === "trusses" && (
+            <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+              <div className="geom-panel">
+                <div className="geom-panel-head">
+                  <div>
+                    <strong>Steel Roof Truss Design (NSCP Ch. 5 / Double-Angle Catalog)</strong>
+                    <small>Designs top chord, bottom chord, web members, DCRs, and structural steel tonnage for Module 08 BOM.</small>
+                  </div>
+                </div>
+                <div className="geom-toolbar design-param-bar" style={{ margin: "10px 12px" }}>
+                  <label className="design-param-field">
+                    <span>ID</span>
+                    <input value={trussForm.truss_id} onChange={(e) => setTrussForm({ ...trussForm, truss_id: e.target.value })} />
+                  </label>
+                  <label className="design-param-field">
+                    <span>Span (m)</span>
+                    <input type="number" step="0.5" value={trussForm.span_m} onChange={(e) => setTrussForm({ ...trussForm, span_m: parseFloat(e.target.value) || 8.0 })} />
+                  </label>
+                  <label className="design-param-field">
+                    <span>Spacing (m)</span>
+                    <input type="number" step="0.25" value={trussForm.truss_spacing_m} onChange={(e) => setTrussForm({ ...trussForm, truss_spacing_m: parseFloat(e.target.value) || 3.0 })} />
+                  </label>
+                  <label className="design-param-field">
+                    <span>Pitch (deg)</span>
+                    <input type="number" step="1" value={trussForm.pitch_deg} onChange={(e) => setTrussForm({ ...trussForm, pitch_deg: parseFloat(e.target.value) || 18 })} />
+                  </label>
+                  <label className="design-param-field">
+                    <span>Type</span>
+                    <select value={trussForm.truss_type} onChange={(e) => setTrussForm({ ...trussForm, truss_type: e.target.value })}>
+                      <option value="Pratt">Pratt</option>
+                      <option value="Howe">Howe</option>
+                      <option value="Fink">Fink</option>
+                    </select>
+                  </label>
+                  <button
+                    disabled={busy}
+                    onClick={() => postSecondary("roof-trusses", trussForm, `Designed steel roof truss ${trussForm.truss_id}.`)}
+                  >
+                    Design Truss
+                  </button>
+                </div>
+                <div className="sizing-table-wrap">
+                  <table className="sizing-table">
+                    <thead>
+                      <tr>
+                        <th>ID</th>
+                        <th>Type / Span</th>
+                        <th>Top Chord</th>
+                        <th>Bottom Chord</th>
+                        <th>Webs</th>
+                        <th>Chord / Web DCR</th>
+                        <th>Est. Steel (kg)</th>
+                        <th>Status</th>
+                        <th>Action</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(ad?.roof_truss_designs || []).map((t) => (
+                        <tr key={t.truss_id}>
+                          <td><b>{t.truss_id}</b></td>
+                          <td>{t.truss_type} · {t.span_m.toFixed(1)}m @ {t.pitch_deg.toFixed(0)}°</td>
+                          <td><b>{t.top_chord_section}</b></td>
+                          <td>{t.bottom_chord_section}</td>
+                          <td>{t.web_section}</td>
+                          <td>{t.max_chord_dcr.toFixed(2)} / {t.max_web_dcr.toFixed(2)}</td>
+                          <td>{t.estimated_steel_kg.toFixed(1)}</td>
+                          <td>
+                            <span className={`design-status-pill ${t.status === "PASS" ? "pass" : "fail"}`}>
+                              {t.status}
+                            </span>
+                          </td>
+                          <td>
+                            <button
+                              className="secondary mini"
+                              disabled={busy}
+                              onClick={() => deleteSecondary(`roof-trusses/${encodeURIComponent(t.truss_id)}`, `Removed truss ${t.truss_id}.`)}
+                            >
+                              Delete
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div className="geom-panel">
+                <div className="geom-panel-head">
+                  <div>
+                    <strong>Eccentric Property-Line Strap Footings</strong>
+                    <small>Connects an eccentric exterior support node to an interior support node via a rigid strap beam.</small>
+                  </div>
+                </div>
+                <div className="geom-toolbar design-param-bar" style={{ margin: "10px 12px" }}>
+                  <label className="design-param-field">
+                    <span>Strap ID</span>
+                    <input value={strapForm.strap_id} onChange={(e) => setStrapForm({ ...strapForm, strap_id: e.target.value })} />
+                  </label>
+                  <label className="design-param-field">
+                    <span>Exterior Node</span>
+                    <input type="number" min="1" value={strapForm.exterior_node_id} onChange={(e) => setStrapForm({ ...strapForm, exterior_node_id: parseInt(e.target.value, 10) || 1 })} />
+                  </label>
+                  <label className="design-param-field">
+                    <span>Interior Node</span>
+                    <input type="number" min="1" value={strapForm.interior_node_id} onChange={(e) => setStrapForm({ ...strapForm, interior_node_id: parseInt(e.target.value, 10) || 2 })} />
+                  </label>
+                  <button
+                    disabled={busy}
+                    onClick={() => postSecondary("strap-footings", strapForm, `Designed strap footing ${strapForm.strap_id}.`)}
+                  >
+                    Design Strap Footing
+                  </button>
+                </div>
+                <div className="sizing-table-wrap">
+                  <table className="sizing-table">
+                    <thead>
+                      <tr>
+                        <th>ID</th>
+                        <th>Nodes (Ext → Int)</th>
+                        <th>Ext Pad (m)</th>
+                        <th>Int Pad (m)</th>
+                        <th>Strap Beam (mm)</th>
+                        <th>Top / Bot Bars</th>
+                        <th>Stirrups</th>
+                        <th>Status</th>
+                        <th>Action</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(ad?.strap_footing_designs || []).map((sf) => (
+                        <tr key={sf.strap_id}>
+                          <td><b>{sf.strap_id}</b></td>
+                          <td>N{sf.exterior_node_id} → N{sf.interior_node_id}</td>
+                          <td>{sf.ext_pad_b_m.toFixed(2)} × {sf.ext_pad_l_m.toFixed(2)}</td>
+                          <td>{sf.int_pad_b_m.toFixed(2)} × {sf.int_pad_l_m.toFixed(2)}</td>
+                          <td>{sf.strap_b_mm.toFixed(0)} × {sf.strap_h_mm.toFixed(0)}</td>
+                          <td><b>{sf.strap_top_bars}</b> / {sf.strap_bot_bars}</td>
+                          <td>{sf.strap_stirrups}</td>
+                          <td>
+                            <span className={`design-status-pill ${sf.status === "PASS" ? "pass" : "fail"}`}>
+                              {sf.status}
+                            </span>
+                          </td>
+                          <td>
+                            <button
+                              className="secondary mini"
+                              disabled={busy}
+                              onClick={() => deleteSecondary(`strap-footings/${encodeURIComponent(sf.strap_id)}`, `Removed strap ${sf.strap_id}.`)}
+                            >
+                              Delete
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               </div>
             </div>
           )}

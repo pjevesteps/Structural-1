@@ -70,13 +70,15 @@ ACI_TO_PRINT_HEX: dict[int, str] = {
     8: "#94a3b8",  # hatch -> neutral slate
 }
 
-SCHEDULE_KEYS = ("schedule_footings", "schedule_columns", "schedule_beams")
+SCHEDULE_KEYS = ("schedule_footings", "schedule_columns", "schedule_beams", "schedule_slabs_stairs")
 DETAIL_KEYS = (
     "detail_footing_section",
     "detail_column_section",
     "detail_beam_section",
     "detail_beam_longitudinal",
     "detail_column_longitudinal",
+    "detail_retaining_wall",
+    "detail_roof_truss",
 )
 
 
@@ -137,6 +139,7 @@ def get_available_cad_items(project: ProjectState) -> list[dict[str, str]]:
             {"key": "schedule_footings", "label": "Schedule of Footings", "group": "Schedules"},
             {"key": "schedule_columns", "label": "Schedule of Columns", "group": "Schedules"},
             {"key": "schedule_beams", "label": "Schedule of Beams", "group": "Schedules"},
+            {"key": "schedule_slabs_stairs", "label": "Schedule of Slabs & Stairs", "group": "Schedules"},
             {
                 "key": "detail_footing_section",
                 "label": "Typical Isolated Footing Plan & Section",
@@ -160,6 +163,16 @@ def get_available_cad_items(project: ProjectState) -> list[dict[str, str]]:
             {
                 "key": "detail_column_longitudinal",
                 "label": "SMRF Column & Pedestal Longitudinal",
+                "group": "Details",
+            },
+            {
+                "key": "detail_retaining_wall",
+                "label": "Basement Retaining Wall Section (NSCP Sec. 209)",
+                "group": "Details",
+            },
+            {
+                "key": "detail_roof_truss",
+                "label": "Steel Roof Truss Elevation Detail",
                 "group": "Details",
             },
         ]
@@ -1070,6 +1083,36 @@ def _draw_schedule_item(msp, project: ProjectState, key: str, box: tuple[float, 
             ["MARK", "SIZE (mm)", "TOP START", "BOT MID", "TOP END", "STIRRUPS (SUP)"],
             rows, [10, 14, 16, 16, 16, 28],
         )
+        return
+
+    if key == "schedule_slabs_stairs":
+        rows = [
+            [
+                s.panel_id,
+                s.floor_level,
+                f"{s.thickness_mm:.0f}mm",
+                s.short_span_cont_neg,
+                s.short_span_pos,
+                s.long_span_pos,
+            ]
+            for s in ad.slab_designs[:12]
+        ]
+        for st in ad.stair_designs[:4]:
+            rows.append([
+                st.stair_id,
+                f"Span {st.flight_span_m:.1f}m",
+                f"{st.waist_thickness_mm:.0f}mm",
+                st.main_bars,
+                st.dist_bars,
+                st.deflection_status,
+            ])
+        if not rows:
+            rows = [["S1", "-", "125mm", "10mm @ 200mm", "10mm @ 200mm", "10mm @ 250mm"]]
+        _draw_cad_table(
+            msp, x0, y1, w, h, k, "SCHEDULE OF RC SLABS & STAIRS",
+            ["MARK", "LEVEL / SPAN", "THK", "SHORT NEG / MAIN", "SHORT POS / DIST", "LONG POS / STAT"],
+            rows, [14, 14, 10, 22, 20, 20],
+        )
 
 
 def _draw_detail_item(
@@ -1315,6 +1358,61 @@ def _draw_detail_item(
         _add_text(msp, f"Lo: {rep_col.ties_confined if rep_col else '10mm @ 100mm'}", cx - col_w * 0.75, col_top - beam_h - lo_h * 0.5, 1.5 * k, "S-DIM", TextEntityAlignment.MIDDLE_RIGHT)
         _add_text(msp, f"MID: {rep_col.ties_mid if rep_col else '10mm @ 150mm'}", cx - col_w * 0.75, mid_y, 1.5 * k, "S-TEXT", TextEntityAlignment.MIDDLE_RIGHT)
         _add_text(msp, f"SMRF COLUMN & PEDESTAL ELEVATION (1:{detail_scale})", cx, y0 + 3.5 * k, 2.1 * k, "S-TITLEBLK", TextEntityAlignment.MIDDLE_CENTER)
+        return
+
+    if key == "detail_retaining_wall":
+        rw = ad.retaining_wall_designs[0] if ad.retaining_wall_designs else None
+        rw_in = ad.retaining_wall_inputs[0] if ad.retaining_wall_inputs else None
+        base_w = min(w * 0.56, 48.0 * k)
+        base_h = h * 0.12
+        stem_h = h * 0.52
+        stem_w = base_w * 0.18
+        bx0 = cx - base_w * 0.5
+        by0 = y0 + 13.0 * k
+        toe_w = base_w * 0.28
+        sx0 = bx0 + toe_w
+        # Inverted-T retaining wall profile
+        _add_rect(msp, bx0, by0, bx0 + base_w, by0 + base_h, "S-FTG")
+        _add_rect(msp, sx0, by0 + base_h, sx0 + stem_w, by0 + base_h + stem_h, "S-COL")
+        # Vertical & base rebar lines
+        msp.add_line((sx0 + stem_w * 0.25, by0 + base_h * 0.35), (sx0 + stem_w * 0.25, by0 + base_h + stem_h - 1.5 * k), dxfattribs={"layer": "S-REBAR"})
+        msp.add_line((sx0 + stem_w * 0.75, by0 + base_h * 0.35), (sx0 + stem_w * 0.75, by0 + base_h + stem_h - 1.5 * k), dxfattribs={"layer": "S-REBAR"})
+        msp.add_line((bx0 + 1.5 * k, by0 + base_h * 0.35), (bx0 + base_w - 1.5 * k, by0 + base_h * 0.35), dxfattribs={"layer": "S-REBAR"})
+        msp.add_line((bx0 + 1.5 * k, by0 + base_h * 0.70), (bx0 + base_w - 1.5 * k, by0 + base_h * 0.70), dxfattribs={"layer": "S-REBAR"})
+        h_lbl = f"H={rw.retained_height_m:.2f}m" if rw else "H=2.80m"
+        v_lbl = rw.stem_vertical_bars if rw else "12mm @ 150mm o.c."
+        b_lbl = rw.base_heel_toe_bars if rw else "12mm @ 175mm o.c."
+        _add_text(msp, f"{h_lbl} · VERT: {v_lbl}", cx + base_w * 0.08, by0 + base_h + stem_h * 0.65, 1.5 * k, "S-REBAR", TextEntityAlignment.MIDDLE_LEFT)
+        _add_text(msp, f"BASE: {b_lbl}", cx, by0 - 3.2 * k, 1.5 * k, "S-DIM", TextEntityAlignment.TOP_CENTER)
+        wall_tag = rw_in.wall_id if rw_in else "RW-1"
+        _add_text(msp, f"BASEMENT RETAINING WALL {wall_tag} SECTION (1:{detail_scale})", cx, y0 + 3.5 * k, 2.0 * k, "S-TITLEBLK", TextEntityAlignment.MIDDLE_CENTER)
+        return
+
+    if key == "detail_roof_truss":
+        tr = ad.roof_truss_designs[0] if ad.roof_truss_designs else None
+        tw = w * 0.80
+        th = h * 0.36
+        tx0 = cx - tw * 0.5
+        tx1 = cx + tw * 0.5
+        ty0 = y0 + 18.0 * k
+        ty_apex = ty0 + th
+        # Bottom chord + pitched top chords
+        msp.add_line((tx0, ty0), (tx1, ty0), dxfattribs={"layer": "S-BEAM"})
+        msp.add_line((tx0, ty0), (cx, ty_apex), dxfattribs={"layer": "S-BEAM"})
+        msp.add_line((cx, ty_apex), (tx1, ty0), dxfattribs={"layer": "S-BEAM"})
+        # King post & web diagonals (4 panels)
+        msp.add_line((cx, ty0), (cx, ty_apex), dxfattribs={"layer": "S-REBAR"})
+        for frac in (0.25, 0.75):
+            px = tx0 + frac * tw
+            py_top = ty0 + (1.0 - abs(frac - 0.5) * 2.0) * th
+            msp.add_line((px, ty0), (px, py_top), dxfattribs={"layer": "S-REBAR"})
+            msp.add_line((px, py_top), (cx, ty0), dxfattribs={"layer": "S-REBAR"})
+        tc = tr.top_chord_section if tr else "2L 75x75x6"
+        bc = tr.bottom_chord_section if tr else "2L 65x65x6"
+        wb = tr.web_section if tr else "2L 50x50x6"
+        sp_lbl = f"L={tr.span_m:.1f}m ({tr.truss_type})" if tr else "L=8.0m (Pratt)"
+        _add_text(msp, f"TOP: {tc} | BOT: {bc} | WEB: {wb}", cx, ty0 - 4.0 * k, 1.5 * k, "S-TEXT", TextEntityAlignment.TOP_CENTER)
+        _add_text(msp, f"STEEL ROOF TRUSS ELEVATION - {sp_lbl}", cx, y0 + 3.5 * k, 2.0 * k, "S-TITLEBLK", TextEntityAlignment.MIDDLE_CENTER)
 
 
 def _compose_sheet_items(

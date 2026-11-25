@@ -657,6 +657,119 @@ def build_calculation_report_pdf(project: ProjectState) -> bytes:
                 status_col=7,
             )
 
+        if (
+            ad.retaining_wall_designs
+            or ad.slab_designs
+            or ad.stair_designs
+            or ad.strap_footing_designs
+            or ad.roof_truss_designs
+        ):
+            add_sub("5.5 Secondary Elements & Retaining Walls")
+            if ad.retaining_wall_designs:
+                rw_rows = [
+                    [
+                        r.wall_id,
+                        f"{r.retained_height_m:.2f}x{r.total_length_m:.1f}m",
+                        f"{r.ka:.2f}/{r.k_ae_seismic:.2f}",
+                        f"{r.fs_overturning:.2f}/{r.fs_sliding:.2f}",
+                        f"{r.max_toe_bearing_kpa:.0f}",
+                        r.stem_vertical_bars,
+                        r.base_heel_toe_bars,
+                        r.status,
+                    ]
+                    for r in ad.retaining_wall_designs
+                ]
+                add_table(
+                    ["Wall", "H x L", "Ka/Kae", "FS OT/Sl", "q_toe", "Stem Vert", "Base Bars", "Status"],
+                    rw_rows,
+                    col_weights=[9, 13, 11, 12, 9, 18, 18, 10],
+                    right_cols={2, 3, 4},
+                    status_col=7,
+                )
+            if ad.slab_designs:
+                sl_rows = [
+                    [
+                        s.panel_id,
+                        s.floor_level,
+                        f"{s.lx_m:.2f}x{s.ly_m:.2f}",
+                        f"{s.thickness_mm:.0f}",
+                        s.short_span_cont_neg,
+                        s.short_span_pos,
+                        s.long_span_pos,
+                        s.status,
+                    ]
+                    for s in ad.slab_designs[:24]
+                ]
+                add_table(
+                    ["Panel", "Floor", "Lx x Ly", "t", "Short (-)", "Short (+)", "Long (+)", "Status"],
+                    sl_rows,
+                    col_weights=[11, 10, 12, 7, 17, 17, 16, 10],
+                    right_cols={3},
+                    status_col=7,
+                )
+            if ad.stair_designs:
+                st_rows = [
+                    [
+                        s.stair_id,
+                        f"{s.flight_span_m:.2f}m",
+                        f"{s.riser_mm:.0f}/{s.tread_mm:.0f}",
+                        f"{s.waist_thickness_mm:.0f}mm",
+                        f"{s.mu_knm_per_m:.1f}",
+                        s.main_bars,
+                        s.dist_bars,
+                        s.deflection_status,
+                    ]
+                    for s in ad.stair_designs
+                ]
+                add_table(
+                    ["Stair", "Span", "R/T", "Waist", "Mu", "Main Bars", "Dist Bars", "Defl"],
+                    st_rows,
+                    col_weights=[9, 10, 11, 10, 10, 20, 20, 10],
+                    right_cols={4},
+                    status_col=7,
+                )
+            if ad.roof_truss_designs:
+                tr_rows = [
+                    [
+                        t.truss_id,
+                        f"{t.truss_type} {t.span_m:.1f}m",
+                        t.top_chord_section,
+                        t.bottom_chord_section,
+                        t.web_section,
+                        f"{t.max_chord_dcr:.2f}/{t.max_web_dcr:.2f}",
+                        f"{t.estimated_steel_kg:.0f}kg",
+                        t.status,
+                    ]
+                    for t in ad.roof_truss_designs
+                ]
+                add_table(
+                    ["Truss", "Type/Span", "Top", "Bot", "Web", "DCR C/W", "Steel", "Status"],
+                    tr_rows,
+                    col_weights=[9, 14, 14, 14, 14, 13, 12, 10],
+                    right_cols={5, 6},
+                    status_col=7,
+                )
+            if ad.strap_footing_designs:
+                sf_rows = [
+                    [
+                        s.strap_id,
+                        f"N{s.exterior_node_id}->N{s.interior_node_id}",
+                        f"{s.ext_pad_b_m:.2f}x{s.ext_pad_l_m:.2f}",
+                        f"{s.int_pad_b_m:.2f}x{s.int_pad_l_m:.2f}",
+                        f"{s.strap_b_mm:.0f}x{s.strap_h_mm:.0f}",
+                        s.strap_top_bars,
+                        s.strap_stirrups,
+                        s.status,
+                    ]
+                    for s in ad.strap_footing_designs
+                ]
+                add_table(
+                    ["Strap", "Nodes", "Ext Pad", "Int Pad", "Beam", "Top Bars", "Stirrups", "Status"],
+                    sf_rows,
+                    col_weights=[9, 13, 13, 13, 13, 13, 16, 10],
+                    status_col=7,
+                )
+
     # =========================================================================
     # SECTION 6: BOM & COST ESTIMATE
     # =========================================================================
