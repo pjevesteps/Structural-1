@@ -54,6 +54,7 @@ export default function CadDrawings({ project, onClose, onUpdated }) {
   const pid = encodeURIComponent(project.project_id);
   const panRef = useRef({ dragging: false, startX: 0, startY: 0, origX: 0, origY: 0 });
   const svgHostRef = useRef(null);
+  const stateEpochRef = useRef(0);
 
   const [fullProject, setFullProject] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -94,36 +95,47 @@ export default function CadDrawings({ project, onClose, onUpdated }) {
     }
   }
 
-  async function loadProjectState() {
-    setBusy(true);
-    setError("");
-    try {
-      const [p, dwg] = await Promise.all([
-        apiJson(`/api/projects/${pid}`),
-        apiJson(`/api/projects/${pid}/cad/dwg-status`).catch(() => ({
-          available: false,
-          backend: null,
-          executable_path: null,
-          install_hint: "",
-        })),
-      ]);
-      setFullProject(p);
-      setDwgStatus(dwg);
-      if (p.cad_drawings?.options) {
-        setOptions({ ...DEFAULT_OPTIONS, ...p.cad_drawings.options });
-      }
-      if (p.cad_drawings?.generated_at && p.cad_drawings?.sheets?.length) {
-        await loadSheetPreview(p.cad_drawings.sheets[0].sheet_no);
-      }
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
   useEffect(() => {
+    let cancelled = false;
+    const epoch = ++stateEpochRef.current;
+
+    async function loadProjectState() {
+      setBusy(true);
+      setError("");
+      try {
+        const [p, dwg] = await Promise.all([
+          apiJson(`/api/projects/${pid}`),
+          apiJson(`/api/projects/${pid}/cad/dwg-status`).catch(() => ({
+            available: false,
+            backend: null,
+            executable_path: null,
+            install_hint: "",
+          })),
+        ]);
+        if (cancelled || stateEpochRef.current !== epoch) return;
+        setFullProject(p);
+        setDwgStatus(dwg);
+        if (p.cad_drawings?.options) {
+          setOptions({ ...DEFAULT_OPTIONS, ...p.cad_drawings.options });
+        }
+        if (p.cad_drawings?.generated_at && p.cad_drawings?.sheets?.length) {
+          await loadSheetPreview(p.cad_drawings.sheets[0].sheet_no);
+        }
+      } catch (err) {
+        if (!cancelled && stateEpochRef.current === epoch) {
+          setError(err.message);
+        }
+      } finally {
+        if (!cancelled && stateEpochRef.current === epoch) {
+          setBusy(false);
+        }
+      }
+    }
+
     loadProjectState();
+    return () => {
+      cancelled = true;
+    };
   }, [project.project_id]);
 
   useEffect(() => {
@@ -197,6 +209,7 @@ export default function CadDrawings({ project, onClose, onUpdated }) {
   }, [cad?.layers, preview?.layers]);
 
   async function runGenerateWithOptions(nextOptions, preferredSheet = null) {
+    stateEpochRef.current += 1;
     setBusy(true);
     setError("");
     setNotice("");

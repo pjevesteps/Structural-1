@@ -49,6 +49,7 @@ export default function DesignReview({ project, onClose, onUpdated }) {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
+  const [autoLog, setAutoLog] = useState(null);
 
   // Active tab: util3d | drift | beams | columns | footings
   const [activeTab, setActiveTab] = useState("util3d");
@@ -396,6 +397,33 @@ export default function DesignReview({ project, onClose, onUpdated }) {
     }
   }
 
+  async function handleAutoResolve() {
+    setBusy(true);
+    setError("");
+    setNotice("");
+    setAutoLog(null);
+    try {
+      const res = await apiJson(`/api/projects/${pid}/design/auto-resolve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ max_iterations: 6 }),
+      });
+      setAutoLog(res);
+      setFullProject((prev) => (prev ? { ...prev, analysis_design: res.analysis_design } : prev));
+      await loadProjectState();
+      setNotice(
+        res.converged
+          ? `Auto-Resolve converged in ${res.iterations_run} iteration(s): 0 failing members or drifts.`
+          : `Auto-Resolve stopped after ${res.iterations_run} iteration(s) with failures remaining.`
+      );
+      if (onUpdated) await onUpdated();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function handleUploadAnl(e) {
     const file = e.target.files?.[0];
     e.target.value = "";
@@ -464,6 +492,13 @@ export default function DesignReview({ project, onClose, onUpdated }) {
           <button disabled={busy || !hasPrereqs} onClick={handleRunDesign}>
             {ad?.generated_at ? "Re-Run Analysis & RC Design" : "Run Analysis & RC Design"}
           </button>
+          <button
+            className="secondary design-autoresolve-btn"
+            disabled={busy || !hasPrereqs}
+            onClick={handleAutoResolve}
+          >
+            Auto-Resolve Failures
+          </button>
           <input
             ref={fileInputRef}
             type="file"
@@ -506,6 +541,23 @@ export default function DesignReview({ project, onClose, onUpdated }) {
       )}
       {error && <div className="pdf-error">{error}</div>}
       {notice && <div className="notice">{notice}</div>}
+      {autoLog && (
+        <div className="notice auto-resolve-log">
+          <strong>
+            Auto-Resolve {autoLog.converged ? "converged" : "did not fully converge"} —{" "}
+            {autoLog.iterations_run} iteration(s)
+          </strong>
+          <ul className="auto-resolve-list">
+            {autoLog.history.map((h) => (
+              <li key={h.iteration}>
+                Iter {h.iteration}: {h.fail_beams} beam / {h.fail_columns} column / {h.fail_footings}{" "}
+                footing / {h.fail_drifts} drift failures (max drift ratio {h.max_drift_ratio})
+                {h.actions?.length ? ` — ${h.actions.join("; ")}` : ""}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {/* Design Parameter Bar */}
       <div className="geom-toolbar design-param-bar">

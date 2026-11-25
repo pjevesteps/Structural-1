@@ -264,6 +264,11 @@ class SeismicParameters(BaseModel):
     include_vertical_ev: bool = True
     live_load_seismic_fraction: float = Field(default=0.0, ge=0.0, le=1.0)
     staad_seismic_method: Literal["ubc_auto", "explicit_story_forces"] = "ubc_auto"
+    use_method_b_period: bool = False
+    computed_rayleigh_tx_sec: float | None = None
+    computed_rayleigh_tz_sec: float | None = None
+    use_pdelta: bool = False
+    pdelta_iterations: int = Field(default=3, ge=1, le=20)
 
 
 class WindParameters(BaseModel):

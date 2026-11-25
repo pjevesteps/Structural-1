@@ -996,6 +996,52 @@ export default function LoadGenerator({ project, onClose, onUpdated }) {
                   />
                   Include Vertical Ev = 0.5 Ca I D
                 </label>
+                <label className="pdf-check loads-check-field">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(seismic.use_method_b_period)}
+                    onChange={(e) =>
+                      setSeismic((s) => ({ ...s, use_method_b_period: e.target.checked }))
+                    }
+                  />
+                  Method B Period (T_Rayleigh ≤ 1.3 Ta)
+                </label>
+                <label className="pdf-check loads-check-field">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(seismic.use_pdelta)}
+                    onChange={(e) => setSeismic((s) => ({ ...s, use_pdelta: e.target.checked }))}
+                  />
+                  P-Delta Second-Order Analysis
+                </label>
+                {seismic.use_pdelta && (
+                  <label>
+                    P-Delta Iterations
+                    <input
+                      type="number"
+                      step="1"
+                      min="1"
+                      max="20"
+                      value={seismic.pdelta_iterations ?? 3}
+                      onChange={(e) =>
+                        setSeismic((s) => ({
+                          ...s,
+                          pdelta_iterations: parseInt(e.target.value, 10) || 3,
+                        }))
+                      }
+                    />
+                  </label>
+                )}
+                {seismic.use_method_b_period && lg?.seismic?.computed_rayleigh_tx_sec != null && (
+                  <label>
+                    Rayleigh Tx / Tz (s)
+                    <input
+                      type="text"
+                      readOnly
+                      value={`${lg.seismic.computed_rayleigh_tx_sec} / ${lg.seismic.computed_rayleigh_tz_sec}`}
+                    />
+                  </label>
+                )}
               </div>
 
               {seisSum && (

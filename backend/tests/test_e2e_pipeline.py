@@ -50,7 +50,7 @@ def lint_staad_text(
         if len(raw) > 79:
             errors.append(f"Line {lineno} exceeds 79 characters ({len(raw)} chars): {raw[:60]}...")
 
-    # 2. Required block order
+    # 2. Required block order (accepts PERFORM ANALYSIS or PDELTA <n> ANALYSIS)
     ordered_markers = [
         "STAAD SPACE",
         "JOINT COORDINATES",
@@ -62,33 +62,37 @@ def lint_staad_text(
         "LOAD 1",
         "LOAD 9",
         "LOAD COMB",
-        "PERFORM ANALYSIS",
+        "ANALYSIS_CMD",
         "START CONCRETE DESIGN",
         "FINISH",
     ]
+    analysis_matches = list(re.finditer(r"(?:PERFORM|PDELTA\s+\d+)\s+ANALYSIS", std_text))
     positions: dict[str, int] = {}
     for marker in ordered_markers:
+        if marker == "ANALYSIS_CMD":
+            if not analysis_matches:
+                errors.append("Missing required STAAD analysis command: 'PERFORM ANALYSIS' or 'PDELTA <n> ANALYSIS'.")
+            else:
+                positions[marker] = analysis_matches[0].start()
+            continue
         idx = std_text.find(marker)
         if idx == -1:
             errors.append(f"Missing required STAAD block/keyword: '{marker}'.")
         else:
             positions[marker] = idx
 
-    # Verify monotonic order for all present markers (note: PERFORM ANALYSIS may also appear
-    # inside LOAD 1..4 for UBC auto, so check final PERFORM ANALYSIS PRINT STATICS CHECK too)
+    final_pa = analysis_matches[-1].start() if analysis_matches else -1
     for prev_m, next_m in zip(ordered_markers, ordered_markers[1:]):
         if prev_m in positions and next_m in positions:
-            if prev_m == "LOAD COMB" and next_m == "PERFORM ANALYSIS":
-                final_pa = std_text.rfind("PERFORM ANALYSIS")
+            if prev_m == "LOAD COMB" and next_m == "ANALYSIS_CMD":
                 if positions[prev_m] > final_pa:
                     errors.append(
-                        f"Block ordering violation: '{prev_m}' must precede final 'PERFORM ANALYSIS'."
+                        f"Block ordering violation: '{prev_m}' must precede final analysis command."
                     )
-            elif prev_m == "PERFORM ANALYSIS" and next_m == "START CONCRETE DESIGN":
-                final_pa = std_text.rfind("PERFORM ANALYSIS")
+            elif prev_m == "ANALYSIS_CMD" and next_m == "START CONCRETE DESIGN":
                 if final_pa > positions[next_m]:
                     errors.append(
-                        f"Block ordering violation: final 'PERFORM ANALYSIS' must precede '{next_m}'."
+                        f"Block ordering violation: final analysis command must precede '{next_m}'."
                     )
             elif positions[prev_m] > positions[next_m]:
                 errors.append(

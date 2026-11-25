@@ -1013,9 +1013,9 @@ def generate_loads(
     z_factor, na, nv, ca, cv = compute_seismic_coefficients(seis_params)
     top_elev = elevated_levels[-1].elevation_m if elevated_levels else base_elev
     h_n = round(max(top_elev - base_elev, 0.0), 4)
-    period_t = round(seis_params.ct_coeff * (h_n ** 0.75), 4) if h_n > 0 else 0.0
+    period_ta = round(seis_params.ct_coeff * (h_n ** 0.75), 4) if h_n > 0 else 0.0
 
-    def _compute_base_shear(r_factor: float) -> tuple[float, float, float, float, float]:
+    def _compute_base_shear(r_factor: float, t_sec: float) -> tuple[float, float, float, float, float]:
         if total_w <= 0.0:
             return 0.0, 0.0, 0.0, 0.0, 0.0
         v_max = (2.5 * ca * seis_params.importance_factor_i / r_factor) * total_w
@@ -1025,26 +1025,62 @@ def generate_loads(
             if seis_params.zone == 4
             else 0.0
         )
-        if period_t > 1e-6:
-            v_calc = (cv * seis_params.importance_factor_i / (r_factor * period_t)) * total_w
+        if t_sec > 1e-6:
+            v_calc = (cv * seis_params.importance_factor_i / (r_factor * t_sec)) * total_w
         else:
             v_calc = v_max
         v_design = max(min(v_calc, v_max), v_min, v_min_z4)
-        ft = min(0.07 * period_t * v_design, 0.25 * v_design) if period_t > 0.7 else 0.0
+        ft = min(0.07 * t_sec * v_design, 0.25 * v_design) if t_sec > 0.7 else 0.0
         return v_design, v_max, v_min, v_min_z4, ft
 
-    vx, v_max_x, v_min_x, v_min_z4_x, ft_x = _compute_base_shear(seis_params.r_factor_x)
-    vz, _v_max_z, _v_min_z, _v_min_z4_z, ft_z = _compute_base_shear(seis_params.r_factor_z)
-
     wh_sum = sum(w * max(elev - base_elev, 0.0) for _, elev, w in story_weights)
-    raw_fx: list[float] = []
-    raw_fz: list[float] = []
-    for idx, (_lid, elev, w) in enumerate(story_weights):
-        h_i = max(elev - base_elev, 0.0)
-        frac = (w * h_i / wh_sum) if wh_sum > 1e-6 else (1.0 / len(story_weights) if story_weights else 0.0)
-        is_top = idx == len(story_weights) - 1
-        raw_fx.append((vx - ft_x) * frac + (ft_x if is_top else 0.0))
-        raw_fz.append((vz - ft_z) * frac + (ft_z if is_top else 0.0))
+
+    def _distribute_forces(vx_val: float, vz_val: float, ft_x_val: float, ft_z_val: float) -> tuple[list[float], list[float]]:
+        r_fx: list[float] = []
+        r_fz: list[float] = []
+        for idx, (_lid, elev, w) in enumerate(story_weights):
+            h_i = max(elev - base_elev, 0.0)
+            frac = (w * h_i / wh_sum) if wh_sum > 1e-6 else (1.0 / len(story_weights) if story_weights else 0.0)
+            is_top = idx == len(story_weights) - 1
+            r_fx.append((vx_val - ft_x_val) * frac + (ft_x_val if is_top else 0.0))
+            r_fz.append((vz_val - ft_z_val) * frac + (ft_z_val if is_top else 0.0))
+        return r_fx, r_fz
+
+    tx_eff = period_ta
+    tz_eff = period_ta
+    if seis_params.use_method_b_period and period_ta > 1e-6 and story_weights and total_w > 0.0:
+        vx_pre, _, _, _, ft_x_pre = _compute_base_shear(seis_params.r_factor_x, period_ta)
+        vz_pre, _, _, _, ft_z_pre = _compute_base_shear(seis_params.r_factor_z, period_ta)
+        pre_fx, pre_fz = _distribute_forces(vx_pre, vz_pre, ft_x_pre, ft_z_pre)
+        prelim_forces = [
+            (lid, elev, pre_fx[idx], pre_fz[idx])
+            for idx, (lid, elev, _w) in enumerate(story_weights)
+        ]
+        from ..design.solver import compute_lateral_story_displacements
+
+        disp_map = compute_lateral_story_displacements(project, prelim_forces)
+        num_x = sum(w * (disp_map.get(lid, (0.0, 0.0))[0] ** 2) for lid, _e, w in story_weights)
+        den_x = 9.81 * sum(pre_fx[i] * disp_map.get(lid, (0.0, 0.0))[0] for i, (lid, _e, _w) in enumerate(story_weights))
+        num_z = sum(w * (disp_map.get(lid, (0.0, 0.0))[1] ** 2) for lid, _e, w in story_weights)
+        den_z = 9.81 * sum(pre_fz[i] * disp_map.get(lid, (0.0, 0.0))[1] for i, (lid, _e, _w) in enumerate(story_weights))
+
+        cu_cap = 1.30 if seis_params.zone == 4 else 1.40
+        t_cap = cu_cap * period_ta
+        t_rx = (2.0 * math.pi * math.sqrt(num_x / den_x)) if (num_x > 1e-12 and den_x > 1e-12) else period_ta
+        t_rz = (2.0 * math.pi * math.sqrt(num_z / den_z)) if (num_z > 1e-12 and den_z > 1e-12) else period_ta
+        tx_eff = round(max(0.05, min(t_rx, t_cap)), 4)
+        tz_eff = round(max(0.05, min(t_rz, t_cap)), 4)
+        seis_params.computed_rayleigh_tx_sec = tx_eff
+        seis_params.computed_rayleigh_tz_sec = tz_eff
+        period_t = round(max(tx_eff, tz_eff), 4)
+    else:
+        seis_params.computed_rayleigh_tx_sec = None
+        seis_params.computed_rayleigh_tz_sec = None
+        period_t = period_ta
+
+    vx, v_max_x, v_min_x, v_min_z4_x, ft_x = _compute_base_shear(seis_params.r_factor_x, tx_eff)
+    vz, _v_max_z, _v_min_z, _v_min_z4_z, ft_z = _compute_base_shear(seis_params.r_factor_z, tz_eff)
+    raw_fx, raw_fz = _distribute_forces(vx, vz, ft_x, ft_z)
 
     seismic_stories: list[StorySeismicResult] = []
     for idx, (lid, elev, w) in enumerate(story_weights):

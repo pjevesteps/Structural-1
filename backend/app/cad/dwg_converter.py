@@ -197,3 +197,66 @@ def convert_dxf_to_dwg(dxf_bytes: bytes, dwg_version: str = "ACAD2013") -> bytes
             raise RuntimeError("DWG converter completed without producing a non-empty .dwg file.")
 
         return out_dwg.read_bytes()
+
+
+def convert_dwg_to_dxf(dwg_bytes: bytes) -> bytes:
+    """Convert binary AutoCAD .dwg bytes into R2010 UTF-8 .dxf bytes using local converter."""
+    info = detect_dwg_converter()
+    if not info["available"] or not info["backend"]:
+        raise DwgConverterUnavailableError(info["install_hint"])
+
+    backend = info["backend"]
+    exe_path = info["executable_path"]
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        in_dwg = tmp / "input_plan.dwg"
+        out_dxf = tmp / "output_plan.dxf"
+        in_dwg.write_bytes(dwg_bytes)
+
+        if backend == "oda_file_converter":
+            if exe_path and os.name == "nt" and Path(exe_path).is_file():
+                odafc.win_exec_path = exe_path
+            elif exe_path and os.name != "nt" and Path(exe_path).is_file():
+                odafc.unix_exec_path = exe_path
+            try:
+                odafc.convert(str(in_dwg), str(out_dxf), version="R2010", replace=True)
+            except Exception as exc:
+                raise RuntimeError(f"ODA File Converter (.dwg -> .dxf) failed: {exc}") from exc
+
+        elif backend == "autocad_core_console":
+            scr_path = tmp / "dwg2dxf.scr"
+            out_dxf_str = str(out_dxf).replace("\\", "/")
+            scr_path.write_text(f'DXFOUT "{out_dxf_str}" 6\nQUIT\n', encoding="utf-8")
+            proc = subprocess.run(
+                [exe_path, "/i", str(in_dwg), "/s", str(scr_path)],
+                capture_output=True,
+                text=True,
+                timeout=90,
+                check=False,
+            )
+            if proc.returncode != 0 or not out_dxf.is_file():
+                raise RuntimeError(
+                    f"AutoCAD Core Console (.dwg -> .dxf) failed (exit {proc.returncode})."
+                )
+
+        elif backend == "libredwg":
+            dwg2dxf = shutil.which("dwg2dxf") or shutil.which("dwg2dxf.exe")
+            if not dwg2dxf:
+                raise DwgConverterUnavailableError(info["install_hint"])
+            proc = subprocess.run(
+                [dwg2dxf, "-o", str(out_dxf), str(in_dwg)],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+            if proc.returncode != 0 or not out_dxf.is_file():
+                raise RuntimeError(f"LibreDWG dwg2dxf failed (exit {proc.returncode}).")
+        else:
+            raise DwgConverterUnavailableError(info["install_hint"])
+
+        if not out_dxf.is_file() or out_dxf.stat().st_size == 0:
+            raise RuntimeError("DWG converter did not produce a valid .dxf file.")
+
+        return out_dxf.read_bytes()

@@ -4,6 +4,7 @@ from pydantic import BaseModel, ConfigDict
 
 from .. import storage
 from ..models import AnalysisDesignState, DesignParameters
+from .auto_resolve import AutoResolveRequest, AutoResolveResponse, run_auto_resolve
 from .rc_design import export_schedules_csv, run_analysis_and_design, run_design_from_anl
 
 router = APIRouter(
@@ -40,6 +41,19 @@ def run_internal_design(project_id: str, payload: RunDesignRequest | None = None
     return state
 
 
+@router.post("/auto-resolve", response_model=AutoResolveResponse)
+def auto_resolve_design(project_id: str, payload: AutoResolveRequest | None = None):
+    project = _load_or_404(project_id)
+    req = payload if payload is not None else AutoResolveRequest()
+    try:
+        result = run_auto_resolve(project, req)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    storage.save_project(project)
+    return result
+
+
 @router.post("/upload-anl", response_model=AnalysisDesignState)
 async def upload_staad_anl(project_id: str, file: UploadFile = File(...)):
     project = _load_or_404(project_id)
@@ -60,6 +74,19 @@ async def upload_staad_anl(project_id: str, file: UploadFile = File(...)):
     project.analysis_design = state
     storage.save_project(project)
     return state
+
+
+@router.post("/auto-resolve", response_model=AutoResolveResponse)
+def auto_resolve_design(project_id: str, payload: AutoResolveRequest | None = None):
+    project = _load_or_404(project_id)
+    req = payload if payload is not None else AutoResolveRequest()
+    try:
+        result = run_auto_resolve(project, req)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    storage.save_project(project)
+    return result
 
 
 @router.post("/approve", response_model=AnalysisDesignState)

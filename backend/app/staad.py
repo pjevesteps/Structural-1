@@ -351,7 +351,10 @@ def _append_phase5_loads(lines: list[str], project: ProjectState) -> None:
             lines.extend(_wrap_staad_tokens(pair_tokens))
 
     # 7. Analysis Trailer & Readable .anl Output Tables for Module 06 Bridge
-    lines.append("PERFORM ANALYSIS PRINT STATICS CHECK")
+    if lg.seismic.use_pdelta:
+        lines.append(f"PDELTA {lg.seismic.pdelta_iterations} ANALYSIS PRINT STATICS CHECK")
+    else:
+        lines.append("PERFORM ANALYSIS PRINT STATICS CHECK")
     lines.append("PRINT SUPPORT REACTIONS")
     lines.append("PRINT JOINT DISPLACEMENTS")
     lines.append("PRINT MEMBER FORCES")

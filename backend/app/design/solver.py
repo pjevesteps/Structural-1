@@ -544,6 +544,51 @@ def solve_frame_dsm(project: ProjectState) -> AnalysisResults:
     U_glob = np.zeros((n_dof, n_prim), dtype=float)
     U_glob[free_dofs, :] = U_f
 
+    # Optional P-Delta second-order story stability amplification (NSCP 2015 Sec. 208.10.3)
+    if lg.seismic.use_pdelta and lg.seismic_summary is not None and lg.seismic_summary.stories:
+        sorted_stories = sorted(lg.seismic_summary.stories, key=lambda s: s.elevation_m)
+        levels_sorted = sorted(project.levels, key=lambda lv: lv.elevation_m)
+        base_elev = levels_sorted[0].elevation_m if levels_sorted else 0.0
+
+        prev_elev = base_elev
+        prev_dx_m = 0.0
+        prev_dz_m = 0.0
+        max_theta_x = 0.0
+        max_theta_z = 0.0
+        for idx_s, st in enumerate(sorted_stories):
+            h_sx = max(st.elevation_m - prev_elev, 0.25)
+            lvl_nodes = [
+                n
+                for n in nodes
+                if not n.floor_level.startswith("FTG_") and abs(n.y_m - st.elevation_m) <= 0.15
+            ]
+            free_lvl = [n for n in lvl_nodes if not n.is_support and n.support_type == "NONE"]
+            use_lvl = free_lvl if free_lvl else lvl_nodes
+            if use_lvl:
+                avg_dx = sum(abs(float(U_glob[node_idx[n.node_id] * 6 + 0, PRIMARY_IDX["EX+"]])) for n in use_lvl) / len(use_lvl)
+                avg_dz = sum(abs(float(U_glob[node_idx[n.node_id] * 6 + 2, PRIMARY_IDX["EZ+"]])) for n in use_lvl) / len(use_lvl)
+            else:
+                avg_dx, avg_dz = prev_dx_m, prev_dz_m
+            ds_x = abs(avg_dx - prev_dx_m)
+            ds_z = abs(avg_dz - prev_dz_m)
+            p_cum = sum(s2.weight_kn for s2 in sorted_stories[idx_s:])
+            if st.cumulative_shear_x_kn > 1e-4:
+                max_theta_x = max(max_theta_x, (p_cum * ds_x) / (st.cumulative_shear_x_kn * h_sx))
+            if st.cumulative_shear_z_kn > 1e-4:
+                max_theta_z = max(max_theta_z, (p_cum * ds_z) / (st.cumulative_shear_z_kn * h_sx))
+            prev_elev = st.elevation_m
+            prev_dx_m = avg_dx
+            prev_dz_m = avg_dz
+
+        if max_theta_x > 0.10:
+            amp_x = 1.0 / (1.0 - min(max_theta_x, 0.25))
+            U_glob[:, PRIMARY_IDX["EX+"]] *= amp_x
+            U_glob[:, PRIMARY_IDX["EX-"]] *= amp_x
+        if max_theta_z > 0.10:
+            amp_z = 1.0 / (1.0 - min(max_theta_z, 0.25))
+            U_glob[:, PRIMARY_IDX["EZ+"]] *= amp_z
+            U_glob[:, PRIMARY_IDX["EZ-"]] *= amp_z
+
     # Support reactions: R = K * U - F
     R_glob = K_glob @ U_glob - F_glob
 
@@ -750,3 +795,113 @@ def solve_frame_dsm(project: ProjectState) -> AnalysisResults:
         primary_vertical_reactions_kn=prim_vert_rxn,
         primary_vertical_applied_kn={k: round(v, 3) for k, v in applied_vert.items()},
     )
+
+
+def compute_lateral_story_displacements(
+    project: ProjectState,
+    story_forces: list[tuple[str, float, float, float]],
+) -> dict[str, tuple[float, float]]:
+    """
+    Fast elastic 3D frame lateral solve for NSCP Sec. 208.5.2.2 Method B (Rayleigh period).
+    story_forces = [(floor_level, elevation_m, fx_kn, fz_kn), ...]
+    Returns {floor_level: (avg_dx_m, avg_dz_m)} in meters.
+    """
+    model = project.structural_model
+    sizing = project.member_sizing
+    if not model.nodes or not model.members or not sizing.sections or not sizing.member_assignments:
+        return {}
+
+    nodes = sorted(model.nodes, key=lambda n: n.node_id)
+    members = sorted(model.members, key=lambda m: m.member_id)
+    node_by_id = {n.node_id: n for n in nodes}
+    node_idx = {n.node_id: i for i, n in enumerate(nodes)}
+    sec_by_id = {s.section_id: s for s in sizing.sections}
+    asgn_by_mid = {a.member_id: a for a in sizing.member_assignments}
+
+    mat = sizing.material
+    e_mod = mat.ec_kn_m2
+    g_mod = e_mod / (2.0 * (1.0 + mat.poisson))
+    use_cracked = sizing.options.include_cracked_modifiers
+
+    n_dof = len(nodes) * 6
+    K_glob = np.zeros((n_dof, n_dof), dtype=float)
+    F_lat = np.zeros((n_dof, 2), dtype=float)  # col 0 = X, col 1 = Z
+    zero_fe = np.zeros((12, 1), dtype=float)
+
+    for m in members:
+        na = node_by_id.get(m.start_node)
+        nb = node_by_id.get(m.end_node)
+        asgn = asgn_by_mid.get(m.member_id)
+        sec = sec_by_id.get(asgn.section_id) if asgn else None
+        if na is None or nb is None or sec is None:
+            continue
+        b_m = sec.width_mm / 1000.0
+        h_m = sec.depth_mm / 1000.0
+        area = b_m * h_m
+        iz = (b_m * (h_m ** 3) / 12.0) * (sec.cracked_iz if use_cracked else 1.0)
+        iy = (h_m * (b_m ** 3) / 12.0) * (sec.cracked_iy if use_cracked else 1.0)
+        j_val = _torsional_j(b_m, h_m) * (sec.cracked_ix if use_cracked else 1.0)
+        r3, L = _rotation_matrix_3x3(na, nb, asgn.beta_angle_deg)
+        T = _transform_12x12(r3)
+        k_loc = _local_stiffness_12x12(e_mod, g_mod, area, j_val, iy, iz, L)
+        k_eff, *_ = _condense_releases(
+            k_loc, zero_fe, asgn.release_start_moment, asgn.release_end_moment
+        )
+        ia = node_idx[m.start_node] * 6
+        ib = node_idx[m.end_node] * 6
+        dofs = list(range(ia, ia + 6)) + list(range(ib, ib + 6))
+        K_glob[np.ix_(dofs, dofs)] += T.T @ k_eff @ T
+
+    story_targets: dict[str, list[AnalyticalNode]] = {}
+    for lvl_id, elev_m, fx_kn, fz_kn in story_forces:
+        lvl_nodes = [
+            n for n in nodes
+            if not n.floor_level.startswith("FTG_") and abs(n.y_m - elev_m) <= 0.15
+        ]
+        free_lvl = [n for n in lvl_nodes if not n.is_support and n.support_type == "NONE"]
+        targets = free_lvl if free_lvl else lvl_nodes
+        story_targets[lvl_id] = targets
+        if not targets:
+            continue
+        for n in targets:
+            b = node_idx[n.node_id] * 6
+            F_lat[b + 0, 0] += fx_kn / len(targets)
+            F_lat[b + 2, 1] += fz_kn / len(targets)
+
+    restrained: set[int] = set()
+    for n in nodes:
+        if n.is_support and n.support_type != "NONE":
+            b = node_idx[n.node_id] * 6
+            if n.support_type == "FIXED":
+                restrained.update(range(b, b + 6))
+            elif n.support_type == "PINNED":
+                restrained.update([b, b + 1, b + 2])
+    if not restrained:
+        return {}
+
+    free_dofs = [i for i in range(n_dof) if i not in restrained]
+    K_ff = K_glob[np.ix_(free_dofs, free_dofs)].copy()
+    diag = np.diag(K_ff)
+    max_diag = float(np.max(np.abs(diag))) if len(diag) else 1.0
+    eps = max(1e-6, max_diag * 1e-12)
+    for idx_i, d_val in enumerate(diag):
+        if abs(d_val) < eps:
+            K_ff[idx_i, idx_i] += eps
+    try:
+        U_f = np.linalg.solve(K_ff, F_lat[free_dofs, :])
+    except np.linalg.LinAlgError:
+        U_f, *_ = np.linalg.lstsq(K_ff, F_lat[free_dofs, :], rcond=None)
+
+    U_glob = np.zeros((n_dof, 2), dtype=float)
+    U_glob[free_dofs, :] = U_f
+
+    out: dict[str, tuple[float, float]] = {}
+    for lvl_id, targets in story_targets.items():
+        if not targets:
+            out[lvl_id] = (0.0, 0.0)
+            continue
+        out[lvl_id] = (
+            sum(abs(float(U_glob[node_idx[n.node_id] * 6 + 0, 0])) for n in targets) / len(targets),
+            sum(abs(float(U_glob[node_idx[n.node_id] * 6 + 2, 1])) for n in targets) / len(targets),
+        )
+    return out

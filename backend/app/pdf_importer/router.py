@@ -31,7 +31,8 @@ from .schemas import (
     TransferRequest,
     TransferResponse,
 )
-from . import service
+from ..cad.dwg_converter import DwgConverterUnavailableError
+from . import cad_importer, service
 
 router = APIRouter(
     prefix="/api/projects/{project_id}/pdf-imports",
@@ -40,6 +41,8 @@ router = APIRouter(
 
 
 def _handle_error(exc: Exception) -> HTTPException:
+    if isinstance(exc, DwgConverterUnavailableError):
+        return HTTPException(status_code=503, detail=str(exc))
     if isinstance(exc, FileNotFoundError):
         return HTTPException(status_code=404, detail=str(exc))
     if isinstance(exc, KeyError):
@@ -49,6 +52,15 @@ def _handle_error(exc: Exception) -> HTTPException:
     if isinstance(exc, (InvalidPdfError, ValueError)):
         return HTTPException(status_code=400, detail=str(exc))
     return HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/upload-cad", response_model=ImportDocumentState)
+async def upload_cad_plan_plural(project_id: str, file: UploadFile = File(...)):
+    try:
+        content = await file.read()
+        return cad_importer.upload_cad_plan(project_id, file.filename or "plan.dxf", content)
+    except Exception as exc:
+        raise _handle_error(exc)
 
 
 @router.post("", response_model=ImportDocumentState)

@@ -1,11 +1,14 @@
 from pathlib import Path
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field
 from .models import ProjectRevisionSnapshot, ProjectState
 from .storage import save_project, load_project, list_projects, get_exports_dir
 from .staad import write_staad_preview, simulate_placeholder
 from .pdf_importer import router as pdf_importer_router
+from .pdf_importer import cad_importer as pdf_cad_importer
+from .pdf_importer.router import _handle_error as _handle_pdf_error
+from .pdf_importer.schemas import ImportDocumentState
 from .geometry import router as geometry_router
 from .sizing import router as sizing_router
 from .loads import router as loads_router
@@ -91,6 +94,15 @@ class CreateRevisionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     label: str = Field(default="Revision Snapshot", max_length=200)
     notes: str = Field(default="", max_length=1000)
+
+
+@app.post("/api/projects/{project_id}/pdf-import/upload-cad", response_model=ImportDocumentState)
+async def upload_cad_plan_alias(project_id: str, file: UploadFile = File(...)):
+    try:
+        content = await file.read()
+        return pdf_cad_importer.upload_cad_plan(project_id, file.filename or "plan.dxf", content)
+    except Exception as exc:
+        raise _handle_pdf_error(exc)
 
 
 @app.get("/api/reports/cost-presets")

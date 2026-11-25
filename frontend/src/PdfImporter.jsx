@@ -874,6 +874,36 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
     }
   }
 
+  async function handleUploadCad(e) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    setBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const uploaded = await apiJson(`/api/projects/${pid}/pdf-import/upload-cad`, {
+        method: "POST",
+        body: fd,
+      });
+      setDoc(uploaded);
+      setPageNum(1);
+      setMode("inspect");
+      setNotice(
+        `Imported CAD ${uploaded.filename}: ${uploaded.grid_candidates?.length || 0} grid line(s), ` +
+          `${uploaded.column_candidates?.length || 0} column(s), ${uploaded.openings?.length || 0} opening(s) ` +
+          `extracted at exact CAD precision (scale pre-confirmed).`
+      );
+      await loadImportsList(uploaded.doc_id);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function handleSelectDoc(docId) {
     if (!docId) return;
     setBusy(true);
@@ -1496,6 +1526,18 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
               onChange={handleUpload}
             />
           </label>
+          <label className="pdf-upload-btn cad-upload-btn" title="Exact millimeter CAD extraction">
+            {busy ? "Working..." : "Upload CAD (.dxf / .dwg)"}
+            <input
+              type="file"
+              accept=".dxf,.dwg"
+              disabled={busy}
+              onChange={handleUploadCad}
+            />
+          </label>
+          <span className="pdf-badge class-vector" title="CAD uploads skip raster detection">
+            CAD = exact mm extraction
+          </span>
           {imports.length > 0 && (
             <select
               className="pdf-select"

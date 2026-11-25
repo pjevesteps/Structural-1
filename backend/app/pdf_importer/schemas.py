@@ -17,7 +17,7 @@ SheetType = Literal[
 ]
 OpeningCategory = Literal["stairwell", "airwell", "shaft_other"]
 DetectionMethod = Literal["auto", "vector", "raster", "vlm"]
-CandidateSource = Literal["vector", "raster", "manual", "vlm"]
+CandidateSource = Literal["vector", "raster", "manual", "vlm", "cad"]
 ColumnFillMode = Literal["shaded_or_hatched", "gray_shaded_only", "any_filled"]
 
 
@@ -435,6 +435,7 @@ class ImportDocumentState(BaseModel):
     doc_id: str
     project_id: str
     filename: str
+    source_format: Literal["PDF", "CAD"] = "PDF"
     sha256: str
     file_size_bytes: int = Field(gt=0)
     created_at: str
@@ -459,6 +460,7 @@ class ImportDocumentSummary(BaseModel):
     doc_id: str
     project_id: str
     filename: str
+    source_format: Literal["PDF", "CAD"] = "PDF"
     page_count: int
     created_at: str
     updated_at: str
