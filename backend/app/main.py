@@ -8,6 +8,7 @@ from .pdf_importer import router as pdf_importer_router
 from .geometry import router as geometry_router
 from .sizing import router as sizing_router
 from .loads import router as loads_router
+from .design import router as design_router
 
 app = FastAPI(title="AI Structural Engineering Office", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -15,6 +16,7 @@ app.include_router(pdf_importer_router)
 app.include_router(geometry_router)
 app.include_router(sizing_router)
 app.include_router(loads_router)
+app.include_router(design_router)
 
 @app.get("/api/health")
 def health():

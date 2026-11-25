@@ -4,6 +4,18 @@ All notable changes to **AI Structural Engineering Office** are documented in th
 
 ## [Unreleased]
 
+### Added
+- **Phase 6 — Module 06 · Analysis Bridge, NSCP 2015 Drift Checks & RC Member Design**:
+  - **Analysis & RC Design Schemas (`backend/app/models.py`, `backend/app/schemas.py`)**: Added backward-compatible `DesignParameters`, `StoryDriftResult`, `SupportReactionEnvelope`, `BeamDesignResult`, `ColumnDesignResult`, `FootingDesignResult`, `DesignCheckIssue`, and `AnalysisDesignState` attached to `ProjectState.analysis_design` (respecting `extra="forbid"` and keeping all legacy `data/projects/*.json` files backward compatible).
+  - **Built-In 3D Direct Stiffness Method Solver & STAAD `.anl` Parser (`backend/app/design/`)**:
+    - `solver.py`: 12×12 3D Euler-Bernoulli frame element assembly (`numpy`) supporting `beta_angle_deg`, cracked section modifiers (`Ix`, `Iy`, `Iz`), exact static condensation for pinned end moment releases (`MY`/`MZ`), 4-point Gauss-Legendre consistent nodal loads for full/partial `UNI` & `TRAP` beam loads + concrete self-weight, simultaneous multi-RHS solve for all 11 primary cases, and linear superposition across all Phase 5 LRFD & ASD load combinations.
+    - `anl_parser.py`: Parses uploaded STAAD.Pro `.anl` output files (`JOINT DISPLACEMENT`, `SUPPORT REACTIONS`, `BEAM END FORCES`) into the same envelope schema and rejects `** ERROR`-terminated files without results.
+    - `rc_design.py`: NSCP 2015 Section 208.6.4 inelastic story drift (`ΔM = 0.7 R Δs`, `0.025h` vs `0.020h`) and Table 208-9 soft-story irregularity check; ACI 318 / NSCP 2015 RC beam flexure & SMRF 2-leg stirrup shear design; RC column biaxial P-M interaction (`Bresler ^1.5` contour across all LRFD combinations) & SMRF confinement ties; isolated footing bearing, one-way shear, punching shear & flexure sizing grouped into `F1`, `F2`, ...; and CSV schedule export.
+    - `router.py`: Registered in `main.py` at `/api/projects/{project_id}/design` (`POST /run`, `POST /upload-anl`, `POST /approve`, `GET /export-csv`).
+  - **STAAD.Pro Concrete Design Export (`backend/app/staad.py`)**: Appends `START CONCRETE DESIGN` (`CODE ACI`, `FC`, `FYMAIN`, `FYSEC`, `MAXMAIN`, `MINMAIN`, `TRACK 1`, `DESIGN BEAM`, `DESIGN COLUMN`, `END CONCRETE DESIGN`) after `PERFORM ANALYSIS PRINT STATICS CHECK` when `include_staad_concrete_design=True`.
+  - **Module 06 Frontend UI (`frontend/src/DesignReview.jsx`, `frontend/src/App.jsx`, `frontend/src/style.css`)**: Added Design Parameter bar, STAAD `.anl` upload & CSV export actions, 5 workspace tabs (**3D Utilization View** color-coded by DCR with click-to-inspect callouts, **Story Drift & Reactions**, **Beam Schedule**, **Column Schedule**, **Footing Schedule**), and Design Health + NSCP 2015 Review sidebar.
+  - **Tests (`backend/tests/test_analysis_design.py`)**: Added 4 test suites covering DSM vertical equilibrium (within 2%), story drift `0.025h`/`0.020h` limits, RC beam/column/footing sizing & undersized `FAIL` detection, STAAD `.anl` parsing & error rejection, CSV export, STAAD `START CONCRETE DESIGN` block, and legacy JSON compatibility.
+
 ### Fixed
 - **STAAD.Pro Mass Modeling & `FLOOR DIAPHRAGM` Export Order (`backend/app/staad.py`, `backend/tests/test_load_generator.py`)**:
   - Emits `DEFINE REFERENCE LOADS` (`LOAD R1 LOADTYPE Dead`, plus optional scaled `LOAD R2 LOADTYPE Live` when `live_load_seismic_fraction > 0`) immediately after `SUPPORTS` and strictly BEFORE `FLOOR DIAPHRAGM`, resolving STAAD.Pro's `NO REFERENCE LOAD CASE OF TYPE MASS/GRAVITY/DEAD/LIVE IS DEFINED FOR MASS MODELING` error.

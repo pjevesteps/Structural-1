@@ -293,6 +293,33 @@ def _append_phase5_loads(lines: list[str], project: ProjectState) -> None:
     # 7. Analysis Trailer
     lines.append("PERFORM ANALYSIS PRINT STATICS CHECK")
 
+    # 8. Phase 6: ACI / NSCP Concrete Design Block (optional, enabled by default)
+    ad_params = project.analysis_design.params
+    if ad_params.include_staad_concrete_design:
+        mat = project.member_sizing.material
+        beam_ids = sorted(
+            m.member_id
+            for m in model.members
+            if m.member_type in ("primary_beam", "secondary_beam", "tie_beam", "trimmer_beam")
+        )
+        col_ids = sorted(m.member_id for m in model.members if m.member_type == "column")
+        max_bar_m = max(ad_params.main_bar_dia_beam_mm, ad_params.main_bar_dia_col_mm) / 1000.0
+        min_bar_m = min(ad_params.main_bar_dia_beam_mm, ad_params.main_bar_dia_col_mm) / 1000.0
+
+        lines.append("START CONCRETE DESIGN")
+        lines.append("CODE ACI")
+        lines.append(f"FC {mat.fc_mpa * 1000.0:.0f} ALL")
+        lines.append(f"FYMAIN {mat.fy_main_mpa * 1000.0:.0f} ALL")
+        lines.append(f"FYSEC {mat.fy_tie_mpa * 1000.0:.0f} ALL")
+        lines.append(f"MAXMAIN {max_bar_m:.3f} ALL")
+        lines.append(f"MINMAIN {min_bar_m:.3f} ALL")
+        lines.append("TRACK 1 ALL")
+        if beam_ids:
+            lines.extend(_wrap_staad_ids(beam_ids, prefix="DESIGN BEAM"))
+        if col_ids:
+            lines.extend(_wrap_staad_ids(col_ids, prefix="DESIGN COLUMN"))
+        lines.append("END CONCRETE DESIGN")
+
 
 def write_staad_preview(project: ProjectState, destination: Path):
     """

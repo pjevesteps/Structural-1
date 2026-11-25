@@ -378,6 +378,153 @@ class LoadGenerationState(BaseModel):
     engineer_approved: bool = False
 
 
+class DesignParameters(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    clear_cover_beam_mm: float = Field(default=40.0, gt=0.0)
+    clear_cover_column_mm: float = Field(default=40.0, gt=0.0)
+    clear_cover_footing_mm: float = Field(default=75.0, gt=0.0)
+    main_bar_dia_beam_mm: int = Field(default=16, ge=10, le=36)
+    main_bar_dia_col_mm: int = Field(default=20, ge=12, le=36)
+    stirrup_tie_dia_mm: int = Field(default=10, ge=8, le=16)
+    soil_bearing_qa_kpa: float = Field(default=150.0, gt=0.0)
+    footing_embedment_m: float = Field(default=1.50, ge=0.0)
+    soil_unit_weight_kn_m3: float = Field(default=18.0, gt=0.0)
+    include_staad_concrete_design: bool = True
+
+
+class StoryDriftResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    floor_level: str
+    elevation_m: float
+    story_height_m: float
+    elastic_disp_x_mm: float
+    elastic_disp_z_mm: float
+    delta_s_x_mm: float
+    delta_s_z_mm: float
+    delta_m_x_mm: float
+    delta_m_z_mm: float
+    allowable_drift_mm: float
+    drift_ratio_x: float
+    drift_ratio_z: float
+    stiffness_x_kn_m: float = 0.0
+    stiffness_z_kn_m: float = 0.0
+    soft_story_flag: bool = False
+    status: Literal["PASS", "FAIL"]
+
+
+class SupportReactionEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    node_id: int = Field(ge=1)
+    grid_ref: str = ""
+    floor_level: str
+    max_asd_fy_kn: float
+    min_asd_fy_kn: float
+    max_lrfd_pu_kn: float
+    max_lrfd_mux_knm: float
+    max_lrfd_muz_knm: float
+    max_lrfd_v_kn: float
+    governing_asd_combo: str = ""
+    governing_lrfd_combo: str = ""
+
+
+class BeamDesignResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    member_id: int = Field(ge=1)
+    section_id: str
+    floor_level: str
+    width_mm: float
+    depth_mm: float
+    length_m: float
+    mu_neg_start_knm: float
+    mu_pos_mid_knm: float
+    mu_neg_end_knm: float
+    vu_max_kn: float
+    governing_combo: str
+    as_req_top_start_mm2: float
+    as_req_bot_mid_mm2: float
+    as_req_top_end_mm2: float
+    bars_top_start: str
+    bars_bot_mid: str
+    bars_top_end: str
+    stirrups_support: str
+    stirrups_midspan: str
+    flexure_dcr: float
+    shear_dcr: float
+    governing_dcr: float
+    status: Literal["PASS", "FAIL"]
+    notes: list[str] = Field(default_factory=list)
+
+
+class ColumnDesignResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    member_id: int = Field(ge=1)
+    section_id: str
+    floor_level: str
+    width_mm: float
+    depth_mm: float
+    length_m: float
+    pu_max_kn: float
+    pu_min_kn: float
+    mux_max_knm: float
+    muy_max_knm: float
+    vu_max_kn: float
+    governing_combo: str
+    rho_provided: float
+    main_bars: str
+    ties_confined: str
+    ties_mid: str
+    pm_dcr: float
+    shear_dcr: float
+    governing_dcr: float
+    status: Literal["PASS", "FAIL"]
+    notes: list[str] = Field(default_factory=list)
+
+
+class FootingDesignResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    footing_tag: str
+    node_id: int = Field(ge=1)
+    grid_ref: str = ""
+    base_elevation_m: float
+    p_service_kn: float
+    pu_kn: float
+    b_m: float
+    l_m: float
+    thickness_mm: float
+    q_actual_kpa: float
+    q_allow_kpa: float
+    bearing_dcr: float
+    one_way_shear_dcr: float
+    punching_shear_dcr: float
+    governing_dcr: float
+    bottom_bars_x: str
+    bottom_bars_z: str
+    status: Literal["PASS", "FAIL"]
+
+
+class DesignCheckIssue(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    severity: Literal["error", "warning", "info"]
+    code: str
+    message: str
+    entity_ids: list[str] = Field(default_factory=list)
+
+
+class AnalysisDesignState(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    generated_at: str | None = None
+    source: Literal["internal_dsm", "staad_anl"] = "internal_dsm"
+    source_filename: str = ""
+    params: DesignParameters = Field(default_factory=DesignParameters)
+    story_drifts: list[StoryDriftResult] = Field(default_factory=list)
+    support_reactions: list[SupportReactionEnvelope] = Field(default_factory=list)
+    beam_designs: list[BeamDesignResult] = Field(default_factory=list)
+    column_designs: list[ColumnDesignResult] = Field(default_factory=list)
+    footing_designs: list[FootingDesignResult] = Field(default_factory=list)
+    validation_issues: list[DesignCheckIssue] = Field(default_factory=list)
+    engineer_approved: bool = False
+
+
 class ProjectState(BaseModel):
     model_config = ConfigDict(extra="forbid")
     project_info: ProjectInfo
@@ -389,6 +536,7 @@ class ProjectState(BaseModel):
     structural_model: StructuralModelState = Field(default_factory=StructuralModelState)
     member_sizing: MemberSizingState = Field(default_factory=MemberSizingState)
     load_generation: LoadGenerationState = Field(default_factory=LoadGenerationState)
+    analysis_design: AnalysisDesignState = Field(default_factory=AnalysisDesignState)
 
     @model_validator(mode="after")
     def check_references(self):

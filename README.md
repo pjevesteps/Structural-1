@@ -80,8 +80,14 @@ Connect tablet and PC to the same trusted Wi-Fi. Run `ipconfig` on Windows, then
   - NSCP 2015 Section 208 static seismic calculation (`Na`/`Nv` Tables 208-5 & 208-6 interpolation, `Ca`/`Cv` Tables 208-7 & 208-8, story seismic weights `W_i`, `V_max`/`V_min`/`V_min_z4` bounds, top force `Ft`, cumulative shears)
   - NSCP 2015 Section 207 MWFRS directional wind loads (`Kz` Table 207B.3-1, `qz`, story lateral forces `Fx`/`Fz`)
   - NSCP 2015 Sec. 203.3.1 LRFD (`101+`) and Sec. 203.4.2 ASD (`201+`) load combinations with vertical seismic `Ev = 0.5 * Ca * I`
-- Full analysis-ready STAAD.Pro `.std` exporter (`backend/app/staad.py`) appending `FLOOR DIAPHRAGM`, `DEFINE UBC LOAD` (or explicit `JOINT LOAD`), Seismic-before-Gravity primary cases (`1–11`), `LOAD COMB` / `REPEAT LOAD`, and `PERFORM ANALYSIS PRINT STATICS CHECK`, plus downloadable `<project_id>.std`
+- Full analysis-ready STAAD.Pro `.std` exporter (`backend/app/staad.py`) appending `DEFINE REFERENCE LOADS` (`R1`/`R2`), `FLOOR DIAPHRAGM` (unsupported nodes), `DEFINE UBC LOAD`, Seismic-before-Gravity primary cases (`1–11`), `LOAD COMB` / `REPEAT LOAD`, `PERFORM ANALYSIS PRINT STATICS CHECK`, and ACI `START CONCRETE DESIGN` block, plus downloadable `<project_id>.std`
 - Interactive Module 05 UI (`frontend/src/LoadGenerator.jsx`): regional quick presets, 4-tab Gravity/Seismic/Wind/Combinations workspace, story force charts, NSCP check sidebar, live `.std` preview drawer, and one-click download
+
+### Phase 6 — Analysis Bridge, NSCP 2015 Drift Checks & RC Member Design (Module 06)
+- Built-in 3D linear elastic Direct Stiffness Method solver (`backend/app/design/solver.py`, `numpy`) with cracked section modifiers, `beta_angle_deg`, exact static condensation for pinned beam releases, consistent Gauss-Legendre distributed loads, and LRFD/ASD combination envelopes
+- STAAD.Pro `.anl` output parser (`backend/app/design/anl_parser.py`) extracting `JOINT DISPLACEMENT`, `SUPPORT REACTIONS`, and `BEAM END FORCES` into the unified NSCP 2015 design pipeline
+- NSCP 2015 / ACI 318 design checks (`backend/app/design/rc_design.py`): story drift (`ΔM = 0.7 R Δs`) & soft-story irregularity, RC beam flexure & SMRF stirrups, RC column biaxial P-M interaction & confinement ties, isolated footing bearing/one-way/punching shear sizing (`F1`, `F2`, ...), and CSV reinforcement schedule export
+- Interactive Module 06 UI (`frontend/src/DesignReview.jsx`): 3D Utilization View (DCR color-coded with click-to-inspect), Story Drift & Reactions, Beam/Column/Footing schedules, STAAD `.anl` uploader, CSV export, and Design Health sidebar
 
 ## API
 
@@ -148,6 +154,12 @@ Connect tablet and PC to the same trusted Wi-Fi. Run `ipconfig` on Windows, then
 - `PATCH /api/projects/{project_id}/loads/config` — Update floor loads, seismic, wind, or export options and recalculate cleanly
 - `POST /api/projects/{project_id}/loads/approve` — Record engineer approval for generated loads (blocked if any `error` issues remain)
 - `GET /api/projects/{project_id}/staad/download` — Download the full STAAD.Pro input file as `<project_id>.std`
+
+### Phase 6 Analysis Bridge & RC Design Endpoints (`/api/projects/{project_id}/design`)
+- `POST /api/projects/{project_id}/design/run` — Run internal 3D DSM frame solver, NSCP 2015 drift/soft-story checks, and RC beam/column/footing design
+- `POST /api/projects/{project_id}/design/upload-anl` — Upload a STAAD.Pro `.anl` output file, parse envelopes, and run NSCP 2015 drift & RC design
+- `POST /api/projects/{project_id}/design/approve` — Record engineer approval (blocked while failing checks remain)
+- `GET /api/projects/{project_id}/design/export-csv` — Download Beam, Column, and Footing reinforcement schedules as CSV
 
 ## Documentation & History
 See [CHANGELOG.md](CHANGELOG.md) for a chronological record of changes.
