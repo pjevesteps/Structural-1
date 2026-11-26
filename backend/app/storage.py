@@ -50,6 +50,23 @@ def list_projects():
             raw = json.loads(path.read_text(encoding="utf-8"))
             info = dict(raw["project_info"])
             info["revision_count"] = len(raw.get("revisions") or [])
+            lg = raw.get("load_generation") or {}
+            info["seismic_zone"] = (lg.get("seismic") or {}).get("zone", 4)
+            sm = raw.get("structural_model") or {}
+            ms = raw.get("member_sizing") or {}
+            ad = raw.get("analysis_design") or {}
+            cd = raw.get("cad_drawings") or {}
+            rp = raw.get("reporting") or {}
+            info["phases_done"] = {
+                "01": True,
+                "02": bool((raw.get("columns") or []) or len(raw.get("levels") or []) > 1),
+                "03": bool(sm.get("nodes")),
+                "04": bool(ms.get("member_assignments")),
+                "05": bool(lg.get("generated_at")),
+                "06": bool(ad.get("generated_at")),
+                "07": bool(cd.get("generated_at")),
+                "08": bool(rp.get("generated_at")),
+            }
             items.append(info)
         except Exception:
             continue

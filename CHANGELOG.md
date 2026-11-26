@@ -4,6 +4,11 @@ All notable changes to **AI Structural Engineering Office** are documented in th
 
 ## [Unreleased]
 
+### Changed
+- **Global Technical CAD-BIM Studio Theme & Dashboard Overhaul (`frontend/src/style.css`, `frontend/src/App.jsx`, `backend/app/storage.py`)**:
+  - Unified all Modules 01–08 under the CAD-BIM Studio design system (`#090e17` canvas with `24px` blueprint grid, `#0f172a` panel surfaces, `#1e293b` hairline borders, emerald/cyan/amber/crimson semantic accents, monospaced `tabular-nums` data tables with sticky headers, segmented pill tab bars, compact engineering inputs, and slim dark scrollbars).
+  - Replaced the legacy Dashboard hero with a compact **Workstation Command Header** (`STRUCTURAL AI OFFICE`, `NSCP 2015 · NBCP 302-5 · PNS 49` badge, `+ New Project`, and `Load demonstration project`), updated all 8 module card descriptions (`01`–`08`) with live `READY`/`PENDING` phase indicators, and upgraded the Project Roster with monospaced Project IDs, Seismic Zone pills, revision counts, and `01→08` phase completion bars.
+
 ### Added
 - **Module 06 Post-Design CAD-BIM Studio (Pass 1 & Pass 2 · `PostDesignViewer.jsx`, `DesignReview.jsx`, `rc_design.py`, `router.py`, `reports/`)**:
   - **Backend Support (Pass 1)**: Added `footing_clashes` plan overlap detection (`|y1 - y2| <= 0.6 m`), `PATCH /api/projects/{id}/design/override-member` for instant single-member rebar/dimension override & DCR re-check, `POST /api/projects/{id}/design/pin-snapshot` for saving viewport PNGs, and Section `4.3 Visual Design Verification & Utilization Maps` embedding in Module 08 DOCX and PDF reports.
