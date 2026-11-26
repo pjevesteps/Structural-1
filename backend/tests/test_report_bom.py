@@ -5,6 +5,11 @@ import io
 import json
 import math
 from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from docx import Document
 from fastapi.testclient import TestClient
@@ -308,6 +313,18 @@ def test_docx_pdf_bom_csv_downloads_and_legacy_json_compatibility(report_client)
     assert "Isolated Footings" in all_docx_text
     assert "TOTAL REBAR" in all_docx_text
     assert "STAAD SPACE" in all_docx_text
+
+    # Verify OBO PDF is multi-page (>= 3 pages) with Soil Investigation & Running Headers
+    pdf_res = client.get(f"/api/projects/{pid}/reports/download/pdf")
+    assert pdf_res.status_code == 200
+    assert pdf_res.content[:5] == b"%PDF-"
+    pdf_doc = pymupdf.open(stream=pdf_res.content, filetype="pdf")
+    assert pdf_doc.page_count >= 3
+    full_pdf_text = "\n".join(pg.get_text() for pg in pdf_doc)
+    assert "NSCP 2015 / NBCP Sec. 302-5" in full_pdf_text
+    assert "Section 5" in full_pdf_text
+    assert "Section 6" in full_pdf_text
+    pdf_doc.close()
 
     # 2. Download PDF & parse with PyMuPDF
     pdf_res = client.get(f"/api/projects/{pid}/reports/download/pdf")

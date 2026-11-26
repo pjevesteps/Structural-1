@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import Member3DDetailViewer from "./Member3DDetailViewer";
 
 function statusColor(dcr, status) {
   if (status === "FAIL" || dcr > 1.0) return "#ef4444";
@@ -218,6 +219,8 @@ export default function PostDesignViewer({
   // Override & pin state
   const [saving, setSaving] = useState(false);
   const [overrideForm, setOverrideForm] = useState({});
+  const [detailMode, setDetailMode] = useState("2d"); // "2d" | "3d"
+  const [modal3dOpen, setModal3dOpen] = useState(false);
 
   const sm = project?.structural_model;
   const ad = analysisDesign;
@@ -636,6 +639,25 @@ export default function PostDesignViewer({
     else if (preset === "FRONT") { setYaw(0); setPitch(0.02); }
     else if (preset === "RIGHT") { setYaw(-Math.PI * 0.5); setPitch(0.02); }
     else if (preset === "FIT") { setYaw(-0.68); setPitch(0.46); }
+  }
+
+  async function handlePinCustomSnapshot(title, caption, imageDataUrl) {
+    setSaving(true);
+    try {
+      const res = await fetch(`/api/projects/${pid}/design/pin-snapshot`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title, caption, image_data_url: imageDataUrl }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.detail || "Failed to pin snapshot.");
+      onDesignUpdated(body);
+      onNotice(`Pinned '${title}' to Module 08 OBO Report.`);
+    } catch (err) {
+      onError(err.message);
+    } finally {
+      setSaving(false);
+    }
   }
 
   async function handlePinSnapshot() {
@@ -1181,7 +1203,37 @@ export default function PostDesignViewer({
                   </button>
                 </div>
 
-                <CrossSectionBlueprint entity={selectedEntity} data={selectedData} />
+                {selectedEntity.type !== "joint" && (
+                  <div className="pdv-seg-group" role="group" aria-label="Detail View Mode" style={{ alignSelf: "flex-start" }}>
+                    <button
+                      type="button"
+                      className={detailMode === "2d" ? "pdv-seg active" : "pdv-seg"}
+                      onClick={() => setDetailMode("2d")}
+                    >
+                      2D Section
+                    </button>
+                    <button
+                      type="button"
+                      className={detailMode === "3d" ? "pdv-seg active" : "pdv-seg"}
+                      onClick={() => setDetailMode("3d")}
+                    >
+                      3D Rebar Cage
+                    </button>
+                  </div>
+                )}
+
+                {selectedEntity.type !== "joint" && detailMode === "3d" ? (
+                  <Member3DDetailViewer
+                    entity={selectedEntity}
+                    data={selectedData}
+                    height={225}
+                    saving={saving}
+                    onExpandModal={() => setModal3dOpen(true)}
+                    onPinSnapshot={handlePinCustomSnapshot}
+                  />
+                ) : (
+                  <CrossSectionBlueprint entity={selectedEntity} data={selectedData} />
+                )}
 
                 {/* DCR Progress Bars */}
                 <div className="pdv-dcr-block">
@@ -1337,6 +1389,32 @@ export default function PostDesignViewer({
               </div>
             )}
           </aside>
+        </div>
+      )}
+
+      {modal3dOpen && selectedEntity && selectedData && selectedEntity.type !== "joint" && (
+        <div className="m3d-modal-backdrop" onClick={() => setModal3dOpen(false)}>
+          <div className="m3d-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="pdv-studio-head">
+              <div className="pdv-studio-title">
+                <strong>3D MEMBER REBAR CAGE INSPECTOR</strong>
+                <small>Drag to orbit · Scroll to zoom · Adjust concrete opacity or pin snapshot directly to Module 08 OBO Report</small>
+              </div>
+              <button type="button" className="secondary mini" onClick={() => setModal3dOpen(false)}>
+                Close
+              </button>
+            </div>
+            <div style={{ padding: "12px" }}>
+              <Member3DDetailViewer
+                entity={selectedEntity}
+                data={selectedData}
+                height={480}
+                isModal
+                saving={saving}
+                onPinSnapshot={handlePinCustomSnapshot}
+              />
+            </div>
+          </div>
         </div>
       )}
     </section>

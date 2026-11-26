@@ -326,6 +326,8 @@ def build_calculation_report_docx(project: ProjectState) -> bytes:
         "Code of the Philippines (NSCP 2015, Volume 1, 7th Edition), ACI 318 strength design provisions, "
         "and the National Building Code of the Philippines (PD 1096, Section 302-5).",
     )
+    soil = project.soil_investigation
+    dw_str = f"{soil.water_table_depth_m:.2f} m below grade" if soil.water_table_depth_m is not None else "Not encountered"
     criteria_rows = [
         ["Concrete Compressive Strength (f'c)", f"{mat.fc_mpa:.1f} MPa"],
         ["Concrete Elastic Modulus (Ec = 4700√f'c)", f"{mat.ec_kn_m2:,.1f} kN/m² ({mat.ec_kn_m2 / 1000.0:,.1f} MPa)"],
@@ -333,9 +335,10 @@ def build_calculation_report_docx(project: ProjectState) -> bytes:
         ["Main Reinforcing Steel (PNS 49 Grade 60, fy)", f"{mat.fy_main_mpa:.1f} MPa (Ø16 mm and larger)"],
         ["Transverse Ties / Stirrups (PNS 49 Grade 40, fyt)", f"{mat.fy_tie_mpa:.1f} MPa (Ø10–12 mm)"],
         ["Clear Concrete Covers (Beam / Column / Footing)", f"{dp.clear_cover_beam_mm:.0f} mm / {dp.clear_cover_column_mm:.0f} mm / {dp.clear_cover_footing_mm:.0f} mm"],
-        ["Allowable Soil Bearing Capacity (qa)", f"{dp.soil_bearing_qa_kpa:.1f} kPa (Unit weight γs = {dp.soil_unit_weight_kn_m3:.1f} kN/m³)"],
-        ["Footing Embedment / Pedestal Drop", f"{dp.footing_embedment_m:.2f} m embedment (Model pedestal drop = {sm.options.footing_depth_m:.2f} m)"],
-        ["Geotechnical Report Reference (NBCP 302-5)", sig.geotech_report_ref],
+        ["Foundation System", "Mat / Raft Foundation (Winkler Springs)" if project.foundation_system == "mat_raft" else "Isolated & Combined Spread Footings"],
+        ["Soil Investigation (qa / γs / φ)", f"qa = {soil.allowable_bearing_kpa:.1f} kPa | γs = {soil.soil_unit_weight_kn_m3:.1f} kN/m³ | φ = {soil.friction_angle_deg:.1f}°"],
+        ["Embedment / Water Table / Subgrade ks", f"Df = {soil.embedment_depth_m:.2f} m | Dw = {dw_str} | ks = {soil.subgrade_modulus_ks_kn_m3:,.0f} kN/m³"],
+        ["Geotechnical Report Reference (NBCP 302-5)", soil.report_ref or sig.geotech_report_ref],
     ]
     _add_styled_table(doc, ["Design Parameter", "Specified Value"], criteria_rows, font_size=8.5)
 
@@ -419,7 +422,8 @@ def build_calculation_report_docx(project: ProjectState) -> bytes:
             ["Near-Source Factors (Na, Nv)", f"Source Type {sp.seismic_source_type} @ {sp.fault_distance_km:.1f} km  →  Na = {ss.na:.2f}, Nv = {ss.nv:.2f}"],
             ["Seismic Coefficients (Ca, Cv)", f"Ca = {ss.ca:.3f}, Cv = {ss.cv:.3f}"],
             ["System Factors (R, I, ρ)", f"Rx = {sp.r_factor_x:.1f}, Rz = {sp.r_factor_z:.1f}, I = {sp.importance_factor_i:.2f}, ρ = {sp.redundancy_rho:.2f}"],
-            ["Building Height & Period (hn, T)", f"hn = {ss.building_height_m:.2f} m, T = {ss.period_t_sec:.3f} sec"],
+            ["Building Height & Period (hn, T)", f"hn = {ss.building_height_m:.2f} m, T = {ss.period_t_sec:.3f} sec ({'Method B Rayleigh' if sp.use_method_b_period else 'Method A Approx.'})"],
+            ["P-Delta Second-Order Analysis", f"ENABLED ({sp.pdelta_iterations} iterations, NSCP Sec. 208.10.3)" if sp.use_pdelta else "Standard First-Order Elastic"],
             ["Total Seismic Dead Weight (W)", f"{ss.total_seismic_weight_kn:,.2f} kN"],
             ["Design Base Shear (Vx / Vz)", f"Vx = {ss.v_design_x_kn:,.2f} kN ({ss.base_shear_ratio_x * 100:.2f}% W)  |  Vz = {ss.v_design_z_kn:,.2f} kN ({ss.base_shear_ratio_z * 100:.2f}% W)"],
         ]
@@ -675,6 +679,54 @@ def build_calculation_report_docx(project: ProjectState) -> bytes:
                 right_align_cols={3, 4, 5, 7},
                 status_col=8,
                 font_size=7.3,
+            )
+
+        if ad.combined_footing_designs:
+            _add_subheading(doc, "5.3b Combined Footing Schedule")
+            cf_rows = [
+                [
+                    c.combined_id,
+                    ", ".join(c.merged_footing_marks or [f"N{n}" for n in c.merged_node_ids]),
+                    f"{c.length_l_m:.2f} × {c.width_b_m:.2f} × {c.thickness_mm:.0f}",
+                    f"{c.total_ps_kn:.1f}",
+                    f"{c.q_max_kpa:.1f} / {c.q_net_allow_kpa:.0f}",
+                    c.top_long_bars,
+                    c.bot_long_bars,
+                    f"{max(c.bearing_dcr, c.one_way_shear_dcr, c.punching_shear_dcr):.2f}",
+                    c.status,
+                ]
+                for c in ad.combined_footing_designs
+            ]
+            _add_styled_table(
+                doc,
+                ["ID", "Merged Columns", "L × B × t (m/mm)", "Ps (kN)", "q / qnet (kPa)", "Top Long Bars", "Bot Long Bars", "DCR", "Status"],
+                cf_rows,
+                right_align_cols={3, 4, 7},
+                status_col=8,
+                font_size=7.2,
+            )
+
+        if ad.mat_foundation_design is not None:
+            m = ad.mat_foundation_design
+            _add_subheading(doc, "5.3c Mat / Raft Foundation Schedule (NSCP 2015 Rigid Mat)")
+            _add_styled_table(
+                doc,
+                ["Mat ID", "Dimensions (B×L×t)", "ex / ez (m)", "qmax / qmin (kPa)", "Punch DCR", "Top Bars X / Z", "Bot Bars X / Z", "Status"],
+                [
+                    [
+                        m.mat_id,
+                        f"{m.width_bx_m:.2f}×{m.length_lz_m:.2f} m × {m.thickness_mm:.0f} mm",
+                        f"{m.eccentricity_ex_m:+.2f} / {m.eccentricity_ez_m:+.2f}",
+                        f"{m.q_max_kpa:.1f} / {m.q_min_kpa:.1f}",
+                        f"{m.max_punching_dcr:.2f}",
+                        f"{m.top_bars_x} / {m.top_bars_z}",
+                        f"{m.bot_bars_x} / {m.bot_bars_z}",
+                        m.status,
+                    ]
+                ],
+                right_align_cols={2, 3, 4},
+                status_col=7,
+                font_size=7.2,
             )
 
         if ad.smrf_joint_checks:

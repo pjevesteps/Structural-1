@@ -308,6 +308,8 @@ def build_calculation_report_pdf(project: ProjectState) -> bytes:
             st_body,
         )
     )
+    soil = project.soil_investigation
+    dw_str = f"{soil.water_table_depth_m:.2f} m below grade" if soil.water_table_depth_m is not None else "Not encountered"
     add_table(
         ["Design Parameter", "Specified Value"],
         [
@@ -317,9 +319,10 @@ def build_calculation_report_pdf(project: ProjectState) -> bytes:
             ["Main Rebar Yield Strength (PNS 49 Grade 60, fy)", f"{mat.fy_main_mpa:.1f} MPa (D16mm and larger)"],
             ["Ties / Stirrups Yield Strength (PNS 49 Grade 40, fyt)", f"{mat.fy_tie_mpa:.1f} MPa (D10-D12mm)"],
             ["Clear Covers (Beam / Column / Footing)", f"{dp.clear_cover_beam_mm:.0f} mm / {dp.clear_cover_column_mm:.0f} mm / {dp.clear_cover_footing_mm:.0f} mm"],
-            ["Allowable Soil Bearing Capacity (qa)", f"{dp.soil_bearing_qa_kpa:.1f} kPa (soil unit wt = {dp.soil_unit_weight_kn_m3:.1f} kN/m³)"],
-            ["Footing Embedment / Pedestal Drop", f"{dp.footing_embedment_m:.2f} m embedment (Model pedestal drop = {sm.options.footing_depth_m:.2f} m)"],
-            ["Geotechnical Report Reference (NBCP 302-5)", sig.geotech_report_ref],
+            ["Foundation System", "Mat / Raft Foundation (Winkler Springs)" if project.foundation_system == "mat_raft" else "Isolated & Combined Spread Footings"],
+            ["Soil Bearing & Unit Weight (qa / gamma_s)", f"qa = {soil.allowable_bearing_kpa:.1f} kPa | gamma_s = {soil.soil_unit_weight_kn_m3:.1f} kN/m³ | phi = {soil.friction_angle_deg:.1f} deg"],
+            ["Embedment / Water Table / Subgrade ks", f"Df = {soil.embedment_depth_m:.2f} m | Dw = {dw_str} | ks = {soil.subgrade_modulus_ks_kn_m3:,.0f} kN/m³"],
+            ["Geotechnical Report Reference (NBCP 302-5)", soil.report_ref or sig.geotech_report_ref],
         ],
         col_weights=[40, 60],
     )
@@ -378,6 +381,7 @@ def build_calculation_report_pdf(project: ProjectState) -> bytes:
     # =========================================================================
     # SECTION 3: NSCP 2015 LOADS
     # =========================================================================
+    story.append(PageBreak())
     add_section("Section 3 - NSCP 2015 Gravity, Seismic (Sec. 208) & Wind (Sec. 207) Loads")
 
     if lg.floor_loads:
@@ -413,7 +417,8 @@ def build_calculation_report_pdf(project: ProjectState) -> bytes:
                 ["Near-Source Factors (Na, Nv)", f"Source {sp.seismic_source_type} @ {sp.fault_distance_km:.1f} km -> Na = {ss.na:.2f}, Nv = {ss.nv:.2f}"],
                 ["Seismic Coefficients (Ca, Cv)", f"Ca = {ss.ca:.3f}, Cv = {ss.cv:.3f}"],
                 ["R / I / rho", f"Rx = {sp.r_factor_x:.1f}, Rz = {sp.r_factor_z:.1f}, I = {sp.importance_factor_i:.2f}, rho = {sp.redundancy_rho:.2f}"],
-                ["Height hn / Period T", f"hn = {ss.building_height_m:.2f} m, T = {ss.period_t_sec:.3f} s"],
+                ["Height hn / Period T", f"hn = {ss.building_height_m:.2f} m, T = {ss.period_t_sec:.3f} s ({'Method B Rayleigh' if sp.use_method_b_period else 'Method A Approx.'})"],
+                ["P-Delta Second-Order Analysis", f"ENABLED ({sp.pdelta_iterations} iterations, NSCP Sec. 208.10.3)" if sp.use_pdelta else "Standard First-Order Elastic"],
                 ["Total Seismic Weight (W)", f"{ss.total_seismic_weight_kn:,.2f} kN"],
                 ["Design Base Shear (Vx / Vz)", f"Vx = {ss.v_design_x_kn:,.2f} kN ({ss.base_shear_ratio_x * 100:.2f}% W) | Vz = {ss.v_design_z_kn:,.2f} kN ({ss.base_shear_ratio_z * 100:.2f}% W)"],
             ],
@@ -557,6 +562,7 @@ def build_calculation_report_pdf(project: ProjectState) -> bytes:
     # =========================================================================
     # SECTION 5: RC MEMBER DESIGN SCHEDULES
     # =========================================================================
+    story.append(PageBreak())
     add_section("Section 5 - Reinforced Concrete Member Design Schedules")
     beam_pass = sum(1 for b in ad.beam_designs if b.status == "PASS")
     col_pass = sum(1 for c in ad.column_designs if c.status == "PASS")
@@ -647,6 +653,52 @@ def build_calculation_report_pdf(project: ProjectState) -> bytes:
                 col_weights=[6, 13, 15, 10, 12, 8, 20, 7, 9],
                 right_cols={3, 4, 5, 7},
                 status_col=8,
+            )
+
+        if ad.combined_footing_designs:
+            add_sub("5.3b Combined Footing Schedule")
+            cf_rows = [
+                [
+                    c.combined_id,
+                    ", ".join(c.merged_footing_marks or [f"N{n}" for n in c.merged_node_ids]),
+                    f"{c.length_l_m:.2f}x{c.width_b_m:.2f}x{c.thickness_mm:.0f}",
+                    f"{c.total_ps_kn:.1f}",
+                    f"{c.q_max_kpa:.1f}/{c.q_net_allow_kpa:.0f}",
+                    c.top_long_bars,
+                    c.bot_long_bars,
+                    f"{max(c.bearing_dcr, c.one_way_shear_dcr, c.punching_shear_dcr):.2f}",
+                    c.status,
+                ]
+                for c in ad.combined_footing_designs
+            ]
+            add_table(
+                ["ID", "Merged Cols", "LxBxt", "Ps", "q/qnet", "Top Long", "Bot Long", "DCR", "Status"],
+                cf_rows,
+                col_weights=[8, 13, 14, 9, 12, 14, 14, 7, 9],
+                right_cols={3, 4, 7},
+                status_col=8,
+            )
+
+        if ad.mat_foundation_design is not None:
+            m = ad.mat_foundation_design
+            add_sub("5.3c Mat / Raft Foundation Schedule (NSCP 2015 Rigid Mat)")
+            add_table(
+                ["Mat ID", "Dimensions (BxLxt)", "ex / ez (m)", "qmax / qmin (kPa)", "Punch DCR", "Top Bars X / Z", "Bot Bars X / Z", "Status"],
+                [
+                    [
+                        m.mat_id,
+                        f"{m.width_bx_m:.2f}x{m.length_lz_m:.2f}m x {m.thickness_mm:.0f}mm",
+                        f"{m.eccentricity_ex_m:+.2f} / {m.eccentricity_ez_m:+.2f}",
+                        f"{m.q_max_kpa:.1f} / {m.q_min_kpa:.1f}",
+                        f"{m.max_punching_dcr:.2f}",
+                        f"{m.top_bars_x} / {m.top_bars_z}",
+                        f"{m.bot_bars_x} / {m.bot_bars_z}",
+                        m.status,
+                    ]
+                ],
+                col_weights=[9, 17, 11, 13, 9, 16, 16, 9],
+                right_cols={2, 3, 4},
+                status_col=7,
             )
 
         if ad.smrf_joint_checks:
@@ -801,6 +853,7 @@ def build_calculation_report_pdf(project: ProjectState) -> bytes:
     # SECTION 6: BOM & COST ESTIMATE
     # =========================================================================
     if opts.include_bom_cost_estimate:
+        story.append(PageBreak())
         add_section("Section 6 - Structural Bill of Materials & Cost Estimate (NBCP Sec. 302-5f)")
         story.append(
             Paragraph(
@@ -939,7 +992,7 @@ def build_calculation_report_pdf(project: ProjectState) -> bytes:
     )
 
     canvas_cls = _make_numbered_canvas_class(
-        header_left=f"{pi.project_name} ({pi.project_id})",
+        header_left=f"{pi.project_name} ({pi.project_id}) | NSCP 2015 / NBCP Sec. 302-5",
         footer_left=opts.report_revision,
     )
     doc.build(story, canvasmaker=canvas_cls)
