@@ -14,6 +14,7 @@ from .schemas import (
     ExtractionResponse,
     ImportDocumentState,
     ImportDocumentSummary,
+    LevelCreateRequest,
     LevelExtractionResponse,
     LevelUpdateRequest,
     LockMasterGridRequest,
@@ -160,6 +161,18 @@ def extract_pdf_page(
 def extract_pdf_page_levels(project_id: str, doc_id: str, page_number: int):
     try:
         return service.extract_levels(project_id, doc_id, page_number)
+    except Exception as exc:
+        raise _handle_error(exc)
+
+
+@router.post("/{doc_id}/levels", response_model=ImportDocumentState)
+def create_manual_detected_level(
+    project_id: str,
+    doc_id: str,
+    payload: LevelCreateRequest,
+):
+    try:
+        return service.create_manual_level(project_id, doc_id, payload)
     except Exception as exc:
         raise _handle_error(exc)
 

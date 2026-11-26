@@ -210,6 +210,15 @@ class DetectedLevel(BaseModel):
     transferred: bool = False
 
 
+class LevelCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    page_number: int = Field(ge=1)
+    name: str = Field(min_length=1, max_length=120)
+    elevation_m: float
+    y_px: float = 0.0
+    engineer_approved: bool = True
+
+
 class LevelUpdateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str | None = None

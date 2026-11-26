@@ -90,6 +90,10 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
 
   const [imports, setImports] = useState([]);
   const [doc, setDoc] = useState(null);
+  const [manualLvlName, setManualLvlName] = useState("");
+  const [manualLvlElev, setManualLvlElev] = useState("0.00");
+  const [manualLvlApprove, setManualLvlApprove] = useState(true);
+  const [manualLvlYPx, setManualLvlYPx] = useState(0);
   const [projectLevels, setProjectLevels] = useState(() =>
     Array.isArray(project?.levels) ? project.levels : []
   );
@@ -579,6 +583,28 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
     if (!doc || !activePage || busy || spacePressed) return;
     const pt = getSvgPoint(e);
     if (!pt) return;
+
+    if (mode === "pick_datum") {
+      setError("");
+      setManualLvlYPx(pt.y_px);
+      // If 2+ levels already exist on this page with distinct y_px, estimate elevation linearly
+      const refLvls = pageLevels.filter((l) => typeof l.y_px === "number" && l.y_px > 0);
+      if (refLvls.length >= 2) {
+        const sortedRef = [...refLvls].sort((a, b) => a.elevation_m - b.elevation_m);
+        const low = sortedRef[0];
+        const high = sortedRef[sortedRef.length - 1];
+        if (Math.abs(low.y_px - high.y_px) > 10) {
+          const est =
+            low.elevation_m +
+            ((low.y_px - pt.y_px) / (low.y_px - high.y_px)) * (high.elevation_m - low.elevation_m);
+          setManualLvlElev(est.toFixed(2));
+        }
+      }
+      setNotice(
+        `Picked datum at y = ${pt.y_px.toFixed(0)} px — enter Level Label & Elevation (m) and click + Add Level Manually.`
+      );
+      return;
+    }
 
     if (mode === "calibrate") {
       setError("");
@@ -1334,6 +1360,38 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
         res.notice ||
           `Detection (${res.method_used}) found ${res.grids_detected} grids and ${res.columns_detected} columns.`
       );
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleAddManualLevel(e) {
+    e.preventDefault();
+    if (!doc || !activePage || !manualLvlName.trim()) return;
+    setBusy(true);
+    setError("");
+    try {
+      const updated = await apiJson(
+        `/api/projects/${pid}/pdf-imports/${encodeURIComponent(doc.doc_id)}/levels`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            page_number: activePage.page_number,
+            name: manualLvlName.trim(),
+            elevation_m: parseFloat(manualLvlElev) || 0.0,
+            y_px: manualLvlYPx || 0.0,
+            engineer_approved: manualLvlApprove,
+          }),
+        }
+      );
+      setDoc(updated);
+      setManualLvlName("");
+      setManualLvlYPx(0);
+      if (mode === "pick_datum") setMode("inspect");
+      setNotice(`Added manual level '${manualLvlName.trim()}'.`);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -2905,6 +2963,61 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
                       </h3>
                     </div>
                   </div>
+
+                  {/* Manual Level Entry & Click-on-Sheet Datum Picker (works on scanned / SHX elevations) */}
+                  <form
+                    onSubmit={handleAddManualLevel}
+                    className="pdf-level-card"
+                    style={{ marginBottom: "8px", borderLeftColor: "#38bdf8" }}
+                  >
+                    <div className="pdf-level-top" style={{ gap: "6px" }}>
+                      <input
+                        type="text"
+                        placeholder="Level Label (e.g. 2ND FLOOR LINE)"
+                        aria-label="Manual level label"
+                        value={manualLvlName}
+                        onChange={(e) => setManualLvlName(e.target.value)}
+                        required
+                      />
+                    </div>
+                    <div className="pdf-level-num-row" style={{ flexWrap: "wrap", gap: "6px" }}>
+                      <label className="pdf-field-chip">
+                        <span>Elev (m)</span>
+                        <input
+                          type="number"
+                          step="0.05"
+                          aria-label="Manual level elevation"
+                          value={manualLvlElev}
+                          onChange={(e) => setManualLvlElev(e.target.value)}
+                        />
+                      </label>
+                      <label className="pdf-check-chip">
+                        <input
+                          type="checkbox"
+                          checked={manualLvlApprove}
+                          onChange={(e) => setManualLvlApprove(e.target.checked)}
+                        />
+                        Approve
+                      </label>
+                    </div>
+                    <div className="pdf-cand-actions" style={{ flexWrap: "wrap", gap: "6px" }}>
+                      <button
+                        type="submit"
+                        className="mini-btn on-approve"
+                        disabled={busy || !manualLvlName.trim()}
+                      >
+                        + Add Level Manually
+                      </button>
+                      <button
+                        type="button"
+                        className={`mini-btn ${mode === "pick_datum" ? "on-approve" : ""}`}
+                        disabled={busy}
+                        onClick={() => setMode((m) => (m === "pick_datum" ? "inspect" : "pick_datum"))}
+                      >
+                        {mode === "pick_datum" ? "Picking Datum (Click Sheet)..." : "Click-on-Sheet to Pick Datum"}
+                      </button>
+                    </div>
+                  </form>
 
                   <div className="pdf-review-list">
                     {pageLevels.length === 0 ? (

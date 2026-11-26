@@ -37,19 +37,25 @@ NON_FLOOR_DATUM_EXCLUDE = (
     "LINTEL",
     "COPING",
     "RIDGE",
-    "EAVE",
     "BUILDING HEIGHT",
     "SCALE",
 )
 
 STRUCTURAL_FLOOR_KEYWORDS = (
     "BASEMENT",
+    "GROUND FLOOR LINE",
     "GROUND FLOOR",
+    "FIRST FLOOR LINE",
     "FIRST FLOOR",
+    "1ST FLOOR LINE",
     "1ST FLOOR",
+    "SECOND FLOOR LINE",
     "SECOND FLOOR",
+    "2ND FLOOR LINE",
     "2ND FLOOR",
+    "THIRD FLOOR LINE",
     "THIRD FLOOR",
+    "3RD FLOOR LINE",
     "3RD FLOOR",
     "FOURTH FLOOR",
     "4TH FLOOR",
@@ -62,11 +68,14 @@ STRUCTURAL_FLOOR_KEYWORDS = (
     "ROOF DECK",
     "ROOF LINE",
     "ROOF BEAM",
+    "ROOF APEX",
+    "EAVES LINE",
     "FINISHED FLOOR",
     "FLOOR FINISHED",
     "FFL",
 )
-NTH_FLOOR_RE = re.compile(r"\b\d+(?:ST|ND|RD|TH)\s+FLOOR\b", re.IGNORECASE)
+NTH_FLOOR_RE = re.compile(r"\b\d+(?:ST|ND|RD|TH)\s+FLOOR(?:\s+LINE)?\b", re.IGNORECASE)
+MM_STORY_DIM_RE = re.compile(r"^\s*([1-9]\d{3}(?:\.\d+)?)\s*(?:mm)?\s*$", re.IGNORECASE)
 MIN_STORY_STEP_M = 1.50
 
 ELEV_VALUE_RE = re.compile(
@@ -78,10 +87,11 @@ ELEV_PREFIX_ONLY_RE = re.compile(
     re.IGNORECASE,
 )
 LEVEL_TAG_RE = re.compile(
-    r"\b(LEVEL\s*\d+|BASEMENT(?:\s*\d+)?|GROUND\s+FLOOR|"
-    r"FIRST\s+FLOOR|1ST\s+FLOOR|SECOND\s+FLOOR|2ND\s+FLOOR|THIRD\s+FLOOR|3RD\s+FLOOR|"
-    r"FOURTH\s+FLOOR|4TH\s+FLOOR|FIFTH\s+FLOOR|5TH\s+FLOOR|\d+(?:ST|ND|RD|TH)\s+FLOOR|"
-    r"MEZZANINE|PENTHOUSE|ROOF\s+DECK|ROOF\s+LINE|ROOF\s+BEAM)\b",
+    r"\b(LEVEL\s*\d+|BASEMENT(?:\s*\d+)?|GROUND\s+FLOOR(?:\s+LINE)?|"
+    r"FIRST\s+FLOOR(?:\s+LINE)?|1ST\s+FLOOR(?:\s+LINE)?|SECOND\s+FLOOR(?:\s+LINE)?|2ND\s+FLOOR(?:\s+LINE)?|"
+    r"THIRD\s+FLOOR(?:\s+LINE)?|3RD\s+FLOOR(?:\s+LINE)?|"
+    r"FOURTH\s+FLOOR|4TH\s+FLOOR|FIFTH\s+FLOOR|5TH\s+FLOOR|\d+(?:ST|ND|RD|TH)\s+FLOOR(?:\s+LINE)?|"
+    r"MEZZANINE|PENTHOUSE|ROOF\s+DECK|ROOF\s+LINE|ROOF\s+BEAM|ROOF\s+APEX|EAVES\s+LINE)\b",
     re.IGNORECASE,
 )
 
@@ -1695,6 +1705,13 @@ def extract_levels_from_elevation_or_section(
     finally:
         doc.close()
 
+    # Detect stroked AutoCAD SHX fonts / scanned elevations with too few selectable PDF words
+    total_selectable_words = sum(len(t["text"].split()) for t in text_lines)
+    if total_selectable_words < 3:
+        return [], [
+            "No selectable PDF text found (stroked AutoCAD SHX font) — add levels manually below or upload the .dxf file."
+        ]
+
     # Mark lines stacked immediately adjacent to a "CEILING" line (e.g. "fourth floor" + "ceiling line")
     ceiling_lines = [t for t in text_lines if "CEILING" in t["upper"]]
     for t in text_lines:
@@ -1734,19 +1751,34 @@ def extract_levels_from_elevation_or_section(
                 if cl["span"] >= min_datum_span
             ]
 
-    datum_clusters.sort(key=lambda c: -c["coord"])
-
-    left_all_lines = [t for t in text_lines if t["cx"] <= page_w * 0.58]
-    left_structural_lines = [
+    all_structural_lines = [
         t
-        for t in left_all_lines
+        for t in text_lines
         if not t["is_ceiling_part"] and _is_structural_floor_label(t["upper"])
     ]
+    # If AutoCAD elevation uses short datum ticks instead of full-width lines, synthesize clusters from labels
+    if not datum_clusters and all_structural_lines:
+        seen_ys: list[float] = []
+        for t in sorted(all_structural_lines, key=lambda item: -item["cy"]):
+            if not any(abs(t["cy"] - sy) <= 22.0 for sy in seen_ys):
+                seen_ys.append(t["cy"])
+                datum_clusters.append({"coord": t["cy"], "span": min_datum_span})
+
+    datum_clusters.sort(key=lambda c: -c["coord"])
+
     right_elev_lines = [
         (t, val)
         for t in text_lines
         if (val := _parse_elevation_m(t["text"])) is not None
     ]
+    # Vertical / rotated millimeter dimension strings (e.g. 3000, 2800, 2700 -> 3.00m, 2.80m, 2.70m)
+    mm_dim_lines: list[tuple[dict, float]] = []
+    for t in text_lines:
+        m_mm = MM_STORY_DIM_RE.match(t["text"])
+        if m_mm:
+            mm_val = float(m_mm.group(1))
+            if 1500.0 <= mm_val <= 9500.0:
+                mm_dim_lines.append((t, round(mm_val / 1000.0, 4)))
 
     candidates: list[DetectedLevel] = []
     global_warnings: list[str] = []
@@ -1755,20 +1787,17 @@ def extract_levels_from_elevation_or_section(
     for cl in datum_clusters:
         dy_coord = cl["coord"]
 
-        # Check if the nearest left-side label on this datum line is explicitly a non-floor datum
-        nearby_left_all = [t for t in left_all_lines if abs(t["cy"] - dy_coord) <= y_match_tol]
-        nearby_struct = [t for t in left_structural_lines if abs(t["cy"] - dy_coord) <= y_match_tol]
+        nearby_all = [t for t in text_lines if abs(t["cy"] - dy_coord) <= y_match_tol]
+        nearby_struct = [t for t in all_structural_lines if abs(t["cy"] - dy_coord) <= y_match_tol]
 
         # Must match a structural floor/roof framing label (never keep unlabeled or excluded datums)
         if not nearby_struct:
             continue
 
-        # If a non-ceiling excluded datum (e.g. NATURAL GRADE LINE / FIREWALL) sits right on this
-        # datum line while the nearest structural label is far away (> 20 px), skip this datum line.
         closest_struct_dist = min(abs(t["cy"] - dy_coord) for t in nearby_struct)
         excluded_closer = [
             t
-            for t in nearby_left_all
+            for t in nearby_all
             if (not t["is_ceiling_part"])
             and _is_excluded_non_floor_datum(t["upper"])
             and closest_struct_dist > 20.0
@@ -1824,6 +1853,40 @@ def extract_levels_from_elevation_or_section(
                 warnings=item_warnings,
             )
         )
+
+    # Fallback: pair adjacent datum lines with nearby vertical/rotated mm dimensions (e.g. 3000, 2800, 2700)
+    # when datum labels have no inline EL. +X.XXm values
+    if len(candidates) >= 2 and mm_dim_lines and all(c.confidence < 0.80 for c in candidates):
+        candidates.sort(key=lambda l: -l.y_px)  # bottom-to-top (Ground Floor first)
+        used_dim_ids: set[int] = set()
+        cum_elev = 0.0
+        candidates[0].elevation_m = 0.0
+        candidates[0].confidence = 0.85
+        candidates[0].warnings = []
+        for idx in range(1, len(candidates)):
+            low_y = candidates[idx - 1].y_px
+            high_y = candidates[idx].y_px
+            mid_y = 0.5 * (low_y + high_y)
+            between = [
+                (di, t, m_val)
+                for di, (t, m_val) in enumerate(mm_dim_lines)
+                if di not in used_dim_ids and (high_y - 12.0) <= t["cy"] <= (low_y + 12.0)
+            ]
+            if between:
+                between.sort(key=lambda item: abs(item[1]["cy"] - mid_y))
+                di_best, _, story_m = between[0]
+                used_dim_ids.add(di_best)
+                cum_elev = round(cum_elev + story_m, 4)
+                candidates[idx].elevation_m = cum_elev
+                candidates[idx].confidence = 0.85
+                candidates[idx].warnings = []
+            else:
+                cum_elev = round(cum_elev + 3.0, 4)
+                candidates[idx].elevation_m = cum_elev
+                candidates[idx].confidence = 0.60
+                candidates[idx].warnings = [
+                    "No millimeter dimension matched between datums; defaulted +3.00 m — verify."
+                ]
 
     # Sort ascending by elevation_m (tie-break bottom-to-top by descending y_px)
     candidates.sort(key=lambda l: (l.elevation_m, -l.y_px))

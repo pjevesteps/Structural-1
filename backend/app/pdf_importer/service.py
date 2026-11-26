@@ -33,12 +33,14 @@ from .schemas import (
     ColumnCandidate,
     CopyOpeningsRequest,
     CopyOpeningsResponse,
+    DetectedLevel,
     DetectedOpening,
     ExtractRequest,
     ExtractionResponse,
     GridCandidate,
     ImportDocumentState,
     ImportDocumentSummary,
+    LevelCreateRequest,
     LevelExtractionResponse,
     LevelUpdateRequest,
     LockMasterGridRequest,
@@ -832,6 +834,37 @@ def extract_levels(
         warnings=warnings,
         notice=notice,
     )
+
+
+def create_manual_level(
+    project_id: str,
+    doc_id: str,
+    req: LevelCreateRequest,
+) -> ImportDocumentState:
+    state = get_import(project_id, doc_id)
+    _get_page(state, req.page_number)
+    lvl = DetectedLevel(
+        level_id=f"lvl-{uuid4().hex[:8]}",
+        name=req.name.strip(),
+        elevation_m=round(req.elevation_m, 4),
+        story_height_m=None,
+        page_number=req.page_number,
+        y_px=round(req.y_px, 2),
+        confidence=1.0,
+        review_status=ReviewStatus.APPROVED if req.engineer_approved else ReviewStatus.PENDING,
+        engineer_approved=req.engineer_approved,
+        warnings=[],
+    )
+    state.detected_levels.append(lvl)
+    _recompute_page_story_heights(state, req.page_number)
+    _save_state(state)
+    _append_audit(
+        project_id,
+        doc_id,
+        "level_created_manual",
+        {"page_number": req.page_number, "name": lvl.name, "elevation_m": lvl.elevation_m},
+    )
+    return state
 
 
 def update_level(

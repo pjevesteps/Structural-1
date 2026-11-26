@@ -1491,3 +1491,84 @@ def test_manual_grid_undo_redo_and_clear_region_grids(isolated_env):
     assert len(clear_events) == 1
     assert clear_events[0]["details"]["region_id"] == left_reg["region_id"]
     assert clear_events[0]["details"]["removed_grids_count"] == 3
+
+
+def test_elevation_mm_dimensions_shx_diagnostic_and_manual_level_create(tmp_path, monkeypatch):
+    monkeypatch.setattr(storage, "DATA_DIR", tmp_path / "projects")
+    client = TestClient(app)
+    pid = "ELEV-MM-01"
+    assert client.post("/api/projects", json=_make_sample_project(pid)).status_code == 200
+
+    # Build a 2-page PDF:
+    # Page 1: AutoCAD-style elevation with GROUND FLOOR LINE / 2ND FLOOR LINE / ROOF BEAM / ROOF APEX
+    #         + ignored CEILING LINE / NGL / PARAPET and rotated mm dimensions (3000, 2800, 2700)
+    # Page 2: Stroked SHX elevation (lines only, zero selectable PDF text)
+    pdf_doc = pymupdf.open()
+    p1 = pdf_doc.new_page(width=800, height=560)
+    p1.insert_text((320, 40), "FRONT ELEVATION", fontsize=14)
+    # Draw datum lines bottom-to-top
+    datums = [
+        (460, "NGL"),
+        (420, "GROUND FLOOR LINE"),
+        (330, "CEILING LINE"),
+        (300, "2ND FLOOR LINE"),
+        (200, "ROOF BEAM"),
+        (165, "PARAPET"),
+        (110, "ROOF APEX"),
+    ]
+    for y, lbl in datums:
+        p1.draw_line((80, y), (700, y), color=(0, 0, 0), width=0.8)
+        p1.insert_text((560, y - 3), lbl, fontsize=9)
+    # Vertical/rotated mm dimensions between structural datums
+    p1.insert_text((95, 360), "3000", fontsize=10, rotate=90)
+    p1.insert_text((95, 250), "2800", fontsize=10, rotate=90)
+    p1.insert_text((95, 155), "2700", fontsize=10, rotate=90)
+
+    # Page 2: Stroked SHX (geometry lines only, no text)
+    p2 = pdf_doc.new_page(width=800, height=560)
+    for y in (420, 300, 180):
+        p2.draw_line((80, y), (700, y), color=(0, 0, 0), width=0.8)
+
+    pdf_bytes = pdf_doc.tobytes()
+    pdf_doc.close()
+
+    up = client.post(
+        f"/api/projects/{pid}/pdf-imports",
+        files={"file": ("autocad_elev.pdf", pdf_bytes, "application/pdf")},
+    )
+    assert up.status_code == 200, up.text
+    doc_id = up.json()["doc_id"]
+
+    # 1. Extract levels from Page 1 -> cumulative elevations from mm dims (0.0, 3.0, 5.8, 8.5)
+    ex1 = client.post(f"/api/projects/{pid}/pdf-imports/{doc_id}/pages/1/extract-levels")
+    assert ex1.status_code == 200, ex1.text
+    lvls1 = [l for l in ex1.json()["document"]["detected_levels"] if l["page_number"] == 1]
+    names1 = [l["name"].upper() for l in lvls1]
+    assert len(lvls1) == 4
+    assert any("GROUND FLOOR" in n for n in names1)
+    assert any("2ND FLOOR" in n for n in names1)
+    assert any("ROOF BEAM" in n for n in names1)
+    assert any("ROOF APEX" in n for n in names1)
+    assert not any("CEILING" in n or "NGL" in n or "PARAPET" in n for n in names1)
+    assert [round(l["elevation_m"], 2) for l in lvls1] == [0.0, 3.0, 5.8, 8.5]
+
+    # 2. Extract levels from Page 2 (stroked SHX) -> clear diagnostic warning
+    ex2 = client.post(f"/api/projects/{pid}/pdf-imports/{doc_id}/pages/2/extract-levels")
+    assert ex2.status_code == 200, ex2.text
+    body2 = ex2.json()
+    assert body2["levels_detected"] == 0
+    assert any("stroked AutoCAD SHX font" in w for w in body2["warnings"])
+
+    # 3. Manual level creation via POST /levels
+    m1 = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/levels",
+        json={"page_number": 2, "name": "GROUND FLOOR LINE", "elevation_m": 0.0, "y_px": 420.0},
+    )
+    m2 = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/levels",
+        json={"page_number": 2, "name": "2ND FLOOR LINE", "elevation_m": 3.2, "y_px": 300.0},
+    )
+    assert m1.status_code == 200 and m2.status_code == 200
+    p2_lvls = [l for l in m2.json()["detected_levels"] if l["page_number"] == 2]
+    assert len(p2_lvls) == 2
+    assert p2_lvls[1]["story_height_m"] == 3.2
