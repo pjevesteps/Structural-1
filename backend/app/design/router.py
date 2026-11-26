@@ -1,9 +1,10 @@
 from datetime import datetime, timezone
+from typing import Literal
 import uuid
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import PlainTextResponse
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from .. import storage
 from ..models import (
@@ -13,12 +14,15 @@ from ..models import (
     PinDesignSnapshotRequest,
     RetainingWallInput,
     RoofTrussInput,
+    SoilInvestigationParams,
     StairDesignInput,
 )
 from .auto_resolve import AutoResolveRequest, AutoResolveResponse, run_auto_resolve
+from .foundation_suite import cluster_connected_clashes
 from .rc_design import (
     export_schedules_csv,
     override_member_design,
+    recompute_foundations_in_place,
     run_analysis_and_design,
     run_design_from_anl,
 )
@@ -269,3 +273,92 @@ def post_pin_snapshot(project_id: str, payload: PinDesignSnapshotRequest):
     )
     storage.save_project(project)
     return ad
+
+
+class SoilParametersRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    soil_investigation: SoilInvestigationParams | None = None
+    foundation_system: Literal["isolated_combined", "mat_raft"] | None = None
+    recalculate: bool = True
+
+
+class MergeFootingsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    node_ids: list[int] = Field(default_factory=list)
+    merge_all_clashes: bool = False
+
+
+@router.put("/soil-parameters", response_model=AnalysisDesignState)
+def put_soil_parameters(project_id: str, payload: SoilParametersRequest):
+    project = _load_or_404(project_id)
+    if payload.soil_investigation is not None:
+        project.soil_investigation = payload.soil_investigation
+        project.analysis_design.params.soil_bearing_qa_kpa = payload.soil_investigation.allowable_bearing_kpa
+        project.analysis_design.params.footing_embedment_m = payload.soil_investigation.embedment_depth_m
+        project.analysis_design.params.soil_unit_weight_kn_m3 = payload.soil_investigation.soil_unit_weight_kn_m3
+    if payload.foundation_system is not None:
+        project.foundation_system = payload.foundation_system
+
+    if payload.recalculate and project.analysis_design.generated_at is not None:
+        recompute_foundations_in_place(project)
+
+    storage.save_project(project)
+    return project.analysis_design
+
+
+@router.post("/merge-footings", response_model=AnalysisDesignState)
+def post_merge_footings(project_id: str, payload: MergeFootingsRequest):
+    project = _load_or_404(project_id)
+    if project.foundation_system != "isolated_combined":
+        raise HTTPException(
+            status_code=400,
+            detail="Switch foundation_system to 'isolated_combined' before merging footings.",
+        )
+
+    new_groups: list[list[int]] = []
+    if payload.merge_all_clashes:
+        new_groups = cluster_connected_clashes(project.analysis_design.footing_clashes)
+    elif len(payload.node_ids) >= 2:
+        new_groups = [sorted({int(n) for n in payload.node_ids})]
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Provide at least 2 node_ids or set merge_all_clashes=True.",
+        )
+
+    # Merge overlapping groups cleanly so no node belongs to two groups
+    existing = [set(g) for g in project.merged_footing_groups]
+    for grp in new_groups:
+        gset = set(grp)
+        merged_list: list[set[int]] = []
+        for ex in existing:
+            if ex & gset:
+                gset |= ex
+            else:
+                merged_list.append(ex)
+        merged_list.append(gset)
+        existing = merged_list
+
+    project.merged_footing_groups = [sorted(g) for g in existing if len(g) >= 2]
+    recompute_foundations_in_place(project)
+    storage.save_project(project)
+    return project.analysis_design
+
+
+@router.delete("/merge-footings/{combined_id}", response_model=AnalysisDesignState)
+def delete_merged_footing(project_id: str, combined_id: str):
+    project = _load_or_404(project_id)
+    target = next(
+        (c for c in project.analysis_design.combined_footing_designs if c.combined_id == combined_id),
+        None,
+    )
+    if target is None:
+        raise HTTPException(status_code=404, detail=f"Combined footing '{combined_id}' not found.")
+
+    target_set = set(target.merged_node_ids)
+    project.merged_footing_groups = [
+        g for g in project.merged_footing_groups if set(g) != target_set
+    ]
+    recompute_foundations_in_place(project)
+    storage.save_project(project)
+    return project.analysis_design

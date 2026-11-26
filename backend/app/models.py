@@ -671,6 +671,73 @@ class PinDesignSnapshotRequest(BaseModel):
     image_data_url: str = Field(min_length=10)
 
 
+class SoilInvestigationParams(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    report_ref: str = ""
+    allowable_bearing_kpa: float = Field(default=150.0, gt=10.0, le=2000.0)
+    soil_unit_weight_kn_m3: float = Field(default=18.0, gt=10.0, le=26.0)
+    embedment_depth_m: float = Field(default=1.5, ge=0.0, le=12.0)
+    water_table_depth_m: float | None = Field(default=None, ge=0.0, le=50.0)
+    friction_angle_deg: float = Field(default=30.0, ge=15.0, le=45.0)
+    cohesion_kpa: float = Field(default=0.0, ge=0.0, le=300.0)
+    subgrade_modulus_ks_kn_m3: float = Field(default=18000.0, gt=500.0, le=200000.0)
+
+
+class CombinedFootingDesign(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    combined_id: str
+    merged_node_ids: list[int] = Field(default_factory=list)
+    merged_footing_marks: list[str] = Field(default_factory=list)
+    center_x_m: float
+    center_z_m: float
+    y_m: float
+    orientation_deg: float = 0.0
+    length_l_m: float
+    width_b_m: float
+    thickness_mm: float
+    total_pu_kn: float
+    total_ps_kn: float
+    q_max_kpa: float
+    q_net_allow_kpa: float
+    bearing_dcr: float
+    one_way_shear_dcr: float
+    punching_shear_dcr: float
+    top_long_bars: str
+    bot_long_bars: str
+    bot_trans_bars: str
+    status: Literal["PASS", "FAIL"]
+
+
+class MatFoundationDesign(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    mat_id: str = "MAT-1"
+    y_m: float
+    min_x_m: float
+    max_x_m: float
+    min_z_m: float
+    max_z_m: float
+    width_bx_m: float
+    length_lz_m: float
+    overhang_m: float = 0.75
+    thickness_mm: float
+    total_pu_kn: float
+    total_ps_kn: float
+    eccentricity_ex_m: float
+    eccentricity_ez_m: float
+    q_max_kpa: float
+    q_min_kpa: float
+    q_net_allow_kpa: float
+    uplift_detected: bool = False
+    bearing_dcr: float
+    governing_punching_node_id: int | None = None
+    max_punching_dcr: float
+    top_bars_x: str
+    top_bars_z: str
+    bot_bars_x: str
+    bot_bars_z: str
+    status: Literal["PASS", "FAIL"]
+
+
 class AnalysisDesignState(BaseModel):
     model_config = ConfigDict(extra="forbid")
     generated_at: str | None = None
@@ -682,6 +749,9 @@ class AnalysisDesignState(BaseModel):
     beam_designs: list[BeamDesignResult] = Field(default_factory=list)
     column_designs: list[ColumnDesignResult] = Field(default_factory=list)
     footing_designs: list[FootingDesignResult] = Field(default_factory=list)
+    combined_footing_designs: list[CombinedFootingDesign] = Field(default_factory=list)
+    mat_foundation_design: MatFoundationDesign | None = None
+    footing_coverage_ratio: float = 0.0
     footing_clashes: list[dict[str, Any]] = Field(default_factory=list)
     pinned_design_views: list[dict[str, str]] = Field(default_factory=list)
     smrf_joint_checks: list[SmrfJointCheckResult] = Field(default_factory=list)
@@ -886,6 +956,9 @@ class ProjectState(BaseModel):
     reporting: ReportState = Field(default_factory=ReportState)
     cad_drawings: CadDrawingState = Field(default_factory=CadDrawingState)
     revisions: list[ProjectRevisionSnapshot] = Field(default_factory=list)
+    soil_investigation: SoilInvestigationParams = Field(default_factory=SoilInvestigationParams)
+    foundation_system: Literal["isolated_combined", "mat_raft"] = "isolated_combined"
+    merged_footing_groups: list[list[int]] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def check_references(self):

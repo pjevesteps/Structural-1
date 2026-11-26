@@ -18,6 +18,12 @@ from ..models import (
 )
 from ..reports.bom_engine import parse_bar_callout, parse_spacing_callout
 from .anl_parser import parse_staad_anl
+from .foundation_suite import (
+    compute_footing_coverage_ratio,
+    compute_net_bearing_kpa,
+    design_combined_footings,
+    design_mat_foundation,
+)
 from .retaining_wall import design_retaining_wall
 from .secondary_elements import design_roof_truss, design_slabs, design_stair
 from .smrf_joints import evaluate_smrf_joints
@@ -563,8 +569,11 @@ def design_footings(
         col_dims_by_node.setdefault(m.start_node, dims)
         col_dims_by_node.setdefault(m.end_node, dims)
 
+    merged_nids = {int(nid) for grp in project.merged_footing_groups for nid in grp}
     raw_footings: list[dict] = []
     for rxn in sorted(support_reactions, key=lambda r: r.node_id):
+        if rxn.node_id in merged_nids:
+            continue
         node = node_by_id.get(rxn.node_id)
         base_elev = node.y_m if node else 0.0
         cx_m, cz_m = col_dims_by_node.get(rxn.node_id, (0.40, 0.40))
@@ -575,16 +584,11 @@ def design_footings(
 
         chosen = None
         for t_mm in range(300, 950, 50):
-            t_m = t_mm / 1000.0
-            overburden = df * gamma_s + t_m * max(gamma_c - gamma_s, 0.0)
-            q_net = qa - overburden
-            if q_net <= 5.0:
-                b_m = max(1.0, math.ceil(math.sqrt(p_serv / max(qa, 1.0)) * 10.0) / 10.0)
-            else:
-                b_m = max(1.0, math.ceil(math.sqrt(p_serv / q_net) * 10.0) / 10.0)
+            q_net, overburden, qa_eff = compute_net_bearing_kpa(project, float(t_mm), params)
+            b_m = max(1.0, math.ceil(math.sqrt(p_serv / max(q_net, 5.0)) * 10.0) / 10.0)
             l_m = b_m
             q_actual = p_serv / (b_m * l_m) + overburden
-            bearing_dcr = q_actual / max(qa, 1e-6)
+            bearing_dcr = (p_serv / (b_m * l_m)) / max(q_net, 1e-6)
 
             d_mm = max(100.0, t_mm - params.clear_cover_footing_mm - db)
             d_m = d_mm / 1000.0
@@ -1065,8 +1069,19 @@ def _build_state_from_results(
     drifts = compute_story_drifts(project, results)
     beams = design_beams(project, results, params)
     columns = design_columns(project, results, params)
-    footings = design_footings(project, results.support_reactions, params)
-    footing_clashes = detect_footing_clashes(project, footings)
+    if project.foundation_system == "mat_raft":
+        footings = []
+        combined_footings = []
+        mat_design = design_mat_foundation(project, results.support_reactions, params)
+        footing_clashes = []
+        coverage_ratio = 1.0
+    else:
+        footings = design_footings(project, results.support_reactions, params)
+        combined_footings = design_combined_footings(project, results.support_reactions, params)
+        mat_design = None
+        footing_clashes = detect_footing_clashes(project, footings)
+        coverage_ratio = compute_footing_coverage_ratio(project, footings, combined_footings)
+
     smrf_joints = evaluate_smrf_joints(project, beams, columns, params)
     slabs = design_slabs(project, params)
     prev_ad = project.analysis_design
@@ -1081,6 +1096,17 @@ def _build_state_from_results(
     issues = _collect_design_issues(
         drifts, results.support_reactions, beams, columns, footings, smrf_joints
     )
+    if project.foundation_system == "isolated_combined" and coverage_ratio > 0.50:
+        issues.append(
+            DesignCheckIssue(
+                severity="warning",
+                code="HIGH_FOOTING_COVERAGE_MAT_ADVISORY",
+                message=(
+                    f"Shallow footing plan coverage is {coverage_ratio * 100:.0f}% (> 50% of building footprint). "
+                    "Consider switching to a Mat / Raft Foundation system."
+                ),
+            )
+        )
 
     return AnalysisDesignState(
         generated_at=_utc_now(),
@@ -1092,6 +1118,9 @@ def _build_state_from_results(
         beam_designs=beams,
         column_designs=columns,
         footing_designs=footings,
+        combined_footing_designs=combined_footings,
+        mat_foundation_design=mat_design,
+        footing_coverage_ratio=coverage_ratio,
         footing_clashes=footing_clashes,
         pinned_design_views=pinned_views,
         smrf_joint_checks=smrf_joints,
@@ -1106,6 +1135,48 @@ def _build_state_from_results(
         validation_issues=issues,
         engineer_approved=False,
     )
+
+
+def recompute_foundations_in_place(project: ProjectState) -> AnalysisDesignState:
+    """Re-design isolated, combined, or mat foundations + clashes using existing support reactions."""
+    ad = project.analysis_design
+    if ad.generated_at is None:
+        return ad
+    params = ad.params
+    if project.foundation_system == "mat_raft":
+        ad.footing_designs = []
+        ad.combined_footing_designs = []
+        ad.mat_foundation_design = design_mat_foundation(project, ad.support_reactions, params)
+        ad.footing_clashes = []
+        ad.footing_coverage_ratio = 1.0
+    else:
+        ad.footing_designs = design_footings(project, ad.support_reactions, params)
+        ad.combined_footing_designs = design_combined_footings(project, ad.support_reactions, params)
+        ad.mat_foundation_design = None
+        ad.footing_clashes = detect_footing_clashes(project, ad.footing_designs)
+        ad.footing_coverage_ratio = compute_footing_coverage_ratio(
+            project, ad.footing_designs, ad.combined_footing_designs
+        )
+    ad.validation_issues = _collect_design_issues(
+        ad.story_drifts,
+        ad.support_reactions,
+        ad.beam_designs,
+        ad.column_designs,
+        ad.footing_designs,
+        ad.smrf_joint_checks,
+    )
+    if project.foundation_system == "isolated_combined" and ad.footing_coverage_ratio > 0.50:
+        ad.validation_issues.append(
+            DesignCheckIssue(
+                severity="warning",
+                code="HIGH_FOOTING_COVERAGE_MAT_ADVISORY",
+                message=(
+                    f"Shallow footing plan coverage is {ad.footing_coverage_ratio * 100:.0f}% "
+                    "(> 50% of building footprint). Consider switching to a Mat / Raft Foundation system."
+                ),
+            )
+        )
+    return ad
 
 
 def run_analysis_and_design(

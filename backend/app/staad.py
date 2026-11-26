@@ -538,12 +538,33 @@ def write_staad_preview(project: ProjectState, destination: Path):
         # Supports
         fixed_ids = sorted(n.node_id for n in model.nodes if n.is_support and n.support_type == "FIXED")
         pinned_ids = sorted(n.node_id for n in model.nodes if n.is_support and n.support_type == "PINNED")
-        if fixed_ids or pinned_ids:
-            lines.append("SUPPORTS")
-            if fixed_ids:
-                lines.extend(_wrap_staad_ids(fixed_ids, suffix="FIXED"))
-            if pinned_ids:
-                lines.extend(_wrap_staad_ids(pinned_ids, suffix="PINNED"))
+        all_sup_ids = sorted(set(fixed_ids + pinned_ids))
+        if all_sup_ids:
+            if project.foundation_system == "mat_raft":
+                ks = project.soil_investigation.subgrade_modulus_ks_kn_m3
+                mat_d = project.analysis_design.mat_foundation_design
+                if mat_d is not None:
+                    mat_area = mat_d.width_bx_m * mat_d.length_lz_m
+                else:
+                    sup_nodes = [n for n in model.nodes if n.is_support]
+                    sx = max(n.x_m for n in sup_nodes) - min(n.x_m for n in sup_nodes) + 1.5
+                    sz = max(n.z_m for n in sup_nodes) - min(n.z_m for n in sup_nodes) + 1.5
+                    mat_area = max(sx * sz, 4.0)
+                a_trib = mat_area / max(len(all_sup_ids), 1)
+                k_spring = round(ks * a_trib, 1)
+                lines.append(
+                    f"* WINKLER MAT SPRINGS: ks={ks:.0f} kN/m3, A_trib={a_trib:.2f} m2/node"
+                )
+                lines.append("SUPPORTS")
+                lines.extend(
+                    _wrap_staad_ids(all_sup_ids, suffix=f"FIXED BUT FY KFY {k_spring:.1f}")
+                )
+            else:
+                lines.append("SUPPORTS")
+                if fixed_ids:
+                    lines.extend(_wrap_staad_ids(fixed_ids, suffix="FIXED"))
+                if pinned_ids:
+                    lines.extend(_wrap_staad_ids(pinned_ids, suffix="PINNED"))
 
         # Phase 5: NSCP 2015 Diaphragms, Loads, Combinations & Analysis
         if has_loads:
