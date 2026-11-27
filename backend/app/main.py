@@ -1,11 +1,20 @@
 from contextlib import asynccontextmanager
 import os
 from pathlib import Path
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
+from .auth import (
+    authenticate_request,
+    clear_session_cookie,
+    create_session_token,
+    current_user,
+    is_auth_enabled,
+    set_session_cookie,
+    verify_credentials,
+)
 from .models import ProjectRevisionSnapshot, ProjectState
 from .storage import (
     delete_project,
@@ -56,6 +65,33 @@ def _build_cors_config() -> tuple[list[str], bool]:
 _cors_origins, _cors_credentials = _build_cors_config()
 
 app = FastAPI(title="AI Structural Engineering Office", version="0.1.0", lifespan=_lifespan)
+
+
+@app.middleware("http")
+async def _beta_auth_middleware(request: Request, call_next):
+    if not is_auth_enabled():
+        return await call_next(request)
+    if request.method == "OPTIONS":
+        return await call_next(request)
+    path = request.url.path
+    if not (path == "/api" or path.startswith("/api/")):
+        return await call_next(request)
+    if path == "/api/health" or path == "/api/auth" or path.startswith("/api/auth/"):
+        return await call_next(request)
+
+    username = authenticate_request(request)
+    if not username:
+        return JSONResponse(status_code=401, content={"detail": "Authentication required"})
+
+    token = current_user.set(username)
+    try:
+        return await call_next(request)
+    finally:
+        current_user.reset(token)
+
+
+# Register CORSMiddleware AFTER auth middleware so CORSMiddleware is outermost
+# and 401 responses still include valid CORS headers.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
@@ -71,9 +107,50 @@ app.include_router(design_router)
 app.include_router(reports_router)
 app.include_router(cad_router)
 
+
+class LoginRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    username: str = Field(..., min_length=1, max_length=64)
+    password: str = Field(..., min_length=1, max_length=256)
+
+
 @app.get("/api/health")
 def health():
     return {"status": "ok", "version": "0.1.0", "data_dir": str(get_data_dir())}
+
+
+@app.get("/api/auth/me")
+def auth_me(request: Request):
+    enabled = is_auth_enabled()
+    user = authenticate_request(request) if enabled else None
+    return JSONResponse(
+        content={
+            "auth_enabled": enabled,
+            "authenticated": bool(user) if enabled else False,
+            "username": user if enabled else None,
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post("/api/auth/login")
+def auth_login(payload: LoginRequest, request: Request):
+    if not is_auth_enabled():
+        return {"status": "ok", "username": None, "auth_enabled": False}
+    username = verify_credentials(payload.username, payload.password)
+    if not username:
+        return JSONResponse(status_code=401, content={"detail": "Invalid username or password."})
+    token = create_session_token(username)
+    resp = JSONResponse(content={"status": "ok", "username": username})
+    set_session_cookie(resp, request, token)
+    return resp
+
+
+@app.post("/api/auth/logout")
+def auth_logout(request: Request):
+    resp = JSONResponse(content={"status": "ok"})
+    clear_session_cookie(resp, request)
+    return resp
 
 @app.get("/api/projects")
 def projects():

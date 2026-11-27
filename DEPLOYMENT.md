@@ -14,6 +14,11 @@ This repository packages **Structural AI Office** as a single-container full-sta
 4. Set **Environment Variables** in Railway → **Variables**:
    - `DATA_DIR=/app/data`
    - *(Optional)* `CORS_ORIGINS=https://<your-app>.up.railway.app` (or `*` if accessed from external clients without credentials).
+   - **Phase 1 Beta Authentication & Per-User Isolation (Optional)**:
+     - `AUTH_ENABLED=true` (omit or set `false` for open local development)
+     - `AUTH_SECRET=<random-64-char-hex-secret>` (keeps signed `sao_session` cookies valid across container restarts)
+     - `BETA_USERS=paul:StrongPass1,engr_juan:StrongPass2` (comma-separated `username:password` pairs; each user's projects, imports, and exports are isolated under `/app/data/users/<username>/`)
+     - `BOT_API_KEY=<random-api-key>` and optional `BOT_API_USER=paul` (allows `my-bots-room` or automation clients to authenticate via the `X-API-Key` header without a browser cookie)
 5. Generate a public domain under **Settings → Networking → Generate Domain**.
 6. Verify deployment health at:
    ```text

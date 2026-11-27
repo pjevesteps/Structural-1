@@ -49,6 +49,16 @@ export default function App() {
   const [revLabel, setRevLabel] = useState("");
   const [revNotes, setRevNotes] = useState("");
 
+  // Phase 1 Beta Auth state
+  const [authChecked, setAuthChecked] = useState(false);
+  const [authEnabled, setAuthEnabled] = useState(false);
+  const [authenticated, setAuthenticated] = useState(false);
+  const [authUsername, setAuthUsername] = useState("");
+  const [loginUser, setLoginUser] = useState("");
+  const [loginPass, setLoginPass] = useState("");
+  const [loginError, setLoginError] = useState("");
+  const [loginBusy, setLoginBusy] = useState(false);
+
   async function openRevisions(p) {
     setBusy(true);
     setMessage("");
@@ -153,9 +163,110 @@ export default function App() {
     }
   }
 
+  function clearWorkspaceState() {
+    setProjects([]);
+    setShowModule01(false);
+    setImportProject(null);
+    setGeometryProject(null);
+    setSizingProject(null);
+    setLoadsProject(null);
+    setDesignProject(null);
+    setCadProject(null);
+    setReportProject(null);
+    setRevProject(null);
+    setShowNewForm(false);
+    setMessage("");
+    persistActiveProjectId("");
+  }
+
   useEffect(() => {
-    refresh();
+    let cancelled = false;
+    async function bootstrapSession() {
+      try {
+        const res = await fetch("/api/auth/me", { credentials: "include" });
+        const data = await res.json().catch(() => ({ auth_enabled: false, authenticated: false, username: null }));
+        if (cancelled) return;
+        const enabled = Boolean(data.auth_enabled);
+        const authed = Boolean(data.authenticated);
+        setAuthEnabled(enabled);
+        setAuthenticated(authed);
+        setAuthUsername(data.username || "");
+        setAuthChecked(true);
+        if (!enabled || authed) {
+          await refresh();
+        }
+      } catch {
+        if (cancelled) return;
+        setAuthEnabled(false);
+        setAuthenticated(false);
+        setAuthChecked(true);
+        await refresh();
+      }
+    }
+    bootstrapSession();
+    return () => {
+      cancelled = true;
+    };
   }, []);
+
+  useEffect(() => {
+    function onUnauthorized() {
+      if (!authEnabled) return;
+      clearWorkspaceState();
+      setAuthenticated(false);
+      setAuthUsername("");
+      setLoginError("Your session has expired. Please sign in again.");
+    }
+    window.addEventListener("sao:unauthorized", onUnauthorized);
+    return () => window.removeEventListener("sao:unauthorized", onUnauthorized);
+  }, [authEnabled]);
+
+  async function handleLoginSubmit(e) {
+    e.preventDefault();
+    if (!loginUser.trim() || !loginPass) return;
+    setLoginBusy(true);
+    setLoginError("");
+    try {
+      const res = await fetch("/api/auth/login", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          username: loginUser.trim(),
+          password: loginPass,
+        }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setLoginError(body.detail || "Invalid username or password.");
+        return;
+      }
+      setAuthenticated(true);
+      setAuthUsername(body.username || loginUser.trim().toLowerCase());
+      setLoginPass("");
+      setLoginError("");
+      await refresh();
+    } catch {
+      setLoginError("Unable to reach backend server. Please retry.");
+    } finally {
+      setLoginBusy(false);
+    }
+  }
+
+  async function handleLogout() {
+    setBusy(true);
+    try {
+      await fetch("/api/auth/logout", { method: "POST", credentials: "include" });
+    } catch {
+      // ignore
+    } finally {
+      clearWorkspaceState();
+      setAuthenticated(false);
+      setAuthUsername("");
+      setLoginError("");
+      setBusy(false);
+    }
+  }
 
   async function loadSample() {
     setBusy(true);
@@ -305,6 +416,72 @@ export default function App() {
     if (n === "08") setReportProject(proj);
   }
 
+  const disclaimerText =
+    "Engineering aid only — all structural calculations, BOMs, and plans must be independently verified by a licensed Civil/Structural Engineer prior to signing and sealing.";
+
+  if (!authChecked) {
+    return (
+      <main className="shell" style={{ minHeight: "100vh", display: "grid", placeItems: "center" }}>
+        <div className="geom-panel" style={{ padding: "24px 32px", textAlign: "center" }}>
+          <strong style={{ letterSpacing: "0.06em" }}>STRUCTURAL AI OFFICE</strong>
+          <p style={{ color: "#94a3b8", marginTop: 8, marginBottom: 0 }}>
+            Checking workspace session...
+          </p>
+        </div>
+      </main>
+    );
+  }
+
+  if (authEnabled && !authenticated) {
+    return (
+      <main className="shell" style={{ minHeight: "100vh", display: "flex", flexDirection: "column", justifyContent: "space-between" }}>
+        <div style={{ flex: 1, display: "grid", placeItems: "center", padding: "32px 16px" }}>
+          <form
+            className="geom-panel"
+            onSubmit={handleLoginSubmit}
+            style={{ width: "100%", maxWidth: 400, padding: 24, display: "grid", gap: 14 }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+              <div className="logo">SE</div>
+              <div>
+                <b style={{ display: "block", letterSpacing: "0.06em" }}>STRUCTURAL AI OFFICE</b>
+                <small style={{ color: "#94a3b8" }}>Colleague Beta Access · NSCP 2015</small>
+              </div>
+            </div>
+            {loginError && <div className="pdf-alert error" style={{ margin: 0 }}>{loginError}</div>}
+            <label className="pdf-field-chip" style={{ flexDirection: "column", alignItems: "stretch" }}>
+              <span>Username</span>
+              <input
+                type="text"
+                autoComplete="username"
+                placeholder="e.g. engr_juan"
+                value={loginUser}
+                onChange={(e) => setLoginUser(e.target.value)}
+                required
+                autoFocus
+              />
+            </label>
+            <label className="pdf-field-chip" style={{ flexDirection: "column", alignItems: "stretch" }}>
+              <span>Password</span>
+              <input
+                type="password"
+                autoComplete="current-password"
+                placeholder="Enter password"
+                value={loginPass}
+                onChange={(e) => setLoginPass(e.target.value)}
+                required
+              />
+            </label>
+            <button type="submit" disabled={loginBusy || !loginUser.trim() || !loginPass}>
+              {loginBusy ? "Signing In..." : "Sign In"}
+            </button>
+          </form>
+        </div>
+        <footer>{disclaimerText}</footer>
+      </main>
+    );
+  }
+
   return (
     <main className="shell">
       {/* Workstation Command Header */}
@@ -327,6 +504,22 @@ export default function App() {
                 Load demonstration project
               </button>
             </>
+          )}
+          {authEnabled && authenticated && authUsername && (
+            <span
+              className="dash-active-pill"
+              style={{ display: "inline-flex", alignItems: "center", gap: 8 }}
+            >
+              <code>{authUsername}</code>
+              <button
+                type="button"
+                className="mini-btn"
+                disabled={busy}
+                onClick={handleLogout}
+              >
+                Sign Out
+              </button>
+            </span>
           )}
           <span className={health === "Connected" ? "online" : "status"}>{health}</span>
         </div>
@@ -717,10 +910,7 @@ export default function App() {
         </>
       )}
 
-      <footer>
-        Structural AI Office · Local-first CAD-BIM modeling, NSCP 2015 loads, RC design &amp; OBO
-        permit reports · Licensed engineer verification required
-      </footer>
+      <footer>{disclaimerText}</footer>
     </main>
   );
 }

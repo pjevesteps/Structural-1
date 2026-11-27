@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import shutil
 import stat
+from .auth import current_user, is_valid_username
 from .models import ProjectState
 
 _DEFAULT_DATA_ROOT = Path(__file__).resolve().parents[2] / "data"
@@ -29,18 +30,37 @@ def get_data_dir() -> Path:
     return _DEFAULT_DATA_ROOT.resolve()
 
 
+def get_active_data_dir() -> Path:
+    """
+    Resolve the active data root for the current request:
+      - If a beta user is authenticated via current_user ContextVar, isolate storage under
+        <DATA_DIR>/users/<username>/ and ensure subdirectories exist.
+      - Otherwise return get_data_dir() (100% backward compatible when AUTH_ENABLED=false).
+    """
+    base_root = get_data_dir()
+    user = current_user.get()
+    if user and is_valid_username(user):
+        user_root = (base_root / "users" / user).resolve()
+        if not user_root.is_relative_to(base_root.resolve()):
+            raise ValueError("User storage path escapes data root.")
+        for sub in ("projects", "imports", "exports", "revisions"):
+            (user_root / sub).mkdir(parents=True, exist_ok=True)
+        return user_root
+    return base_root
+
+
 def get_projects_dir() -> Path:
-    if DATA_DIR != _DEFAULT_PROJECTS_DIR:
+    if DATA_DIR != _DEFAULT_PROJECTS_DIR and not current_user.get():
         p = Path(DATA_DIR).resolve()
     else:
-        p = get_data_dir() / "projects"
+        p = get_active_data_dir() / "projects"
     p.mkdir(parents=True, exist_ok=True)
     return p
 
 
 def ensure_data_dirs() -> Path:
     """Create persistent volume root and required subdirectories on startup or before writes."""
-    root = get_data_dir()
+    root = get_active_data_dir()
     root.mkdir(parents=True, exist_ok=True)
     get_projects_dir().mkdir(parents=True, exist_ok=True)
     (root / "imports").mkdir(parents=True, exist_ok=True)
@@ -50,7 +70,7 @@ def ensure_data_dirs() -> Path:
 
 
 def get_exports_dir() -> Path:
-    exports_dir = get_data_dir() / "exports"
+    exports_dir = get_active_data_dir() / "exports"
     exports_dir.mkdir(parents=True, exist_ok=True)
     return exports_dir
 
@@ -191,7 +211,7 @@ def delete_project(project_id: str) -> dict:
     """
     safe = validate_project_id(project_id)
     projects_base = get_projects_dir().resolve()
-    data_root = get_data_dir().resolve()
+    data_root = get_active_data_dir().resolve()
 
     proj_file = (projects_base / f"{safe}.json").resolve()
     if not proj_file.is_relative_to(projects_base):
