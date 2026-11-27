@@ -61,6 +61,11 @@ export default function ReportBuilder({ project, onClose, onUpdated }) {
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
   const [activeTab, setActiveTab] = useState("setup"); // setup | bom | preview
+  const [previewMode, setPreviewMode] = useState("pdf"); // pdf | summary
+  const [pdfPreviewUrl, setPdfPreviewUrl] = useState("");
+  const [pdfPreviewLoading, setPdfPreviewLoading] = useState(false);
+  const [pdfPreviewError, setPdfPreviewError] = useState("");
+  const [pdfRefreshNonce, setPdfRefreshNonce] = useState(0);
 
   const [signatory, setSignatory] = useState(DEFAULT_SIGNATORY);
   const [bomParams, setBomParams] = useState(DEFAULT_BOM_PARAMS);
@@ -138,6 +143,52 @@ export default function ReportBuilder({ project, onClose, onUpdated }) {
       sizing?.member_assignments?.length &&
       ad?.generated_at
   );
+  const hasGeneratedReport = Boolean(bom || rep?.generated_at);
+
+  useEffect(() => {
+    if (activeTab !== "preview" || previewMode !== "pdf" || !hasPrereqs || !hasGeneratedReport) {
+      return;
+    }
+    let cancelled = false;
+    let objectUrl = "";
+    async function loadPdfPreview() {
+      setPdfPreviewLoading(true);
+      setPdfPreviewError("");
+      try {
+        const res = await fetch(`/api/projects/${pid}/reports/download/pdf`);
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(body.detail || `Failed to load PDF preview (${res.status})`);
+        }
+        const buf = await res.arrayBuffer();
+        if (cancelled) return;
+        const blob = new Blob([buf], { type: "application/pdf" });
+        objectUrl = URL.createObjectURL(blob);
+        setPdfPreviewUrl((prev) => {
+          if (prev) URL.revokeObjectURL(prev);
+          return objectUrl;
+        });
+      } catch (err) {
+        if (!cancelled) {
+          setPdfPreviewError(err.message || "Unable to load PDF preview.");
+        }
+      } finally {
+        if (!cancelled) setPdfPreviewLoading(false);
+      }
+    }
+    loadPdfPreview();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab, previewMode, hasPrereqs, hasGeneratedReport, pid, pdfRefreshNonce]);
+
+  useEffect(() => {
+    return () => {
+      if (pdfPreviewUrl) {
+        URL.revokeObjectURL(pdfPreviewUrl);
+      }
+    };
+  }, [pdfPreviewUrl]);
 
   const designStats = useMemo(() => {
     const beams = ad?.beam_designs || [];
@@ -191,6 +242,7 @@ export default function ReportBuilder({ project, onClose, onUpdated }) {
         body: JSON.stringify(payload),
       });
       setFullProject((prev) => (prev ? { ...prev, reporting: updated } : prev));
+      setPdfRefreshNonce((n) => n + 1);
       setNotice(
         `Calculation report & BOM generated: ${fmtNum(updated.bom?.total_concrete_gross_m3, 2)} m³ concrete, ` +
           `${fmtNum(updated.bom?.total_rebar_kg, 0)} kg rebar, Est. ${fmtPhp(updated.bom?.grand_total_cost_php)}.`
@@ -1039,8 +1091,117 @@ export default function ReportBuilder({ project, onClose, onUpdated }) {
             </div>
           )}
 
-          {/* TAB 3: A4 EXECUTIVE REPORT PREVIEW */}
+          {/* TAB 3: FULL MULTI-PAGE PDF & EXECUTIVE REPORT PREVIEW */}
           {activeTab === "preview" && (
+            <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+              <div className="sizing-bulk-bar" style={{ justifyContent: "space-between", alignItems: "center" }}>
+                <div className="loads-presets-row">
+                  <button
+                    type="button"
+                    className={previewMode === "pdf" ? "" : "secondary"}
+                    onClick={() => setPreviewMode("pdf")}
+                  >
+                    Full Multi-Page OBO PDF
+                  </button>
+                  <button
+                    type="button"
+                    className={previewMode === "summary" ? "" : "secondary"}
+                    onClick={() => setPreviewMode("summary")}
+                  >
+                    Executive Summary
+                  </button>
+                </div>
+                {previewMode === "pdf" && hasPrereqs && hasGeneratedReport && (
+                  <div className="loads-presets-row">
+                    <button
+                      type="button"
+                      className="secondary"
+                      disabled={pdfPreviewLoading}
+                      onClick={() => setPdfRefreshNonce((n) => n + 1)}
+                    >
+                      {pdfPreviewLoading ? "Rendering..." : "Refresh PDF"}
+                    </button>
+                    {pdfPreviewUrl && (
+                      <a
+                        href={pdfPreviewUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="secondary"
+                        style={{
+                          padding: "6px 12px",
+                          borderRadius: "6px",
+                          textDecoration: "none",
+                          fontSize: "12px",
+                          border: "1px solid var(--border, #2c3e55)",
+                          color: "inherit",
+                        }}
+                      >
+                        Open in New Tab
+                      </a>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {previewMode === "pdf" && (
+                <>
+                  {!hasPrereqs ? (
+                    <div className="geom-panel">
+                      <div className="loads-empty" style={{ display: "flex", flexDirection: "column", gap: "10px", alignItems: "center" }}>
+                        <span>
+                          Complete Modules <strong>03 (3D Geometry)</strong>, <strong>04 (Member Sizing)</strong>, and{" "}
+                          <strong>06 (Analysis &amp; RC Design)</strong>, then click <strong>Generate Report &amp; BOM</strong>{" "}
+                          to preview the full multi-page OBO Calculation Report PDF here.
+                        </span>
+                        <button type="button" className="secondary" onClick={() => setPreviewMode("summary")}>
+                          View Executive Summary Instead
+                        </button>
+                      </div>
+                    </div>
+                  ) : !hasGeneratedReport ? (
+                    <div className="geom-panel">
+                      <div className="loads-empty" style={{ display: "flex", flexDirection: "column", gap: "10px", alignItems: "center" }}>
+                        <span>
+                          Generate the report first to render the full multi-page NBCP Sec. 302-5 OBO PDF preview.
+                        </span>
+                        <button type="button" disabled={busy} onClick={() => handleGenerate("preview")}>
+                          {busy ? "Generating..." : "Generate Report & BOM"}
+                        </button>
+                      </div>
+                    </div>
+                  ) : pdfPreviewError ? (
+                    <div className="geom-panel">
+                      <div className="loads-empty" style={{ display: "flex", flexDirection: "column", gap: "10px", alignItems: "center" }}>
+                        <span>{pdfPreviewError}</span>
+                        <button type="button" className="secondary" onClick={() => setPdfRefreshNonce((n) => n + 1)}>
+                          Retry PDF Preview
+                        </button>
+                      </div>
+                    </div>
+                  ) : pdfPreviewLoading && !pdfPreviewUrl ? (
+                    <div className="geom-panel">
+                      <div className="loads-empty">Rendering full multi-page OBO Calculation Report PDF...</div>
+                    </div>
+                  ) : (
+                    <div className="geom-panel" style={{ padding: "8px" }}>
+                      <iframe
+                        title="Full Multi-Page OBO PDF Preview"
+                        src={pdfPreviewUrl}
+                        style={{
+                          width: "100%",
+                          height: "78vh",
+                          minHeight: "720px",
+                          border: "1px solid var(--border, #253447)",
+                          borderRadius: "8px",
+                          background: "#ffffff",
+                        }}
+                      />
+                    </div>
+                  )}
+                </>
+              )}
+
+              {previewMode === "summary" && (
             <div className="report-paper-wrap">
               <div className="report-paper">
                 <div className="report-paper-cover">
@@ -1203,6 +1364,8 @@ export default function ReportBuilder({ project, onClose, onUpdated }) {
                   </div>
                 )}
               </div>
+            </div>
+              )}
             </div>
           )}
         </div>
