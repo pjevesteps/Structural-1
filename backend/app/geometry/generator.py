@@ -382,10 +382,40 @@ def generate_structural_model(
         return nid
 
     # 1. Columns & vertical stacks (deterministic rule: column on L[i] connects L[i] -> L[i+1])
-    seen_member_pairs: set[tuple[int, int]] = set()
+    # If all columns in the project were imported from a single floor plan (1 distinct floor_level
+    # across a multi-story building, e.g. all tagged '2F' or all tagged 'GF'), extrude that
+    # single-plan column layout continuously across all stories so GF (0m) tie beams, footings,
+    # and upper roof framing are always generated cleanly.
+    resolved_col_indices: set[int] = set()
+    all_have_fl = bool(project.columns)
     for col in project.columns:
         fl = col.floor_level.strip()
         if not fl:
+            all_have_fl = False
+            continue
+        ridx = _resolve_level_index(fl, levels)
+        if ridx is not None:
+            resolved_col_indices.add(ridx)
+    single_plan_template = all_have_fl and len(resolved_col_indices) == 1 and len(levels) > 2
+    if single_plan_template:
+        only_idx = next(iter(resolved_col_indices))
+        info_issues.append(
+            GeometryCheckIssue(
+                severity="info",
+                code="SINGLE_PLAN_COLUMNS_EXTRUDED",
+                message=(
+                    f"All {len(project.columns)} column(s) were tagged on '{levels[only_idx].id}' only; "
+                    f"extruded continuously across all {len(levels) - 1} stories "
+                    f"({levels[0].id} to {levels[-1].id}) so GF base tie beams and pedestals connect to grade."
+                ),
+                floor_level=levels[0].id,
+            )
+        )
+
+    seen_member_pairs: set[tuple[int, int]] = set()
+    for col in project.columns:
+        fl = col.floor_level.strip()
+        if not fl or single_plan_template:
             story_indices = list(range(len(levels) - 1))
         else:
             idx = _resolve_level_index(fl, levels)

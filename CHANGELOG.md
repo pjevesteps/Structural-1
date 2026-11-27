@@ -5,6 +5,8 @@ All notable changes to **AI Structural Engineering Office** are documented in th
 ## [Unreleased]
 
 ### Fixed
+- **Module 03 Single-Plan Column Extrusion for GF Tie Beams & Footings (`backend/app/geometry/generator.py`, `backend/tests/test_geometry_cleanup_and_manual_beams.py`)**:
+  - When all imported columns in a multi-story project share a single floor tag (e.g., all columns tagged `"2F"` from a single imported floor plan on `[GF, 2F, ROOF]`), `generate_structural_model()` now extrudes that column layout continuously across all stories (`GF` → `2F` → `ROOF`) so `GF (0m)` nodes, base tie beams, and `-1.5 m` footing pedestals are generated cleanly in both 3D and 2D views while preserving stepped-base behavior whenever multiple distinct column levels are present.
 - **Module 03 2D Floor Framing Editor `GF (0m)` Tie Beams & Pedestal Support Toggle (`frontend/src/GeometryBuilder.jsx`, `backend/tests/test_geometry_cleanup_and_manual_beams.py`)**:
   - Updated `floorData` story filtering to match both case-insensitive `floor_level` and story elevation (`|y_m - elevation_m| <= 0.05 m`, excluding buried `FTG_*` nodes) so `GF (0m)` reliably renders GF nodes and base tie beams for both `footing_depth = 0` and `footing_depth > 0`.
   - Mapped grade nodes to their underlying pedestal footing nodes (`pedestalSupportByGradeNodeId`) so `GF (0m)` displays base support triangles and **Toggle Support** targets the underlying footing support node cleanly without disconnecting members.

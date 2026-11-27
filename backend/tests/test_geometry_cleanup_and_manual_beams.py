@@ -388,3 +388,41 @@ def test_base_tie_beams_with_and_without_footing_depth(isolated_env):
     assert sum(1 for m in m3["members"] if m["member_type"] == "tie_beam") == 0
     assert sum(1 for n in m3["nodes"] if n["floor_level"] == "GF" and n["is_support"]) == 4
 
+
+def test_single_upper_floor_column_import_still_generates_gf_tie_beams_and_pedestals(isolated_env):
+    """
+    Regression test for real-world PDF imports where all columns were tagged on a single
+    upper plan (e.g. '2F') on a 3-level building [GF (0m), 2F (3m), ROOF (6m)]:
+    columns must extrude down to GF (0m) so GF tie beams and -1.5m footing pedestals
+    are generated in both 3D and 2D views.
+    """
+    client = isolated_env
+    pid = "TEST-SINGLE-2F-COLS"
+    payload = _make_2x2_project(pid)
+    payload["levels"] = [
+        {"id": "GF", "elevation_m": 0.0},
+        {"id": "2F", "elevation_m": 3.0},
+        {"id": "ROOF", "elevation_m": 6.0},
+    ]
+    for col in payload["columns"]:
+        col["floor_level"] = "2F"
+    storage.save_project(ProjectState.model_validate(payload))
+
+    r = client.post(
+        f"/api/projects/{pid}/geometry/generate",
+        json={"include_base_tie_beams": True, "footing_depth_m": 1.50},
+    )
+    assert r.status_code == 200, r.text
+    sm = r.json()
+
+    gf_nodes = [n for n in sm["nodes"] if n["floor_level"] == "GF"]
+    ftg_nodes = [n for n in sm["nodes"] if n["floor_level"] == "FTG_GF"]
+    gf_tie_beams = [
+        m for m in sm["members"] if m["member_type"] == "tie_beam" and m["floor_level"] == "GF"
+    ]
+    assert len(gf_nodes) == 4
+    assert len(ftg_nodes) == 4
+    assert all(abs(n["y_m"] - (-1.50)) < 1e-4 for n in ftg_nodes)
+    assert len(gf_tie_beams) == 4
+
+
