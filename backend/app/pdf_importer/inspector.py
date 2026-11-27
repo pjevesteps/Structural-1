@@ -578,9 +578,10 @@ def inspect_and_render_pdf(
     pdf_path: Path,
     pages_dir: Path,
     dpi: int = DEFAULT_RENDER_DPI,
+    start_page_index: int = 0,
 ) -> tuple[list[PageInfo], list[PlanRegion]]:
     """
-    Inspect all pages of an immutable PDF, render PNG previews into pages_dir,
+    Inspect pages of a PDF starting at 0-based start_page_index, render PNG previews into pages_dir,
     classify each sheet strictly from its own normalized text, and auto-create PlanRegions for floor plans.
     """
     pages_dir.mkdir(parents=True, exist_ok=True)
@@ -595,7 +596,9 @@ def inspect_and_render_pdf(
 
         pages: list[PageInfo] = []
         regions: list[PlanRegion] = []
-        for idx, page in enumerate(doc):
+        start_idx = max(0, int(start_page_index))
+        for idx in range(start_idx, len(doc)):
+            page = doc[idx]
             page_number = idx + 1
             classification, drawing_count, image_count, text_word_count, image_coverage = (
                 classify_page(page)

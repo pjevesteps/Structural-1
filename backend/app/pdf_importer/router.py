@@ -1,4 +1,4 @@
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 
 from .inspector import InvalidPdfError, PdfTooLargeError
@@ -65,9 +65,16 @@ async def upload_cad_plan_plural(project_id: str, file: UploadFile = File(...)):
 
 
 @router.post("", response_model=ImportDocumentState)
-async def upload_pdf_plan(project_id: str, file: UploadFile = File(...)):
+async def upload_pdf_plan(
+    project_id: str,
+    file: UploadFile = File(...),
+    append: bool = Query(False),
+    doc_id: str | None = Query(None),
+):
     try:
         content = await file.read()
+        if append:
+            return service.append_pdf(project_id, doc_id, file.filename or "appended.pdf", content)
         return service.upload_pdf(project_id, file.filename or "plan.pdf", content)
     except Exception as exc:
         raise _handle_error(exc)

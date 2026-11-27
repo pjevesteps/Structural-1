@@ -1572,3 +1572,300 @@ def test_elevation_mm_dimensions_shx_diagnostic_and_manual_level_create(tmp_path
     p2_lvls = [l for l in m2.json()["detected_levels"] if l["page_number"] == 2]
     assert len(p2_lvls) == 2
     assert p2_lvls[1]["story_height_m"] == 3.2
+
+
+def test_multi_pdf_append_preserves_existing_pages_and_tracings(isolated_env):
+    """
+    Verify POST /pdf-imports?append=true merges a second PDF onto the active document
+    using tmp-file + os.replace(), renders only new pages, and preserves Page 1 calibrations/tracings.
+    """
+    client = TestClient(app)
+    pid = "TEST-APPEND-PDF"
+    storage.save_project(ProjectState.model_validate(_make_sample_project(pid)))
+
+    # PDF 1: 1-page Floor Plan
+    d1 = pymupdf.open()
+    p1 = d1.new_page(width=600, height=450)
+    p1.insert_text((40, 35), "GROUND FLOOR PLAN", fontsize=12)
+    p1.draw_line((100, 80), (100, 380), color=(0, 0, 0), width=0.8)
+    pdf1_bytes = d1.tobytes()
+    d1.close()
+
+    # PDF 2: 1-page Elevation
+    d2 = pymupdf.open()
+    p2 = d2.new_page(width=600, height=450)
+    p2.insert_text((40, 35), "FRONT ELEVATION", fontsize=12)
+    p2.draw_line((80, 350), (500, 350), color=(0, 0, 0), width=0.8)
+    p2.insert_text((420, 346), "GROUND FLOOR LINE", fontsize=9)
+    pdf2_bytes = d2.tobytes()
+    d2.close()
+
+    up1 = client.post(
+        f"/api/projects/{pid}/pdf-imports",
+        files={"file": ("ground_floor.pdf", pdf1_bytes, "application/pdf")},
+    )
+    assert up1.status_code == 200, up1.text
+    doc_id = up1.json()["doc_id"]
+    assert up1.json()["page_count"] == 1
+
+    # Calibrate Page 1 and trace a manual grid on Page 1
+    cal = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/pages/1/calibrate",
+        json={
+            "p1": {"x_px": 100.0, "y_px": 300.0},
+            "p2": {"x_px": 400.0, "y_px": 300.0},
+            "known_distance": 6.0,
+            "unit": "m",
+            "confirmed": True,
+        },
+    )
+    assert cal.status_code == 200, cal.text
+
+    tr = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/elements/manual-grid",
+        json={
+            "page_number": 1,
+            "element_type": "grid_x",
+            "label": "A",
+            "p1": {"x_px": 150.0, "y_px": 80.0},
+            "p2": {"x_px": 150.0, "y_px": 380.0},
+        },
+    )
+    assert tr.status_code == 200, tr.text
+
+    # Append PDF 2 onto the same doc_id
+    up2 = client.post(
+        f"/api/projects/{pid}/pdf-imports?append=true&doc_id={doc_id}",
+        files={"file": ("front_elev.pdf", pdf2_bytes, "application/pdf")},
+    )
+    assert up2.status_code == 200, up2.text
+    merged = up2.json()
+    assert merged["doc_id"] == doc_id
+    assert merged["page_count"] == 2
+    assert len(merged["pages"]) == 2
+    # Page 1 calibration and manual grid tracing are preserved intact
+    assert "1" in merged["calibrations"] and merged["calibrations"]["1"]["confirmed"] is True
+    assert any(g["page_number"] == 1 and g["label"] == "A" for g in merged["grid_candidates"])
+    # Page 2 rendered image is accessible
+    img2 = client.get(f"/api/projects/{pid}/pdf-imports/{doc_id}/pages/2/image")
+    assert img2.status_code == 200
+    assert img2.headers["content-type"] == "image/png"
+
+
+def test_solid_black_and_split_triangle_column_detection_1_100(isolated_env):
+    """
+    Verify solid black fill-only columns (stroke=None) AND AutoCAD split-triangle
+    SOLID hatch columns at 1:100 scale (300 mm = 8.5 pt) are detected and snapped.
+    """
+    client = TestClient(app)
+    pid = "TEST-SOLID-BLK-100"
+    storage.save_project(ProjectState.model_validate(_make_sample_project(pid)))
+
+    # 1:100 metric scale: 1 m = 10 mm on paper = 28.3465 pt
+    pt_per_m = 28.3465
+    col_half = 0.30 * pt_per_m * 0.5  # 300 mm column = 8.504 pt wide
+
+    pdf_doc = pymupdf.open()
+    page = pdf_doc.new_page(width=700, height=500)
+    page.insert_text((30, 28), "GROUND FLOOR PLAN", fontsize=11)
+
+    xs_pt = [("A", 140.0), ("B", 140.0 + 4.0 * pt_per_m)]
+    ys_pt = [("1", 340.0), ("2", 340.0 - 4.0 * pt_per_m)]
+
+    sh = page.new_shape()
+    for lbl, x in xs_pt:
+        sh.draw_line((x, 70.0), (x, 410.0))
+        sh.finish(color=(0.3, 0.3, 0.3), width=0.5)
+        page.insert_text((x - 3, 58.0), lbl, fontsize=10)
+    for lbl, y in ys_pt:
+        sh.draw_line((70.0, y), (420.0, y))
+        sh.finish(color=(0.3, 0.3, 0.3), width=0.5)
+        page.insert_text((50.0, y + 3), lbl, fontsize=10)
+
+    # Row y1: 2 solid-black fill-only rectangles (stroke=None)
+    for _, x in xs_pt:
+        y = ys_pt[0][1]
+        sh.draw_rect(pymupdf.Rect(x - col_half, y - col_half, x + col_half, y + col_half))
+        sh.finish(color=None, fill=(0.0, 0.0, 0.0))
+
+    # Row y2: 2 split-triangle AutoCAD SOLID hatch columns (2 right triangles per column, stroke=None)
+    for _, x in xs_pt:
+        y = ys_pt[1][1]
+        x0, y0, x1, y1 = x - col_half, y - col_half, x + col_half, y + col_half
+        sh.draw_polyline([(x0, y0), (x1, y0), (x1, y1), (x0, y0)])
+        sh.finish(color=None, fill=(0.0, 0.0, 0.0), closePath=True)
+        sh.draw_polyline([(x0, y0), (x1, y1), (x0, y1), (x0, y0)])
+        sh.finish(color=None, fill=(0.0, 0.0, 0.0), closePath=True)
+
+    sh.commit()
+    pdf_bytes = pdf_doc.tobytes()
+    pdf_doc.close()
+
+    up = client.post(
+        f"/api/projects/{pid}/pdf-imports",
+        files={"file": ("solid_black_100.pdf", pdf_bytes, "application/pdf")},
+    )
+    assert up.status_code == 200, up.text
+    doc_id = up.json()["doc_id"]
+    pinfo = up.json()["pages"][0]
+    sx = pinfo["width_px"] / pinfo["width_pt"]
+
+    # Calibrate 4.0 m along X from Grid A to Grid B
+    cal = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/pages/1/calibrate",
+        json={
+            "p1": {"x_px": xs_pt[0][1] * sx, "y_px": ys_pt[0][1] * sx},
+            "p2": {"x_px": xs_pt[1][1] * sx, "y_px": ys_pt[0][1] * sx},
+            "known_distance": 4.0,
+            "unit": "m",
+            "confirmed": True,
+        },
+    )
+    assert cal.status_code == 200, cal.text
+
+    ex = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/pages/1/extract",
+        json={
+            "method": "auto",
+            "options": {
+                "detect_grids": True,
+                "detect_columns": True,
+                "column_fill_mode": "shaded_or_hatched",
+                "min_column_size_m": 0.18,
+                "max_column_size_m": 1.50,
+            },
+        },
+    )
+    assert ex.status_code == 200, ex.text
+    cols = ex.json()["document"]["column_candidates"]
+    assert len(cols) == 4, f"Expected 4 solid-black/split-triangle columns at 1:100, got {len(cols)}"
+
+
+def test_auto_add_roof_level_no_duplicate_and_clear_interior_roof_beams(isolated_env):
+    """
+    Verify:
+      1. Transfer with auto_add_roof_level=True appends ROOF (+3.0 m) above highest floor.
+      2. Re-transferring with auto_add_roof_level=True reuses ROOF (zero duplicate datum).
+      3. POST /geometry/clear-interior-roof-beams strips interior roof beams while keeping
+         all outer perimeter tie-beams and all columns intact.
+    """
+    client = TestClient(app)
+    pid = "TEST-AUTO-ROOF"
+    proj = _make_sample_project(pid)
+    storage.save_project(ProjectState.model_validate(proj))
+
+    # Build a simple 1-page PDF and manually approve a 3x3 grid (9 columns)
+    d = pymupdf.open()
+    p = d.new_page(width=600, height=450)
+    p.insert_text((30, 30), "GROUND FLOOR PLAN", fontsize=11)
+    pdf_bytes = d.tobytes()
+    d.close()
+
+    up = client.post(
+        f"/api/projects/{pid}/pdf-imports",
+        files={"file": ("plan_3x3.pdf", pdf_bytes, "application/pdf")},
+    )
+    assert up.status_code == 200
+    doc_id = up.json()["doc_id"]
+
+    # Calibrate 100 px = 4.0 m -> 25 px/m
+    cal = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/pages/1/calibrate",
+        json={
+            "p1": {"x_px": 100.0, "y_px": 400.0},
+            "p2": {"x_px": 200.0, "y_px": 400.0},
+            "known_distance": 4.0,
+            "unit": "m",
+            "confirmed": True,
+        },
+    )
+    assert cal.status_code == 200
+
+    # Trace 3 X-grids (A, B, C) and 3 Y-grids (1, 2, 3) + 9 columns
+    for lbl, x_px in [("A", 100.0), ("B", 200.0), ("C", 300.0)]:
+        r = client.post(
+            f"/api/projects/{pid}/pdf-imports/{doc_id}/elements/manual-grid",
+            json={
+                "page_number": 1,
+                "element_type": "grid_x",
+                "label": lbl,
+                "p1": {"x_px": x_px, "y_px": 150.0},
+                "p2": {"x_px": x_px, "y_px": 450.0},
+            },
+        )
+        assert r.status_code == 200
+    for lbl, y_px in [("1", 400.0), ("2", 300.0), ("3", 200.0)]:
+        r = client.post(
+            f"/api/projects/{pid}/pdf-imports/{doc_id}/elements/manual-grid",
+            json={
+                "page_number": 1,
+                "element_type": "grid_y",
+                "label": lbl,
+                "p1": {"x_px": 80.0, "y_px": y_px},
+                "p2": {"x_px": 340.0, "y_px": y_px},
+            },
+        )
+        assert r.status_code == 200
+    for gx_lbl, x_px in [("A", 100.0), ("B", 200.0), ("C", 300.0)]:
+        for gy_lbl, y_px in [("1", 400.0), ("2", 300.0), ("3", 200.0)]:
+            r = client.post(
+                f"/api/projects/{pid}/pdf-imports/{doc_id}/candidates/columns",
+                json={
+                    "page_number": 1,
+                    "x_px": x_px,
+                    "y_px": y_px,
+                    "grid": f"{gx_lbl}-{gy_lbl}",
+                    "width_mm": 350.0,
+                    "depth_mm": 350.0,
+                    "status": "approved",
+                },
+            )
+            assert r.status_code == 200
+
+    # Transfer #1 with auto_add_roof_level=True -> adds ROOF at 3.5 + 3.0 = 6.5 m
+    tr1 = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/transfer",
+        json={
+            "page_number": 1,
+            "merge_mode": "replace_geometry",
+            "auto_add_roof_level": True,
+            "roof_framing_style": "full_grid",
+            "default_roof_height_m": 3.0,
+        },
+    )
+    assert tr1.status_code == 200, tr1.text
+    lvls1 = tr1.json()["project"]["levels"]
+    assert [l["id"] for l in lvls1] == ["BASE", "2F", "ROOF"]
+    assert lvls1[-1]["elevation_m"] == 6.5
+
+    # Transfer #2 with auto_add_roof_level=True -> MUST NOT duplicate ROOF
+    tr2 = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/transfer",
+        json={
+            "page_number": 1,
+            "merge_mode": "merge",
+            "auto_add_roof_level": True,
+            "roof_framing_style": "full_grid",
+            "default_roof_height_m": 3.0,
+        },
+    )
+    assert tr2.status_code == 200, tr2.text
+    lvls2 = tr2.json()["project"]["levels"]
+    assert [l["id"] for l in lvls2] == ["BASE", "2F", "ROOF"]
+
+    # Generate 3D frame: 3x3 grid on ROOF has 12 beams (8 perimeter + 4 interior)
+    gen = client.post(f"/api/projects/{pid}/geometry/generate", json={})
+    assert gen.status_code == 200, gen.text
+    members_before = gen.json()["members"]
+    roof_beams_before = [m for m in members_before if m["member_type"] != "column" and m["floor_level"] == "ROOF"]
+    cols_before = [m for m in members_before if m["member_type"] == "column"]
+    assert len(roof_beams_before) == 12
+
+    # Clear interior roof beams -> keeps 8 perimeter tie-beams and all columns
+    clr = client.post(f"/api/projects/{pid}/geometry/clear-interior-roof-beams?floor_level=ROOF")
+    assert clr.status_code == 200, clr.text
+    members_after = clr.json()["members"]
+    roof_beams_after = [m for m in members_after if m["member_type"] != "column" and m["floor_level"] == "ROOF"]
+    cols_after = [m for m in members_after if m["member_type"] == "column"]
+    assert len(roof_beams_after) == 8
+    assert len(cols_after) == len(cols_before)

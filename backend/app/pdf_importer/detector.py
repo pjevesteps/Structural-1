@@ -604,6 +604,231 @@ def _verify_vector_hatched_interior(
     return edge_density >= 0.16 and active_quads >= 3
 
 
+def _merge_touching_boxes(
+    boxes: list[tuple[float, float, float, float]],
+    tol_px: float = 2.0,
+) -> list[tuple[float, float, float, float]]:
+    """
+    Merge touching or overlapping bounding boxes within tol_px (e.g., AutoCAD SOLID
+    column hatches exported as two adjacent right triangles sharing a diagonal).
+    """
+    if not boxes:
+        return []
+    n = len(boxes)
+    parent = list(range(n))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    for i in range(n):
+        ax0, ay0, ax1, ay1 = boxes[i]
+        for j in range(i + 1, n):
+            bx0, by0, bx1, by1 = boxes[j]
+            if (
+                ax0 - tol_px <= bx1
+                and bx0 - tol_px <= ax1
+                and ay0 - tol_px <= by1
+                and by0 - tol_px <= ay1
+            ):
+                union(i, j)
+
+    groups: dict[int, list[tuple[float, float, float, float]]] = {}
+    for i, box in enumerate(boxes):
+        groups.setdefault(find(i), []).append(box)
+
+    merged: list[tuple[float, float, float, float]] = []
+    for grp in groups.values():
+        merged.append(
+            (
+                min(b[0] for b in grp),
+                min(b[1] for b in grp),
+                max(b[2] for b in grp),
+                max(b[3] for b in grp),
+            )
+        )
+    return merged
+
+
+def _numpy_erode_3x3(mask: np.ndarray) -> np.ndarray:
+    """Pure-NumPy 3x3 binary erosion (zero cv2/scipy dependency)."""
+    if mask.shape[0] < 3 or mask.shape[1] < 3:
+        return np.zeros_like(mask, dtype=bool)
+    out = np.zeros_like(mask, dtype=bool)
+    out[1:-1, 1:-1] = (
+        mask[:-2, :-2]
+        & mask[:-2, 1:-1]
+        & mask[:-2, 2:]
+        & mask[1:-1, :-2]
+        & mask[1:-1, 1:-1]
+        & mask[1:-1, 2:]
+        & mask[2:, :-2]
+        & mask[2:, 1:-1]
+        & mask[2:, 2:]
+    )
+    return out
+
+
+def _numpy_dilate_3x3(mask: np.ndarray) -> np.ndarray:
+    """Pure-NumPy 3x3 binary dilation (zero cv2/scipy dependency)."""
+    if mask.shape[0] < 3 or mask.shape[1] < 3:
+        return mask.copy()
+    out = np.zeros_like(mask, dtype=bool)
+    out[1:-1, 1:-1] = (
+        mask[:-2, :-2]
+        | mask[:-2, 1:-1]
+        | mask[:-2, 2:]
+        | mask[1:-1, :-2]
+        | mask[1:-1, 1:-1]
+        | mask[1:-1, 2:]
+        | mask[2:, :-2]
+        | mask[2:, 1:-1]
+        | mask[2:, 2:]
+    )
+    return out
+
+
+def _detect_dark_columns_raster_200dpi_numpy(
+    pdf_path: Path,
+    page_info: PageInfo,
+    bounds: tuple[float, float, float, float],
+    effective_ppm: float | None,
+    text_boxes: list[tuple[float, float, float, float, float, float, float, float]],
+    opts: ExtractionOptions,
+    title_block_y: float,
+    margin_ratio: float,
+) -> list[dict]:
+    """
+    200 DPI PyMuPDF + pure-NumPy raster fallback for solid black or densely hatched
+    rectangular columns when vector detection finds < 2 columns in a floor plan region.
+    Uses ONLY pymupdf + numpy (zero cv2/scipy).
+    """
+    fallback_dpi = 200.0
+    scale_to_200 = fallback_dpi / max(float(page_info.dpi), 1.0)
+    scale_from_200 = 1.0 / scale_to_200
+
+    doc = pymupdf.open(pdf_path)
+    try:
+        page = doc[page_info.page_number - 1]
+        pix = page.get_pixmap(dpi=int(fallback_dpi), colorspace=pymupdf.csGRAY)
+        img200 = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width)
+    finally:
+        doc.close()
+
+    h200, w200 = img200.shape[:2]
+    bx0, by0, bx1, by1 = bounds
+    rx0 = max(0, int(round(bx0 * scale_to_200)))
+    ry0 = max(0, int(round(by0 * scale_to_200)))
+    rx1 = min(w200, int(round(bx1 * scale_to_200)))
+    ry1 = min(h200, int(round(by1 * scale_to_200)))
+    if rx1 - rx0 < 6 or ry1 - ry0 < 6:
+        return []
+
+    crop = img200[ry0:ry1, rx0:rx1]
+    # Dark pixels (solid black or dense dark hatch)
+    dark_mask = crop < 100
+    # Pure-NumPy 3x3 morphological opening strips thin 1-2px walls/gridlines while preserving solid blobs
+    opened = _numpy_dilate_3x3(_numpy_erode_3x3(dark_mask))
+
+    ch, cw = opened.shape
+    ys_fg, xs_fg = np.nonzero(opened)
+    if ys_fg.size == 0:
+        return []
+
+    # Size thresholds at 200 DPI
+    if effective_ppm is not None and effective_ppm > 0:
+        ppm200 = effective_ppm * scale_to_200
+        min_px200 = max(6.0, min(opts.min_column_size_m, 0.18) * ppm200)
+        max_px200 = max(min_px200 + 6.0, max(opts.max_column_size_m, 1.50) * ppm200)
+    else:
+        pt_to_200 = fallback_dpi / 72.0
+        min_px200 = 4.0 * pt_to_200
+        max_px200 = 45.0 * pt_to_200
+
+    max_aspect = max(3.0, float(opts.column_max_aspect_ratio))
+    visited = np.zeros((ch, cw), dtype=bool)
+    results: list[dict] = []
+
+    for start_y, start_x in zip(ys_fg.tolist(), xs_fg.tolist()):
+        if visited[start_y, start_x]:
+            continue
+        stack = [(start_y, start_x)]
+        visited[start_y, start_x] = True
+        min_x = max_x = start_x
+        min_y = max_y = start_y
+        area = 0
+        while stack:
+            cy_i, cx_i = stack.pop()
+            area += 1
+            if cx_i < min_x:
+                min_x = cx_i
+            if cx_i > max_x:
+                max_x = cx_i
+            if cy_i < min_y:
+                min_y = cy_i
+            if cy_i > max_y:
+                max_y = cy_i
+            for ny, nx in (
+                (cy_i - 1, cx_i),
+                (cy_i + 1, cx_i),
+                (cy_i, cx_i - 1),
+                (cy_i, cx_i + 1),
+            ):
+                if 0 <= ny < ch and 0 <= nx < cw and opened[ny, nx] and not visited[ny, nx]:
+                    visited[ny, nx] = True
+                    stack.append((ny, nx))
+
+        bw200 = float(max_x - min_x + 1)
+        bh200 = float(max_y - min_y + 1)
+        if not (min_px200 <= bw200 <= max_px200 and min_px200 <= bh200 <= max_px200):
+            continue
+        aspect = max(bw200, bh200) / max(min(bw200, bh200), 1e-6)
+        if aspect > max_aspect:
+            continue
+        fill_ratio = float(area) / max(bw200 * bh200, 1.0)
+        if fill_ratio < 0.50:
+            continue
+
+        x0 = (rx0 + min_x) * scale_from_200
+        y0 = (ry0 + min_y) * scale_from_200
+        x1 = (rx0 + max_x + 1) * scale_from_200
+        y1 = (ry0 + max_y + 1) * scale_from_200
+        cx = (x0 + x1) * 0.5
+        cy = (y0 + y1) * 0.5
+        if not (bx0 <= cx <= bx1 and by0 <= cy <= by1):
+            continue
+        if cy >= title_block_y:
+            continue
+        if margin_ratio > 0.0 and _in_outer_border_margin("x", cx, y0, y1, bounds, margin_ratio):
+            continue
+        if _overlaps_text_boxes(x0, y0, x1, y1, text_boxes):
+            continue
+
+        results.append(
+            {
+                "cx": cx,
+                "cy": cy,
+                "w": x1 - x0,
+                "h": y1 - y0,
+                "x0": x0,
+                "y0": y0,
+                "x1": x1,
+                "y1": y1,
+                "source": "raster_200dpi",
+                "fill_kind": "solid_black_raster",
+                "base_conf": 0.79,
+            }
+        )
+    return results
+
+
 def _load_grayscale_image(
     pdf_path: Path | None,
     png_path: Path | None,
@@ -702,6 +927,19 @@ def detect_shaded_hatched_columns(
 
                 closed_stroke_rects: list[tuple[float, float, float, float]] = []
                 short_segments: list[tuple[float, float, float, float, float]] = []
+                dark_fill_subshapes: list[tuple[float, float, float, float]] = []
+                pt_to_px = (sx + sy) * 0.5
+                dark_min_px = (
+                    max(4.0, min(opts.min_column_size_m, 0.18) * effective_ppm)
+                    if (effective_ppm is not None and effective_ppm > 0)
+                    else 4.0 * pt_to_px
+                )
+                dark_max_px = (
+                    max(dark_min_px + 4.0, max(opts.max_column_size_m, 1.50) * effective_ppm)
+                    if (effective_ppm is not None and effective_ppm > 0)
+                    else 45.0 * pt_to_px
+                )
+                dark_max_aspect = max(3.0, float(opts.column_max_aspect_ratio))
 
                 for drawing in page.get_drawings():
                     fill = drawing.get("fill")
@@ -709,6 +947,37 @@ def detect_shaded_hatched_columns(
                     has_curve = any(it[0] == "c" for it in items)
                     has_explicit_rect = any(it[0] in ("re", "qu") for it in items)
                     rects, line_segs = _extract_rect_from_drawing(drawing, rot_mat, ox, oy, sx, sy)
+
+                    # 1a-dark. Collect dark fill-only & polygonal/triangulated vector sub-shapes (RGB luminance < 0.25)
+                    if fill is not None and not (has_curve and not has_explicit_rect):
+                        avg_rgb_dark = _fill_brightness(fill)
+                        if avg_rgb_dark < 0.25:
+                            cand_boxes: list[tuple[float, float, float, float]] = list(rects)
+                            if not cand_boxes and len(line_segs) >= 2:
+                                xs_l = [v for seg in line_segs for v in (seg[0], seg[2])]
+                                ys_l = [v for seg in line_segs for v in (seg[1], seg[3])]
+                                lx0, lx1 = min(xs_l), max(xs_l)
+                                ly0, ly1 = min(ys_l), max(ys_l)
+                                if lx1 - lx0 >= 1.5 and ly1 - ly0 >= 1.5:
+                                    cand_boxes.append((lx0, ly0, lx1, ly1))
+                            elif not cand_boxes and drawing.get("rect") is not None:
+                                dr = drawing["rect"] * rot_mat
+                                dx0 = (float(dr.x0) - ox) * sx
+                                dy0 = (float(dr.y0) - oy) * sy
+                                dx1 = (float(dr.x1) - ox) * sx
+                                dy1 = (float(dr.y1) - oy) * sy
+                                dx0, dx1 = min(dx0, dx1), max(dx0, dx1)
+                                dy0, dy1 = min(dy0, dy1), max(dy0, dy1)
+                                if dx1 - dx0 >= 1.5 and dy1 - dy0 >= 1.5:
+                                    cand_boxes.append((dx0, dy0, dx1, dy1))
+
+                            for cx0, cy0, cx1, cy1 in cand_boxes:
+                                cw_b = cx1 - cx0
+                                ch_b = cy1 - cy0
+                                if cw_b <= dark_max_px * 1.15 and ch_b <= dark_max_px * 1.15:
+                                    mcx, mcy = (cx0 + cx1) * 0.5, (cy0 + cy1) * 0.5
+                                    if bx0 <= mcx <= bx1 and by0 <= mcy <= by1 and mcy < title_block_y:
+                                        dark_fill_subshapes.append((cx0, cy0, cx1, cy1))
 
                     # 1a. Solid filled rectangles (non-white, and non-pure-black unless any_filled)
                     if fill is not None and not (has_curve and not has_explicit_rect):
@@ -843,6 +1112,52 @@ def detect_shaded_hatched_columns(
                                     "base_conf": 0.82,
                                 }
                             )
+
+                # 1c. Merge touching dark fill sub-shapes (e.g., split AutoCAD SOLID triangles within 2 pt)
+                if dark_fill_subshapes and (
+                    opts.column_fill_mode == "any_filled"
+                    or (opts.column_fill_mode == "shaded_or_hatched" and len(verified) < 2)
+                ):
+                    merged_dark = _merge_touching_boxes(dark_fill_subshapes, tol_px=2.0 * pt_to_px)
+                    for x0, y0, x1, y1 in merged_dark:
+                        w = x1 - x0
+                        h = y1 - y0
+                        if not (dark_min_px <= w <= dark_max_px and dark_min_px <= h <= dark_max_px):
+                            continue
+                        aspect = max(w, h) / max(min(w, h), 1e-6)
+                        if aspect > dark_max_aspect:
+                            continue
+                        cx, cy = (x0 + x1) * 0.5, (y0 + y1) * 0.5
+                        if not (bx0 <= cx <= bx1 and by0 <= cy <= by1) or cy >= title_block_y:
+                            continue
+                        if margin_ratio > 0.0 and _in_outer_border_margin("x", cx, y0, y1, bounds, margin_ratio):
+                            continue
+                        if _overlaps_text_boxes(x0, y0, x1, y1, text_boxes):
+                            continue
+                        inset = max(1, int(min(w, h) * 0.12))
+                        ix0 = max(0, int(round(x0)) + inset)
+                        iy0 = max(0, int(round(y0)) + inset)
+                        ix1 = min(full_w, int(round(x1)) - inset)
+                        iy1 = min(full_h, int(round(y1)) - inset)
+                        if ix1 > ix0 and iy1 > iy0:
+                            interior = full_img[iy0:iy1, ix0:ix1]
+                            if float(np.mean(interior < 235)) < max(0.45, opts.column_min_fill_ratio):
+                                continue
+                        verified.append(
+                            {
+                                "cx": cx,
+                                "cy": cy,
+                                "w": w,
+                                "h": h,
+                                "x0": x0,
+                                "y0": y0,
+                                "x1": x1,
+                                "y1": y1,
+                                "source": "vector",
+                                "fill_kind": "solid_black",
+                                "base_conf": 0.84,
+                            }
+                        )
         finally:
             doc.close()
 
@@ -965,6 +1280,26 @@ def detect_shaded_hatched_columns(
                 }
             )
 
+    # --- 2b. 200 DPI PyMuPDF + NumPy Raster Fallback (zero cv2/scipy) when < 2 columns found ---
+    if (
+        len(verified) < 2
+        and opts.column_fill_mode != "gray_shaded_only"
+        and pdf_path is not None
+        and pdf_path.exists()
+    ):
+        verified.extend(
+            _detect_dark_columns_raster_200dpi_numpy(
+                pdf_path=pdf_path,
+                page_info=page_info,
+                bounds=bounds,
+                effective_ppm=effective_ppm,
+                text_boxes=text_boxes,
+                opts=opts,
+                title_block_y=title_block_y,
+                margin_ratio=margin_ratio,
+            )
+        )
+
     if not verified:
         return []
 
@@ -995,7 +1330,13 @@ def detect_shaded_hatched_columns(
     active_grids = [g for g in (grids or []) if g.status != ReviewStatus.REJECTED]
     x_grids = [g for g in active_grids if g.axis == "x"]
     y_grids = [g for g in active_grids if g.axis == "y"]
-    probe_r = float(opts.column_probe_radius_px)
+    pt_to_px_snap = float(page_info.dpi) / 72.0
+    min_snap_r = (
+        0.15 * effective_ppm
+        if (effective_ppm is not None and effective_ppm > 0)
+        else 5.0 * pt_to_px_snap
+    )
+    probe_r = max(float(opts.column_probe_radius_px), min_snap_r)
 
     columns: list[ColumnCandidate] = []
     for cand in merged:

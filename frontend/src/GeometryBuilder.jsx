@@ -269,12 +269,72 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
         method: "DELETE",
       });
       await applyModelUpdate(updated, `Deleted member M${memberId}.`);
+      setSelectedEntity((prev) =>
+        prev?.type === "member" && prev.data.member_id === memberId ? null : prev
+      );
+      setStdPreview(null);
     } catch (e) {
       setError(e.message);
     } finally {
       setBusy(false);
     }
   }
+
+  async function handleClearInteriorRoofBeams() {
+    if (!activeFloor || busy) return;
+    setBusy(true);
+    setError("");
+    const prevBeams = floorData.beams.length;
+    try {
+      const updated = await apiJson(
+        `/api/projects/${pid}/geometry/clear-interior-roof-beams?floor_level=${encodeURIComponent(activeFloor)}`,
+        { method: "POST" }
+      );
+      const afterBeams = (updated.members || []).filter(
+        (m) => m.member_type !== "column" && m.floor_level === activeFloor
+      ).length;
+      const removed = Math.max(0, prevBeams - afterBeams);
+      await applyModelUpdate(
+        updated,
+        removed > 0
+          ? `Cleared ${removed} interior beam(s) on ${activeFloor}; kept ${afterBeams} perimeter tie-beam(s).`
+          : `No interior beams to clear on ${activeFloor} (${afterBeams} perimeter beam(s) kept).`
+      );
+      setSelectedEntity(null);
+      setStdPreview(null);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Safe Delete/Backspace shortcut for selected beam (never fires inside input/textarea/select/contentEditable)
+  useEffect(() => {
+    function onKeyDown(e) {
+      if (e.key !== "Delete" && e.key !== "Backspace") return;
+      const active = document.activeElement;
+      const tag = active?.tagName?.toLowerCase();
+      if (
+        tag === "input" ||
+        tag === "textarea" ||
+        tag === "select" ||
+        Boolean(active?.isContentEditable)
+      ) {
+        return;
+      }
+      if (
+        !busy &&
+        selectedEntity?.type === "member" &&
+        selectedEntity.data?.member_type !== "column"
+      ) {
+        e.preventDefault();
+        handleDeleteMember(selectedEntity.data.member_id);
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [busy, selectedEntity, pid]);
 
   async function handleToggleSupport(node) {
     const nextSupport =
@@ -837,6 +897,19 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
                   >
                     Toggle Support
                   </button>
+                  {sortedLevels.length > 0 &&
+                    (/ROOF|^RB$|^RD$|^RF$/i.test(activeFloor || "") ||
+                      activeFloor === sortedLevels[sortedLevels.length - 1]?.id) && (
+                      <button
+                        type="button"
+                        className="mini-btn on-reject"
+                        disabled={busy || floorData.beams.length === 0}
+                        onClick={handleClearInteriorRoofBeams}
+                        title="Remove interior roof beams while keeping outer perimeter tie-beams"
+                      >
+                        Clear Interior Roof Beams
+                      </button>
+                    )}
                 </div>
               </div>
 
@@ -1086,6 +1159,19 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
                   ? `X=${selectedEntity.data.x_m}m · Y=${selectedEntity.data.y_m}m · Z=${selectedEntity.data.z_m}m · Support: ${selectedEntity.data.support_type}`
                   : `N${selectedEntity.data.start_node} → N${selectedEntity.data.end_node} · L=${selectedEntity.data.length_m}m`}
               </small>
+              {selectedEntity.type === "member" && selectedEntity.data.member_type !== "column" && (
+                <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 8 }}>
+                  <button
+                    type="button"
+                    className="mini-btn on-reject"
+                    disabled={busy}
+                    onClick={() => handleDeleteMember(selectedEntity.data.member_id)}
+                  >
+                    Delete Selected Beam
+                  </button>
+                  <small className="pdf-hint">or press Delete</small>
+                </div>
+              )}
             </div>
           )}
 

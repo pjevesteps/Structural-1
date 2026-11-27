@@ -143,6 +143,9 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
   const [manualDepthMm, setManualDepthMm] = useState("400");
   const [manualGridRef, setManualGridRef] = useState("");
   const [mergeMode, setMergeMode] = useState("merge");
+  const [autoAddRoof, setAutoAddRoof] = useState(true);
+  const [roofFramingStyle, setRoofFramingStyle] = useState("full_grid");
+  const [defaultRoofHeightM, setDefaultRoofHeightM] = useState("3.00");
   const [selectedId, setSelectedId] = useState(null);
 
   // Plan Regions & Openings state
@@ -900,6 +903,41 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
     }
   }
 
+  async function handleAppendPdf(e) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file || !doc) return;
+    const prevCount = doc.page_count || doc.pages?.length || 0;
+    setBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const updated = await apiJson(
+        `/api/projects/${pid}/pdf-imports?append=true&doc_id=${encodeURIComponent(doc.doc_id)}`,
+        {
+          method: "POST",
+          body: fd,
+        }
+      );
+      setDoc(updated);
+      const added = Math.max(0, (updated.page_count || 0) - prevCount);
+      if (added > 0) {
+        setPageNum(prevCount + 1);
+      }
+      setMode("inspect");
+      setNotice(
+        `Appended ${added} page${added === 1 ? "" : "s"} from ${file.name} (total: ${updated.page_count} pages). Existing tracings preserved.`
+      );
+      await loadImportsList(updated.doc_id);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function handleUploadCad(e) {
     const file = e.target.files?.[0];
     e.target.value = "";
@@ -1533,6 +1571,9 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
             page_number: activePage.page_number,
             region_id: activeRegionId || null,
             merge_mode: mergeMode,
+            auto_add_roof_level: autoAddRoof,
+            roof_framing_style: roofFramingStyle,
+            default_roof_height_m: Math.min(10.0, Math.max(1.0, parseFloat(defaultRoofHeightM) || 3.0)),
           }),
         }
       );
@@ -1584,6 +1625,21 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
               onChange={handleUpload}
             />
           </label>
+          {doc && (
+            <label
+              className="pdf-upload-btn"
+              style={{ background: "#1e293b", borderColor: "#38bdf8", color: "#e0f2fe" }}
+              title="Append additional PDF pages (e.g., 2nd floor, elevations, structural plans) into this document"
+            >
+              {busy ? "Working..." : "Append PDF Pages"}
+              <input
+                type="file"
+                accept=".pdf,application/pdf"
+                disabled={busy}
+                onChange={handleAppendPdf}
+              />
+            </label>
+          )}
           <label className="pdf-upload-btn cad-upload-btn" title="Exact millimeter CAD extraction">
             {busy ? "Working..." : "Upload CAD (.dxf / .dwg)"}
             <input
@@ -3385,6 +3441,56 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
                         <option value="merge">Merge with existing project geometry</option>
                         <option value="replace_geometry">Replace project grids, columns &amp; openings</option>
                       </select>
+                    </div>
+                    <div
+                      style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 6,
+                        padding: "8px 10px",
+                        borderRadius: 6,
+                        background: "rgba(15, 23, 42, 0.7)",
+                        border: "1px solid #1e293b",
+                        marginBottom: 8,
+                      }}
+                    >
+                      <label className="pdf-check-chip" style={{ margin: 0 }}>
+                        <input
+                          type="checkbox"
+                          checked={autoAddRoof}
+                          onChange={(e) => setAutoAddRoof(e.target.checked)}
+                          disabled={busy}
+                        />
+                        <span>Auto-add Roof Beam level (+1 story) if no Roof Plan is included</span>
+                      </label>
+                      {autoAddRoof && (
+                        <div className="pdf-inline-form" style={{ gap: 6 }}>
+                          <select
+                            className="pdf-select"
+                            value={roofFramingStyle}
+                            onChange={(e) => setRoofFramingStyle(e.target.value)}
+                            disabled={busy}
+                            aria-label="Roof framing style"
+                            style={{ flex: 1 }}
+                          >
+                            <option value="full_grid">Full Grid (Roof Deck)</option>
+                            <option value="perimeter_only">Perimeter Tie-Beams Only (Pitched Roof)</option>
+                          </select>
+                          <label className="pdf-field-chip" title="Default story height above top floor">
+                            <span>+H (m)</span>
+                            <input
+                              type="number"
+                              step="0.1"
+                              min="1.5"
+                              max="8.0"
+                              value={defaultRoofHeightM}
+                              onChange={(e) => setDefaultRoofHeightM(e.target.value)}
+                              disabled={busy}
+                              style={{ width: 64 }}
+                            />
+                          </label>
+                        </div>
+                      )}
                     </div>
                     <button
                       className="pdf-transfer-btn"

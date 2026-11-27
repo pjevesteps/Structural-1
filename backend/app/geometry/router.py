@@ -1,7 +1,7 @@
 from math import hypot, sqrt
 from typing import Literal
 from uuid import uuid4
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 
 from .. import storage
@@ -12,7 +12,7 @@ from ..models import (
     ManualBeamOverride,
     StructuralModelState,
 )
-from .generator import generate_structural_model
+from .generator import _is_roof_level_id, generate_structural_model, is_perimeter_beam_pair
 from .validator import validate_structural_model
 
 router = APIRouter(
@@ -314,6 +314,58 @@ def delete_member(project_id: str, member_id: int):
     model.members = [m for m in model.members if m.member_id != member_id]
 
     model.engineer_approved = False
+    _revalidate_preserving_info(model)
+    storage.save_project(project)
+    return model
+
+
+@router.post("/clear-interior-roof-beams", response_model=StructuralModelState)
+def clear_interior_roof_beams(
+    project_id: str,
+    floor_level: str | None = Query(None),
+):
+    """
+    Strip non-perimeter (interior) beams on the roof level while preserving all
+    outer perimeter tie-beams, columns, and analytical nodes.
+    """
+    project = _load_or_404(project_id)
+    model = project.structural_model
+    if not model.nodes:
+        raise HTTPException(status_code=400, detail="Generate the 3D frame first.")
+
+    sorted_levels = sorted(project.levels, key=lambda lv: lv.elevation_m)
+    target_level = floor_level
+    if not target_level:
+        roof_lvl = next((lv.id for lv in reversed(sorted_levels) if _is_roof_level_id(lv.id)), None)
+        target_level = roof_lvl or (sorted_levels[-1].id if sorted_levels else None)
+    if not target_level:
+        raise HTTPException(status_code=400, detail="No roof level found in project.")
+
+    node_by_id = {n.node_id: n for n in model.nodes}
+    lv_nodes = [n for n in model.nodes if n.floor_level == target_level]
+    lv_node_ids = {n.node_id for n in lv_nodes}
+    tol = max(model.options.snap_tolerance_m, 0.15)
+
+    kept_members: list[AnalyticalMember] = []
+    removed_ids: set[int] = set()
+    for m in model.members:
+        is_beam_on_target = m.member_type != "column" and (
+            m.floor_level == target_level
+            or (m.start_node in lv_node_ids and m.end_node in lv_node_ids)
+        )
+        if not is_beam_on_target:
+            kept_members.append(m)
+            continue
+        na = node_by_id.get(m.start_node)
+        nb = node_by_id.get(m.end_node)
+        if na is not None and nb is not None and is_perimeter_beam_pair(na, nb, lv_nodes, tol=tol):
+            kept_members.append(m)
+        else:
+            removed_ids.add(m.member_id)
+
+    model.members = kept_members
+    if removed_ids:
+        model.engineer_approved = False
     _revalidate_preserving_info(model)
     storage.save_project(project)
     return model

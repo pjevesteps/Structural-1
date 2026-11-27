@@ -419,6 +419,9 @@ class TransferRequest(BaseModel):
     page_number: int | None = Field(default=None, ge=1)
     region_id: str | None = None
     merge_mode: Literal["merge", "replace_geometry"] = "merge"
+    auto_add_roof_level: bool = False
+    roof_framing_style: Literal["full_grid", "perimeter_only"] = "full_grid"
+    default_roof_height_m: float = Field(default=3.0, gt=0.5, le=10.0)
 
 
 class TransferLevelsRequest(BaseModel):

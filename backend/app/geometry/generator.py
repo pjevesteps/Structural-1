@@ -279,6 +279,53 @@ def _side_is_connected(
     return True
 
 
+def _is_roof_level_id(level_id: str) -> bool:
+    u = (level_id or "").strip().upper()
+    return "ROOF" in u or u in {"RB", "RD", "RF"}
+
+
+def is_perimeter_beam_pair(
+    a: AnalyticalNode,
+    b: AnalyticalNode,
+    lv_nodes: list[AnalyticalNode],
+    tol: float = 0.15,
+) -> bool:
+    """
+    Return True if beam (a, b) lies on the outer perimeter boundary of lv_nodes.
+    Handles both rectangular and L-shaped / stepped floor footprints by checking
+    both global min/max bounds and local one-sided emptiness along the beam span.
+    """
+    if not lv_nodes:
+        return True
+    xs = [n.x_m for n in lv_nodes]
+    zs = [n.z_m for n in lv_nodes]
+    min_x, max_x = min(xs), max(xs)
+    min_z, max_z = min(zs), max(zs)
+
+    # Beam roughly parallel to X axis (constant Z)
+    if abs(a.z_m - b.z_m) <= tol:
+        z_line = (a.z_m + b.z_m) * 0.5
+        if abs(z_line - min_z) <= tol or abs(z_line - max_z) <= tol:
+            return True
+        x_lo, x_hi = min(a.x_m, b.x_m) - tol, max(a.x_m, b.x_m) + tol
+        has_below = any(x_lo <= n.x_m <= x_hi and n.z_m < z_line - tol for n in lv_nodes)
+        has_above = any(x_lo <= n.x_m <= x_hi and n.z_m > z_line + tol for n in lv_nodes)
+        return not (has_below and has_above)
+
+    # Beam roughly parallel to Z axis (constant X)
+    if abs(a.x_m - b.x_m) <= tol:
+        x_line = (a.x_m + b.x_m) * 0.5
+        if abs(x_line - min_x) <= tol or abs(x_line - max_x) <= tol:
+            return True
+        z_lo, z_hi = min(a.z_m, b.z_m) - tol, max(a.z_m, b.z_m) + tol
+        has_left = any(z_lo <= n.z_m <= z_hi and n.x_m < x_line - tol for n in lv_nodes)
+        has_right = any(z_lo <= n.z_m <= z_hi and n.x_m > x_line + tol for n in lv_nodes)
+        return not (has_left and has_right)
+
+    # Diagonal/skewed beams are kept as perimeter/explicit
+    return True
+
+
 def generate_structural_model(
     project: ProjectState,
     options: GeometryGenerationOptions | None = None,
@@ -421,9 +468,16 @@ def generate_structural_model(
             for a, b in zip(col_line, col_line[1:]):
                 candidate_pairs.append((a, b, f"{a.grid_ref}-{b.grid_ref}".strip("-")))
 
+        is_top_roof = (lv_idx == len(levels) - 1) and (
+            _is_roof_level_id(lv.id) or opts.roof_framing_style == "perimeter_only"
+        )
+        perimeter_only_here = is_top_roof and opts.roof_framing_style == "perimeter_only"
+
         for a, b, gref in candidate_pairs:
             pair = (min(a.node_id, b.node_id), max(a.node_id, b.node_id))
             if pair in seen_member_pairs or a.node_id == b.node_id:
+                continue
+            if perimeter_only_here and not is_perimeter_beam_pair(a, b, lv_nodes, tol=max(tol, 0.15)):
                 continue
             dist = round(hypot(b.x_m - a.x_m, b.z_m - a.z_m), 4)
             if dist < 0.05 or dist > opts.max_beam_span_m:

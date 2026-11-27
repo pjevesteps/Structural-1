@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 from uuid import uuid4
@@ -378,6 +379,87 @@ def upload_pdf(
             "classifications": {str(p.page_number): p.classification for p in pages},
             "sheet_types": {str(p.page_number): p.sheet_type for p in pages},
             "auto_regions_count": len(regions),
+        },
+    )
+    return state
+
+
+def append_pdf(
+    project_id: str,
+    doc_id: str | None,
+    filename: str,
+    content: bytes,
+    dpi: int = DEFAULT_RENDER_DPI,
+) -> ImportDocumentState:
+    """
+    Append pages from another PDF onto an existing imported PDF document using
+    PyMuPDF doc.insert_pdf() -> temporary .tmp file -> os.replace() swap,
+    preserving all existing page classifications, calibrations, regions, levels, and tracings.
+    """
+    _ensure_project_exists(project_id)
+    validate_pdf_bytes(content)
+
+    target_doc_id = doc_id
+    if not target_doc_id:
+        existing_list = list_imports(project_id)
+        if not existing_list:
+            return upload_pdf(project_id, filename, content, dpi=dpi)
+        target_doc_id = existing_list[0].doc_id
+
+    state = get_import(project_id, target_doc_id)
+    pdf_path = _original_pdf_path(project_id, state.doc_id)
+    pages_dir = _pages_dir(project_id, state.doc_id)
+    if not pdf_path.exists():
+        raise FileNotFoundError(f"Original PDF missing for import '{state.doc_id}'.")
+
+    tmp_path = _doc_dir(project_id, state.doc_id) / "original.pdf.tmp"
+    try:
+        existing_doc = pymupdf.open(pdf_path)
+    except Exception as exc:
+        raise InvalidPdfError(f"Unable to open existing PDF '{state.doc_id}': {exc}") from exc
+
+    try:
+        try:
+            new_doc = pymupdf.open(stream=content, filetype="pdf")
+        except Exception as exc:
+            raise InvalidPdfError(f"Unable to open appended PDF document: {exc}") from exc
+        try:
+            if len(new_doc) == 0:
+                raise InvalidPdfError("Appended PDF document contains no pages.")
+            old_page_count = len(existing_doc)
+            added_count = len(new_doc)
+            existing_doc.insert_pdf(new_doc)
+            existing_doc.save(str(tmp_path))
+        finally:
+            new_doc.close()
+    finally:
+        existing_doc.close()
+
+    os.replace(str(tmp_path), str(pdf_path))
+
+    new_pages, new_regions = inspect_and_render_pdf(
+        pdf_path,
+        pages_dir,
+        dpi=dpi,
+        start_page_index=old_page_count,
+    )
+
+    state.pages.extend(new_pages)
+    state.regions.extend(new_regions)
+    state.page_count = len(state.pages)
+    state.file_size_bytes = pdf_path.stat().st_size
+    state.updated_at = _utc_now()
+    _save_state(state)
+    _append_audit(
+        project_id,
+        state.doc_id,
+        "pdf_appended",
+        {
+            "appended_filename": Path(filename or "appended.pdf").name,
+            "added_pages": added_count,
+            "previous_page_count": old_page_count,
+            "new_page_count": state.page_count,
+            "new_regions_count": len(new_regions),
         },
     )
     return state
@@ -2012,6 +2094,39 @@ def transfer_approved(
     updated_payload["columns"] = [c.model_dump() for c in new_columns]
     updated_payload["beams"] = [b.model_dump() for b in new_beams]
     updated_payload["openings"] = [o.model_dump() for o in new_openings]
+
+    roof_note = ""
+    if req.auto_add_roof_level:
+        existing_levels = [Level.model_validate(lv) for lv in updated_payload.get("levels", [])]
+        existing_roof = next(
+            (
+                lv
+                for lv in existing_levels
+                if "ROOF" in lv.id.upper() or lv.id.upper() in {"RB", "RD", "RF"}
+            ),
+            None,
+        )
+        if existing_roof is not None:
+            roof_note = (
+                f" Reused existing roof datum '{existing_roof.id}' at +{existing_roof.elevation_m:.2f} m "
+                f"({req.roof_framing_style.replace('_', ' ')})."
+            )
+        elif existing_levels:
+            top_elev = max(lv.elevation_m for lv in existing_levels)
+            roof_elev = round(top_elev + req.default_roof_height_m, 3)
+            existing_levels.append(Level(id="ROOF", elevation_m=roof_elev))
+            existing_levels.sort(key=lambda lv: lv.elevation_m)
+            updated_payload["levels"] = [lv.model_dump() for lv in existing_levels]
+            roof_note = (
+                f" Auto-added ROOF level at +{roof_elev:.2f} m "
+                f"({req.roof_framing_style.replace('_', ' ')})."
+            )
+        sm_dict = updated_payload.get("structural_model") or {}
+        sm_opts = sm_dict.get("options") or {}
+        sm_opts["roof_framing_style"] = req.roof_framing_style
+        sm_dict["options"] = sm_opts
+        updated_payload["structural_model"] = sm_dict
+
     updated_project = ProjectState.model_validate(updated_payload)
 
     storage.save_project(updated_project)
@@ -2062,7 +2177,7 @@ def transfer_approved(
         notice=(
             f"Transferred {x_count} X-grid(s), {y_count} Y-grid(s), "
             f"{len(approved_cols)} column(s), and {openings_transferred} opening(s) "
-            f"into project '{project_id}'. Independent structural review remains required."
+            f"into project '{project_id}'.{roof_note} Independent structural review remains required."
         ),
         project=updated_project,
         document=state,

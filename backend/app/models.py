@@ -118,6 +118,7 @@ class GeometryGenerationOptions(BaseModel):
     skip_beams_through_openings: bool = True
     auto_detect_slab_panels: bool = True
     footing_depth_m: float = Field(default=0.0, ge=0.0, le=6.0)
+    roof_framing_style: Literal["full_grid", "perimeter_only"] = "full_grid"
 
 
 class ManualBeamOverride(BaseModel):
