@@ -4,6 +4,11 @@ All notable changes to **AI Structural Engineering Office** are documented in th
 
 ## [Unreleased]
 
+### Fixed
+- **Module 03 2D Floor Framing Editor `GF (0m)` Tie Beams & Pedestal Support Toggle (`frontend/src/GeometryBuilder.jsx`, `backend/tests/test_geometry_cleanup_and_manual_beams.py`)**:
+  - Updated `floorData` story filtering to match both case-insensitive `floor_level` and story elevation (`|y_m - elevation_m| <= 0.05 m`, excluding buried `FTG_*` nodes) so `GF (0m)` reliably renders GF nodes and base tie beams for both `footing_depth = 0` and `footing_depth > 0`.
+  - Mapped grade nodes to their underlying pedestal footing nodes (`pedestalSupportByGradeNodeId`) so `GF (0m)` displays base support triangles and **Toggle Support** targets the underlying footing support node cleanly without disconnecting members.
+
 ### Changed
 - **Global Technical CAD-BIM Studio Theme & Dashboard Overhaul (`frontend/src/style.css`, `frontend/src/App.jsx`, `backend/app/storage.py`)**:
   - Unified all Modules 01–08 under the CAD-BIM Studio design system (`#090e17` canvas with `24px` blueprint grid, `#0f172a` panel surfaces, `#1e293b` hairline borders, emerald/cyan/amber/crimson semantic accents, monospaced `tabular-nums` data tables with sticky headers, segmented pill tab bars, compact engineering inputs, and slim dark scrollbars).

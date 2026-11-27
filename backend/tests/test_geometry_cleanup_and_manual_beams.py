@@ -312,3 +312,79 @@ def test_manually_added_beam_included_in_dsm_analysis_and_rc_design(isolated_env
     assert man_design["vu_max_kn"] > 0.0
     assert (man_design["mu_pos_mid_knm"] > 0.0) or (man_design["mu_neg_start_knm"] > 0.0)
     assert man_design["width_mm"] > 0.0 and man_design["depth_mm"] > 0.0
+
+
+def test_base_tie_beams_with_and_without_footing_depth(isolated_env):
+    """
+    Verify:
+      1. footing_depth_m=1.50 + include_base_tie_beams=True:
+         - GF grade nodes remain at y_m=0.0 with floor_level='GF'
+         - Footing support nodes drop to y_m=-1.50 with floor_level='FTG_GF' and is_support=True
+         - Pedestal columns (is_pedestal=True) connect FTG_GF -> GF
+         - Base tie beams (member_type='tie_beam') sit at GF (y_m=0.0, floor_level='GF')
+      2. footing_depth_m=0.0 + include_base_tie_beams=True and False:
+         - No regression; supports sit directly on GF at y_m=0.0.
+    """
+    client = isolated_env
+    pid = "TEST-GF-TIE-PEDESTAL"
+    payload = _make_2x2_project(pid)
+    payload["levels"] = [
+        {"id": "GF", "elevation_m": 0.0},
+        {"id": "2F", "elevation_m": 3.5},
+        {"id": "ROOF_LEVEL", "elevation_m": 7.0},
+    ]
+    storage.save_project(ProjectState.model_validate(payload))
+
+    # Case 1: footing_depth_m = 1.50, include_base_tie_beams = True
+    r1 = client.post(
+        f"/api/projects/{pid}/geometry/generate",
+        json={"include_base_tie_beams": True, "footing_depth_m": 1.50},
+    )
+    assert r1.status_code == 200, r1.text
+    m1 = r1.json()
+    node_by_id = {n["node_id"]: n for n in m1["nodes"]}
+
+    gf_nodes = [n for n in m1["nodes"] if n["floor_level"] == "GF"]
+    ftg_nodes = [n for n in m1["nodes"] if n["floor_level"] == "FTG_GF"]
+    assert len(gf_nodes) == 4
+    assert all(abs(n["y_m"] - 0.0) < 1e-4 for n in gf_nodes)
+    assert all(n["is_support"] is False for n in gf_nodes)
+
+    assert len(ftg_nodes) == 4
+    assert all(abs(n["y_m"] - (-1.50)) < 1e-4 for n in ftg_nodes)
+    assert all(n["is_support"] is True for n in ftg_nodes)
+
+    pedestals = [m for m in m1["members"] if m["is_pedestal"]]
+    assert len(pedestals) == 4
+
+    gf_tie_beams = [
+        m for m in m1["members"] if m["member_type"] == "tie_beam" and m["floor_level"] == "GF"
+    ]
+    assert len(gf_tie_beams) == 4
+    for tb in gf_tie_beams:
+        na = node_by_id[tb["start_node"]]
+        nb = node_by_id[tb["end_node"]]
+        assert na["floor_level"] == "GF" and nb["floor_level"] == "GF"
+        assert abs(na["y_m"] - 0.0) < 1e-4 and abs(nb["y_m"] - 0.0) < 1e-4
+
+    # Case 2: footing_depth_m = 0.0, include_base_tie_beams = True
+    r2 = client.post(
+        f"/api/projects/{pid}/geometry/generate",
+        json={"include_base_tie_beams": True, "footing_depth_m": 0.0},
+    )
+    assert r2.status_code == 200, r2.text
+    m2 = r2.json()
+    assert not any(n["floor_level"].startswith("FTG_") for n in m2["nodes"])
+    assert sum(1 for n in m2["nodes"] if n["floor_level"] == "GF" and n["is_support"]) == 4
+    assert sum(1 for m in m2["members"] if m["member_type"] == "tie_beam" and m["floor_level"] == "GF") == 4
+
+    # Case 3: footing_depth_m = 0.0, include_base_tie_beams = False
+    r3 = client.post(
+        f"/api/projects/{pid}/geometry/generate",
+        json={"include_base_tie_beams": False, "footing_depth_m": 0.0},
+    )
+    assert r3.status_code == 200, r3.text
+    m3 = r3.json()
+    assert sum(1 for m in m3["members"] if m["member_type"] == "tie_beam") == 0
+    assert sum(1 for n in m3["nodes"] if n["floor_level"] == "GF" and n["is_support"]) == 4
+

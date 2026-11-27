@@ -771,19 +771,63 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
     }
   }, [model, fullProject?.openings, sortedLevels, nodeMap, yaw, pitch, zoom3d, storyFilter, viewLayout, issueHighlight]);
 
-  // 2D Floor Framing data for activeFloor
+  // Map grade-level node_id -> buried footing support node when footing_depth_m > 0
+  const pedestalSupportByGradeNodeId = useMemo(() => {
+    const map = new Map();
+    for (const m of model.members || []) {
+      if (!m.is_pedestal) continue;
+      const na = nodeMap.get(m.start_node);
+      const nb = nodeMap.get(m.end_node);
+      if (!na || !nb) continue;
+      const ftgNode = na.y_m <= nb.y_m ? na : nb;
+      const gradeNode = na.y_m <= nb.y_m ? nb : na;
+      map.set(gradeNode.node_id, ftgNode);
+    }
+    return map;
+  }, [model.members, nodeMap]);
+
+  // 2D Floor Framing data for activeFloor (matches both story tag and exact story elevation)
   const floorData = useMemo(() => {
-    const nodes = (model.nodes || []).filter((n) => n.floor_level === activeFloor);
+    const activeLevel = sortedLevels.find((lv) => lv.id === activeFloor) || null;
+    const activeUpper = (activeFloor || "").trim().toUpperCase();
+    const isBuriedFtg = (lvl) => (lvl || "").trim().toUpperCase().startsWith("FTG_");
+
+    const nodes = (model.nodes || []).filter((n) => {
+      if (isBuriedFtg(n.floor_level)) return false;
+      const nUpper = (n.floor_level || "").trim().toUpperCase();
+      if (nUpper === activeUpper) return true;
+      if (activeLevel && Math.abs(Number(n.y_m) - Number(activeLevel.elevation_m)) <= 0.05) {
+        return true;
+      }
+      return false;
+    });
     const floorNodeIds = new Set(nodes.map((n) => n.node_id));
-    const beams = (model.members || []).filter(
-      (m) =>
-        m.member_type !== "column" &&
-        (m.floor_level === activeFloor ||
-          (floorNodeIds.has(m.start_node) && floorNodeIds.has(m.end_node)))
+    const beams = (model.members || []).filter((m) => {
+      if (m.member_type === "column") return false;
+      if (floorNodeIds.has(m.start_node) && floorNodeIds.has(m.end_node)) return true;
+      const na = nodeMap.get(m.start_node);
+      const nb = nodeMap.get(m.end_node);
+      if (na && nb && (isBuriedFtg(na.floor_level) || isBuriedFtg(nb.floor_level))) {
+        return false;
+      }
+      const mUpper = (m.floor_level || "").trim().toUpperCase();
+      if (mUpper === activeUpper) return true;
+      if (
+        activeLevel &&
+        na &&
+        nb &&
+        Math.abs(Number(na.y_m) - Number(activeLevel.elevation_m)) <= 0.05 &&
+        Math.abs(Number(nb.y_m) - Number(activeLevel.elevation_m)) <= 0.05
+      ) {
+        return true;
+      }
+      return false;
+    });
+    const panels = (model.slab_panels || []).filter(
+      (p) => (p.floor_level || "").trim().toUpperCase() === activeUpper
     );
-    const panels = (model.slab_panels || []).filter((p) => p.floor_level === activeFloor);
     const openings = (fullProject?.openings || []).filter(
-      (o) => !o.floor_level || o.floor_level.toUpperCase() === (activeFloor || "").toUpperCase()
+      (o) => !o.floor_level || o.floor_level.trim().toUpperCase() === activeUpper
     );
     const allNodes = model.nodes || [];
     const xs = [...allNodes.map((n) => n.x_m), ...(fullProject?.grids?.x_grids || []).map((g) => g.coord_m)];
@@ -805,7 +849,7 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
         maxZ: maxZ + pad,
       },
     };
-  }, [model, fullProject, activeFloor]);
+  }, [model, fullProject, activeFloor, sortedLevels, nodeMap]);
 
   function toSvg2D(x_m, z_m) {
     const { minX, maxX, minZ, maxZ } = floorData.bounds;
@@ -825,7 +869,9 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
   function handleNode2DClick(node) {
     if (busy) return;
     if (editorMode === "toggle_support") {
-      handleToggleSupport(node);
+      // When footing pedestals exist below grade, toggle support on the underlying footing node
+      const supportTarget = pedestalSupportByGradeNodeId.get(node.node_id) || node;
+      handleToggleSupport(supportTarget);
       return;
     }
     if (editorMode === "add_beam") {
@@ -1322,6 +1368,10 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
                   const isPrimNode = issueHighlight.primaryNodes.has(n.node_id);
                   const isWarnNode = issueHighlight.warnNodes.has(n.node_id);
                   const hiCol = isDupNode ? "#f43f5e" : isPrimNode ? "#10b981" : isWarnNode ? "#f59e0b" : null;
+                  const pedFtgNode = pedestalSupportByGradeNodeId.get(n.node_id) || null;
+                  const effectiveSupportNode = pedFtgNode || n;
+                  const hasSupport =
+                    effectiveSupportNode.is_support && effectiveSupportNode.support_type !== "NONE";
                   return (
                     <g
                       key={n.node_id}
@@ -1339,10 +1389,10 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
                           strokeWidth="2.4"
                         />
                       )}
-                      {n.is_support && n.support_type !== "NONE" && (
+                      {hasSupport && (
                         <polygon
                           points={`${p.x},${p.y + 3} ${p.x - 7},${p.y + 14} ${p.x + 7},${p.y + 14}`}
-                          fill={n.support_type === "FIXED" ? "#f87171" : "none"}
+                          fill={effectiveSupportNode.support_type === "FIXED" ? "#f87171" : "none"}
                           stroke="#f87171"
                           strokeWidth="1.8"
                         />
@@ -1351,7 +1401,7 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
                         cx={p.x}
                         cy={p.y}
                         r={hiCol ? 7 : isStart ? 7 : 5.5}
-                        fill={hiCol || (isStart ? "#45c9a8" : n.is_support ? "#fca5a5" : "#38bdf8")}
+                        fill={hiCol || (isStart ? "#45c9a8" : hasSupport ? "#fca5a5" : "#38bdf8")}
                         stroke="#0b1220"
                         strokeWidth="1.8"
                       />
