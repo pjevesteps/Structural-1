@@ -1,4 +1,4 @@
-from fastapi import APIRouter, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Body, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 
 from .inspector import InvalidPdfError, PdfTooLargeError
@@ -10,6 +10,7 @@ from .schemas import (
     CandidateReviewUpdate,
     CopyOpeningsRequest,
     CopyOpeningsResponse,
+    ExtractLevelsRequest,
     ExtractRequest,
     ExtractionResponse,
     ImportDocumentState,
@@ -165,9 +166,15 @@ def extract_pdf_page(
 
 
 @router.post("/{doc_id}/pages/{page_number}/extract-levels", response_model=LevelExtractionResponse)
-def extract_pdf_page_levels(project_id: str, doc_id: str, page_number: int):
+def extract_pdf_page_levels(
+    project_id: str,
+    doc_id: str,
+    page_number: int,
+    req: ExtractLevelsRequest | None = Body(default=None),
+):
     try:
-        return service.extract_levels(project_id, doc_id, page_number)
+        region_id = req.region_id if req is not None else None
+        return service.extract_levels(project_id, doc_id, page_number, region_id=region_id)
     except Exception as exc:
         raise _handle_error(exc)
 

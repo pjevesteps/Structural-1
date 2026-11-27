@@ -1869,3 +1869,290 @@ def test_auto_add_roof_level_no_duplicate_and_clear_interior_roof_beams(isolated
     cols_after = [m for m in members_after if m["member_type"] == "column"]
     assert len(roof_beams_after) == 8
     assert len(cols_after) == len(cols_before)
+
+
+def _make_combined_plan_and_elevation_pdf() -> bytes:
+    """
+    Create a single-page combined architectural PDF:
+      - Left half (x=40..420 pt): 2x2 floor plan with 4 shaded columns at (100,150), (300,150), (100,350), (300,350)
+      - Right half (x=500..900 pt): building elevation with 3 structural floor datums + a dark shaded box
+        that MUST be masked out during plan extraction when an elevation region covers the right half.
+    """
+    doc = pymupdf.open()
+    page = doc.new_page(width=960, height=600)
+    sh = page.new_shape()
+
+    # Left half: Floor plan grids + 4 shaded columns
+    for gx, lbl in [(120, "A"), (320, "B")]:
+        sh.draw_line(pymupdf.Point(gx, 90), pymupdf.Point(gx, 460))
+        sh.finish(color=(0.3, 0.3, 0.3), width=0.8)
+        page.insert_text(pymupdf.Point(gx - 4, 80), lbl, fontsize=11)
+    for gy, lbl in [(150, "1"), (350, "2")]:
+        sh.draw_line(pymupdf.Point(70, gy), pymupdf.Point(390, gy))
+        sh.finish(color=(0.3, 0.3, 0.3), width=0.8)
+        page.insert_text(pymupdf.Point(55, gy + 4), lbl, fontsize=11)
+    for cx in (120, 320):
+        for cy in (150, 350):
+            sh.draw_rect(pymupdf.Rect(cx - 8, cy - 8, cx + 8, cy + 8))
+            sh.finish(color=(0.2, 0.2, 0.2), fill=(0.55, 0.55, 0.55), width=0.8)
+
+    # Right half: Elevation datums (bottom-to-top: GF 0.00m, 2F +3.20m, ROOF +6.40m) + shaded window/box
+    for ey, label, elev in [
+        (430, "GROUND FLOOR LINE", "+0.00 m"),
+        (300, "SECOND FLOOR LINE", "+3.20 m"),
+        (170, "ROOF BEAM LINE", "+6.40 m"),
+    ]:
+        sh.draw_line(pymupdf.Point(520, ey), pymupdf.Point(880, ey))
+        sh.finish(color=(0.15, 0.15, 0.15), width=0.9)
+        page.insert_text(pymupdf.Point(525, ey - 5), label, fontsize=9)
+        page.insert_text(pymupdf.Point(820, ey - 5), elev, fontsize=9)
+    # Shaded square inside elevation that looks column-sized if NOT masked out!
+    sh.draw_rect(pymupdf.Rect(680, 340, 696, 356))
+    sh.finish(color=(0.2, 0.2, 0.2), fill=(0.55, 0.55, 0.55), width=0.8)
+    sh.commit()
+
+    raw = doc.tobytes()
+    doc.close()
+    return raw
+
+
+def test_elevation_regions_isolation_selective_reextract_and_all_story_mapping(isolated_env):
+    """
+    Verify:
+      1. Legacy PlanRegion (no region_type) & DetectedLevel (no region_id) deserialize cleanly under extra='forbid'.
+      2. Empty-body POST /extract-levels and {"region_id": "..."} both return 200 (never 422);
+         plan region returns 400; unknown region returns 404.
+      3. Combined plan+elevation sheet with overlapping full-sheet plan region + elevation region:
+         - Region-scoped extract-levels returns levels stamped with region_id.
+         - Plan extraction masks out geometry inside the elevation region (both vector & raster).
+         - PATCH region_type='elevation' clears floor_level to ''.
+         - Selective re-extraction preserves manual levels, transferred levels, and other-region levels.
+      4. PlanRegion with floor_level='ALL' transfers columns with floor_level='ALL' and Module 03
+         extrudes them cleanly across all stories with zero UNKNOWN_COLUMN_LEVEL warnings.
+    """
+    client, _ = isolated_env
+    from backend.app.pdf_importer.schemas import DetectedLevel, PlanRegion
+
+    # 1. Legacy deserialization compatibility under extra='forbid'
+    legacy_reg = PlanRegion.model_validate(
+        {
+            "region_id": "reg-legacy",
+            "page_number": 1,
+            "name": "Legacy Floor Plan",
+            "floor_level": "1F",
+            "x_px": 0.0,
+            "y_px": 0.0,
+            "width_px": 500.0,
+            "height_px": 500.0,
+        }
+    )
+    assert legacy_reg.region_type == "plan"
+    legacy_lvl = DetectedLevel.model_validate(
+        {
+            "level_id": "lvl-legacy",
+            "name": "2ND FLOOR",
+            "elevation_m": 3.0,
+            "page_number": 1,
+            "y_px": 200.0,
+        }
+    )
+    assert legacy_lvl.region_id is None
+
+    # Create project & upload combined plan+elevation PDF
+    pid = "TEST-COMB-ELEV"
+    assert client.post("/api/projects", json=_make_sample_project(pid)).status_code == 200
+    pdf_bytes = _make_combined_plan_and_elevation_pdf()
+    up = client.post(
+        f"/api/projects/{pid}/pdf-imports",
+        files={"file": ("combined_sheet.pdf", pdf_bytes, "application/pdf")},
+    )
+    assert up.status_code == 200, up.text
+    doc_state = up.json()
+    doc_id = doc_state["doc_id"]
+    pg = doc_state["pages"][0]
+    w_px, h_px = pg["width_px"], pg["height_px"]
+
+    # Create full-sheet Plan region (mirroring CAD default full-sheet region) + overlapping Elevation region on right half
+    r_plan = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/regions",
+        json={
+            "page_number": 1,
+            "name": "Full Sheet Plan",
+            "region_type": "plan",
+            "floor_level": "ALL",
+            "x_px": 0.0,
+            "y_px": 0.0,
+            "width_px": float(w_px),
+            "height_px": float(h_px),
+        },
+    )
+    assert r_plan.status_code == 200, r_plan.text
+    plan_reg_id = r_plan.json()["regions"][-1]["region_id"]
+
+    r_elev = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/regions",
+        json={
+            "page_number": 1,
+            "name": "Elevation 1",
+            "region_type": "elevation",
+            "floor_level": "2F",  # should be normalized to "" for elevation regions
+            "x_px": float(w_px) * 0.50,
+            "y_px": 0.0,
+            "width_px": float(w_px) * 0.50,
+            "height_px": float(h_px),
+        },
+    )
+    assert r_elev.status_code == 200, r_elev.text
+    elev_reg = r_elev.json()["regions"][-1]
+    elev_reg_id = elev_reg["region_id"]
+    assert elev_reg["region_type"] == "elevation"
+    assert elev_reg["floor_level"] == ""
+
+    # PATCH region_type -> 'elevation' clears floor_level
+    r_tmp = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/regions",
+        json={
+            "page_number": 1,
+            "name": "Temp Plan",
+            "region_type": "plan",
+            "floor_level": "2F",
+            "x_px": 10.0,
+            "y_px": 10.0,
+            "width_px": 100.0,
+            "height_px": 100.0,
+        },
+    )
+    tmp_reg_id = r_tmp.json()["regions"][-1]["region_id"]
+    p_upd = client.patch(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/regions/{tmp_reg_id}",
+        json={"region_type": "elevation"},
+    )
+    assert p_upd.status_code == 200
+    patched_tmp = next(r for r in p_upd.json()["regions"] if r["region_id"] == tmp_reg_id)
+    assert patched_tmp["region_type"] == "elevation"
+    assert patched_tmp["floor_level"] == ""
+    assert client.delete(f"/api/projects/{pid}/pdf-imports/{doc_id}/regions/{tmp_reg_id}").status_code == 200
+
+    # 2. Extract-levels validation: plan region -> 400, unknown region -> 404, empty body -> 200
+    assert (
+        client.post(
+            f"/api/projects/{pid}/pdf-imports/{doc_id}/pages/1/extract-levels",
+            json={"region_id": plan_reg_id},
+        ).status_code
+        == 400
+    )
+    assert (
+        client.post(
+            f"/api/projects/{pid}/pdf-imports/{doc_id}/pages/1/extract-levels",
+            json={"region_id": "reg-does-not-exist"},
+        ).status_code
+        == 404
+    )
+    empty_res = client.post(f"/api/projects/{pid}/pdf-imports/{doc_id}/pages/1/extract-levels")
+    assert empty_res.status_code == 200, empty_res.text
+
+    # Add a manual level (region_id=None) before region-scoped extraction to verify preservation
+    man_lvl = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/levels",
+        json={"page_number": 1, "name": "MANUAL BASEMENT", "elevation_m": -2.8, "engineer_approved": True},
+    )
+    assert man_lvl.status_code == 200
+    manual_id = man_lvl.json()["detected_levels"][-1]["level_id"]
+
+    # 3. Region-scoped elevation extraction
+    el_res = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/pages/1/extract-levels",
+        json={"region_id": elev_reg_id},
+    )
+    assert el_res.status_code == 200, el_res.text
+    el_data = el_res.json()
+    assert el_data["levels_detected"] == 3
+    reg_lvls = [l for l in el_data["document"]["detected_levels"] if l["region_id"] == elev_reg_id]
+    assert len(reg_lvls) == 3
+    assert [round(l["elevation_m"], 2) for l in sorted(reg_lvls, key=lambda x: x["elevation_m"])] == [0.0, 3.2, 6.4]
+
+    # Selective re-extraction preserves manual level AND replaces only un-transferred levels of elev_reg_id
+    el_res2 = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/pages/1/extract-levels",
+        json={"region_id": elev_reg_id},
+    )
+    assert el_res2.status_code == 200
+    all_lvls2 = el_res2.json()["document"]["detected_levels"]
+    assert any(l["level_id"] == manual_id for l in all_lvls2)
+    assert len([l for l in all_lvls2 if l["region_id"] == elev_reg_id]) == 3
+
+    # Approve the 3 extracted levels and transfer to ProjectState
+    for lvl in [l for l in all_lvls2 if l["region_id"] == elev_reg_id]:
+        assert (
+            client.patch(
+                f"/api/projects/{pid}/pdf-imports/{doc_id}/levels/{lvl['level_id']}",
+                json={"review_status": "approved", "engineer_approved": True},
+            ).status_code
+            == 200
+        )
+    # Remove manual basement so project levels are cleanly [GF 0m, 2F 3.2m, ROOF 6.4m]
+    assert client.delete(f"/api/projects/{pid}/pdf-imports/{doc_id}/levels/{manual_id}").status_code == 200
+    tr_lvl = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/transfer-levels",
+        json={"page_number": 1, "replace_existing": True},
+    )
+    assert tr_lvl.status_code == 200, tr_lvl.text
+    assert tr_lvl.json()["total_project_levels"] == 3
+
+    # Calibrate page (200 pt = 5.0 m) & confirm
+    sx = w_px / 960.0
+    sy = h_px / 600.0
+    cal = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/pages/1/calibrate",
+        json={
+            "p1": {"x_px": 120.0 * sx, "y_px": 350.0 * sy},
+            "p2": {"x_px": 320.0 * sx, "y_px": 350.0 * sy},
+            "known_distance": 5.0,
+            "unit": "m",
+            "confirmed": True,
+        },
+    )
+    assert cal.status_code == 200, cal.text
+
+    # Plan extraction on overlapping full-sheet plan region MUST mask out the shaded box inside Elevation 1
+    assert (
+        client.post(
+            f"/api/projects/{pid}/pdf-imports/{doc_id}/pages/1/extract",
+            json={"region_id": elev_reg_id},
+        ).status_code
+        == 400
+    )
+    ext = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/pages/1/extract",
+        json={"region_id": plan_reg_id, "method": "vector"},
+    )
+    assert ext.status_code == 200, ext.text
+    cols = ext.json()["document"]["column_candidates"]
+    assert len(cols) >= 4
+    # Zero detected columns may fall inside the elevation region (x >= 0.50 * w_px)
+    assert all(c["x_px"] < float(w_px) * 0.50 for c in cols), f"Elevation fill leaked into plan columns: {cols}"
+
+    # Approve all columns & transfer with region floor_level='ALL' -> Module 03 extrudes across all stories cleanly
+    col_ids = [c["id"] for c in cols]
+    assert (
+        client.post(
+            f"/api/projects/{pid}/pdf-imports/{doc_id}/candidates/bulk-review",
+            json={"candidate_ids": col_ids, "status": "approved"},
+        ).status_code
+        == 200
+    )
+    tr = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/transfer",
+        json={"page_number": 1, "region_id": plan_reg_id, "merge_mode": "replace_geometry"},
+    )
+    assert tr.status_code == 200, tr.text
+    proj_after = tr.json()["project"]
+    assert all(c["floor_level"] == "ALL" for c in proj_after["columns"])
+
+    gen3 = client.post(f"/api/projects/{pid}/geometry/generate", json={})
+    assert gen3.status_code == 200, gen3.text
+    sm = gen3.json()
+    assert not any(iss["code"] == "UNKNOWN_COLUMN_LEVEL" for iss in sm["validation_issues"])
+    # 4 columns x 2 stories (GF->2F, 2F->ROOF) = 8 column members
+    col_members = [m for m in sm["members"] if m["member_type"] == "column"]
+    assert len(col_members) == 8

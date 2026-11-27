@@ -663,7 +663,8 @@ def create_region(
         region_id=f"reg-p{req.page_number}-{uuid4().hex[:6]}",
         page_number=req.page_number,
         name=req.name.strip(),
-        floor_level=req.floor_level.strip(),
+        region_type=req.region_type,
+        floor_level="" if req.region_type == "elevation" else req.floor_level.strip(),
         x_px=round(req.x_px, 2),
         y_px=round(req.y_px, 2),
         width_px=round(req.width_px, 2),
@@ -681,6 +682,7 @@ def create_region(
             "region_id": region.region_id,
             "page_number": req.page_number,
             "name": region.name,
+            "region_type": region.region_type,
             "floor_level": region.floor_level,
         },
     )
@@ -698,8 +700,12 @@ def update_region(
 
     if req.name is not None and req.name.strip():
         region.name = req.name.strip()
+    if req.region_type is not None:
+        region.region_type = req.region_type
     if req.floor_level is not None:
         region.floor_level = req.floor_level.strip()
+    if region.region_type == "elevation":
+        region.floor_level = ""
     if req.origin_px is not None:
         region.origin_px = req.origin_px
     if req.x_px is not None:
@@ -768,6 +774,14 @@ def extract_page(
         region = _get_region(state, req.region_id)
         if region.page_number != page_number:
             raise ValueError(f"Region '{req.region_id}' belongs to page {region.page_number}, not page {page_number}.")
+        if region.region_type != "plan":
+            raise ValueError(
+                f"Region '{region.name}' is an elevation region; floor plan extraction only targets 'plan' regions."
+            )
+
+    exclude_regions = [
+        r for r in state.regions if r.page_number == page_number and r.region_type == "elevation"
+    ]
 
     pdf_path = _original_pdf_path(project_id, doc_id)
     png_path = _pages_dir(project_id, doc_id) / page.image_filename
@@ -803,6 +817,7 @@ def extract_page(
         existing_grids=existing_region_grids,
         pixels_per_meter=effective_ppm,
         origin_px=effective_origin,
+        exclude_regions=exclude_regions,
     )
 
     if req.replace_unreviewed:
@@ -876,20 +891,59 @@ def extract_levels(
     project_id: str,
     doc_id: str,
     page_number: int,
+    region_id: str | None = None,
 ) -> LevelExtractionResponse:
     state = get_import(project_id, doc_id)
     page = _get_page(state, page_number)
+    cal = state.calibrations.get(str(page_number))
+
+    region: PlanRegion | None = None
+    if region_id is not None:
+        region = _get_region(state, region_id)
+        if region.page_number != page_number:
+            raise ValueError(
+                f"Region '{region_id}' belongs to page {region.page_number}, not page {page_number}."
+            )
+        if region.region_type != "elevation":
+            raise ValueError(
+                f"Region '{region.name}' has region_type='{region.region_type}'; "
+                "set it to 'elevation' before extracting region levels."
+            )
 
     pdf_path = _original_pdf_path(project_id, doc_id)
     png_path = _pages_dir(project_id, doc_id) / page.image_filename
 
-    levels, warnings = extract_levels_from_elevation_or_section(pdf_path, png_path, page)
+    levels, warnings = extract_levels_from_elevation_or_section(
+        pdf_path,
+        png_path,
+        page,
+        region=region,
+        calibration=cal,
+    )
 
-    state.detected_levels = [
-        lvl
-        for lvl in state.detected_levels
-        if not (lvl.page_number == page_number and not lvl.engineer_approved)
-    ]
+    if region_id is not None:
+        # Selective replacement: replace ONLY un-transferred levels from this specific elevation region
+        # (preserves manual levels with region_id=None, transferred levels, and levels from other regions).
+        state.detected_levels = [
+            lvl
+            for lvl in state.detected_levels
+            if not (
+                lvl.page_number == page_number
+                and lvl.region_id == region_id
+                and not lvl.transferred
+            )
+        ]
+    else:
+        state.detected_levels = [
+            lvl
+            for lvl in state.detected_levels
+            if not (
+                lvl.page_number == page_number
+                and lvl.region_id is None
+                and not lvl.engineer_approved
+                and not lvl.transferred
+            )
+        ]
     state.detected_levels.extend(levels)
     _save_state(state)
 
@@ -899,14 +953,16 @@ def extract_levels(
         "levels_extracted",
         {
             "page_number": page_number,
+            "region_id": region_id,
             "sheet_type": page.sheet_type,
             "levels_detected": len(levels),
             "warnings": warnings,
         },
     )
 
+    scope_desc = f"region '{region.name}' on page {page_number}" if region is not None else f"page {page_number}"
     notice = (
-        f"Extracted {len(levels)} structural floor-to-floor level(s) from page {page_number}."
+        f"Extracted {len(levels)} structural floor-to-floor level(s) from {scope_desc}."
         + (f" Warnings: {' '.join(warnings)}" if warnings else " Review and approve levels before transferring.")
     )
     return LevelExtractionResponse(
@@ -1343,6 +1399,8 @@ def stamp_master_grid(
         raise ValueError("No Master Grid is locked yet. Lock a Master Grid from a calibrated floor region first.")
 
     target_region = _get_region(state, target_region_id)
+    if target_region.region_type != "plan":
+        raise ValueError(f"Target region '{target_region.name}' is an elevation region; Master Grid only targets 'plan' regions.")
     target_region.origin_px = req.anchor_px
 
     target_cal = state.calibrations.get(str(target_region.page_number))
@@ -1438,6 +1496,8 @@ def apply_master_grid(
     state = get_import(project_id, doc_id)
     source_region = _get_region(state, req.source_region_id)
     target_region = _get_region(state, target_region_id)
+    if source_region.region_type != "plan" or target_region.region_type != "plan":
+        raise ValueError("Master Grid propagation only supports 'plan' regions.")
 
     if source_region.region_id == target_region.region_id:
         raise ValueError("Source and target regions must differ.")
@@ -1646,6 +1706,8 @@ def copy_openings(
     state = get_import(project_id, doc_id)
     source_region = _get_region(state, req.source_region_id)
     target_region = _get_region(state, target_region_id)
+    if source_region.region_type != "plan" or target_region.region_type != "plan":
+        raise ValueError("Master Grid propagation only supports 'plan' regions.")
 
     if source_region.region_id == target_region.region_id:
         raise ValueError("Source and target regions must differ.")
@@ -1965,10 +2027,20 @@ def transfer_approved(
     project = _ensure_project_exists(project_id)
     state = _load_state(project_id, doc_id)
 
+    if req.region_id is not None:
+        target_reg = _get_region(state, req.region_id)
+        if target_reg.region_type != "plan":
+            raise ValueError(
+                f"Region '{target_reg.name}' is an elevation region; transfer only targets 'plan' regions."
+            )
+
+    elevation_region_ids = {r.region_id for r in state.regions if r.region_type == "elevation"}
+
     approved_grids = [
         g
         for g in state.grid_candidates
         if (g.status == ReviewStatus.APPROVED or g.engineer_approved)
+        and (g.region_id not in elevation_region_ids)
         and (req.page_number is None or g.page_number == req.page_number)
         and (req.region_id is None or g.region_id == req.region_id)
     ]
@@ -1976,6 +2048,7 @@ def transfer_approved(
         c
         for c in state.column_candidates
         if (c.status == ReviewStatus.APPROVED or c.engineer_approved)
+        and (c.region_id not in elevation_region_ids)
         and (req.page_number is None or c.page_number == req.page_number)
         and (req.region_id is None or c.region_id == req.region_id)
     ]
@@ -1983,6 +2056,7 @@ def transfer_approved(
         o
         for o in state.openings
         if (o.engineer_approved or o.review_status == ReviewStatus.APPROVED)
+        and (o.region_id not in elevation_region_ids)
         and (req.page_number is None or o.page_number == req.page_number)
         and (req.region_id is None or o.region_id == req.region_id)
     ]

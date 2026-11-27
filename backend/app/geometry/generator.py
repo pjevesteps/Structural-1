@@ -234,7 +234,7 @@ def _openings_for_level(
     matched: list[FloorOpening] = []
     for op in openings:
         raw = op.floor_level.strip()
-        if not raw or raw.upper() == lvl_upper:
+        if not raw or raw.upper() == "ALL" or raw.upper() == lvl_upper:
             matched.append(op)
         elif levels is not None and target_idx is not None:
             if _resolve_level_index(raw, levels) == target_idx:
@@ -403,7 +403,7 @@ def generate_structural_model(
     all_have_fl = bool(project.columns)
     for col in project.columns:
         fl = col.floor_level.strip()
-        if not fl:
+        if not fl or fl.upper() == "ALL":
             all_have_fl = False
             continue
         ridx = _resolve_level_index(fl, levels)
@@ -428,7 +428,7 @@ def generate_structural_model(
     seen_member_pairs: set[tuple[int, int]] = set()
     for col in project.columns:
         fl = col.floor_level.strip()
-        if not fl or single_plan_template:
+        if not fl or fl.upper() == "ALL" or single_plan_template:
             story_indices = list(range(len(levels) - 1))
         else:
             idx = _resolve_level_index(fl, levels)

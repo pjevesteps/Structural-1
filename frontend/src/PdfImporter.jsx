@@ -153,6 +153,7 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
   const [copyOpeningsSourceId, setCopyOpeningsSourceId] = useState("");
   const [regionCorner1, setRegionCorner1] = useState(null);
   const [newRegionName, setNewRegionName] = useState("");
+  const [newRegionType, setNewRegionType] = useState("plan");
   const [newRegionLevel, setNewRegionLevel] = useState("");
   const [openingCategory, setOpeningCategory] = useState("stairwell");
   const [openingLabel, setOpeningLabel] = useState("STAIR-1");
@@ -247,6 +248,35 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
       .slice()
       .sort((a, b) => a.elevation_m - b.elevation_m);
   }, [doc, pageNum]);
+
+  const hasElevationRegion = useMemo(
+    () => pageRegions.some((r) => (r.region_type || "plan") === "elevation"),
+    [pageRegions]
+  );
+
+  const showLevelsPanel = isElevationOrSection || hasElevationRegion || pageLevels.length > 0;
+
+  const availableLevelOptions = useMemo(() => {
+    const seen = new Set();
+    const out = [];
+    for (const lv of projectLevels) {
+      const id = lv.id || lv.name;
+      if (id && !seen.has(id.toUpperCase())) {
+        seen.add(id.toUpperCase());
+        out.push({ id, label: `${lv.name || lv.id} (${lv.elevation_m} m)` });
+      }
+    }
+    for (const dl of doc?.detected_levels || []) {
+      if (dl.engineer_approved || dl.review_status === "approved") {
+        const id = (dl.name || "").trim();
+        if (id && !seen.has(id.toUpperCase())) {
+          seen.add(id.toUpperCase());
+          out.push({ id, label: `${id} (${dl.elevation_m} m)` });
+        }
+      }
+    }
+    return out;
+  }, [projectLevels, doc?.detected_levels]);
 
   // Active-region grids for intersection snapping
   const activeRegionGrids = useMemo(() => {
@@ -641,8 +671,12 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
       }
       setBusy(true);
       try {
+        const elevCount = pageRegions.filter((r) => (r.region_type || "plan") === "elevation").length;
         const regName =
-          newRegionName.trim() || `Page ${activePage.page_number} Region ${pageRegions.length + 1}`;
+          newRegionName.trim() ||
+          (newRegionType === "elevation"
+            ? `Elevation ${elevCount + 1}`
+            : `Page ${activePage.page_number} Region ${pageRegions.length + 1}`);
         const updated = await apiJson(
           `/api/projects/${pid}/pdf-imports/${encodeURIComponent(doc.doc_id)}/regions`,
           {
@@ -651,7 +685,8 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
             body: JSON.stringify({
               page_number: activePage.page_number,
               name: regName,
-              floor_level: newRegionLevel.trim(),
+              region_type: newRegionType,
+              floor_level: newRegionType === "elevation" ? "" : newRegionLevel.trim(),
               x_px: x0,
               y_px: y0,
               width_px: w,
@@ -1437,14 +1472,21 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
     }
   }
 
-  async function handleExtractLevels() {
+  async function handleExtractLevels(regionId = null) {
     if (!doc || !activePage) return;
     setBusy(true);
     setError("");
     try {
+      const fetchOpts = regionId
+        ? {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ region_id: regionId }),
+          }
+        : { method: "POST" };
       const res = await apiJson(
         `/api/projects/${pid}/pdf-imports/${encodeURIComponent(doc.doc_id)}/pages/${activePage.page_number}/extract-levels`,
-        { method: "POST" }
+        fetchOpts
       );
       setDoc(res.document);
       setNotice(res.notice || `Extracted ${res.levels_detected} floor level(s).`);
@@ -2133,33 +2175,62 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
 
                   {mode === "draw_region" && (
                     <div className="pdf-inline-form">
+                      <select
+                        className="pdf-select"
+                        value={newRegionType}
+                        onChange={(e) => {
+                          const nextType = e.target.value;
+                          setNewRegionType(nextType);
+                          if (nextType === "elevation") {
+                            setNewRegionLevel("");
+                            if (!newRegionName.trim()) {
+                              const elevCount = pageRegions.filter(
+                                (r) => (r.region_type || "plan") === "elevation"
+                              ).length;
+                              setNewRegionName(`Elevation ${elevCount + 1}`);
+                            }
+                          }
+                        }}
+                        disabled={busy}
+                        aria-label="New region type"
+                      >
+                        <option value="plan">Plan Region</option>
+                        <option value="elevation">Elevation Region</option>
+                      </select>
                       <input
                         type="text"
                         value={newRegionName}
                         onChange={(e) => setNewRegionName(e.target.value)}
-                        placeholder="New region name (e.g. Second Floor Plan)"
+                        placeholder={
+                          newRegionType === "elevation"
+                            ? "New elevation name (e.g. Elevation 1)"
+                            : "New region name (e.g. Second Floor Plan)"
+                        }
                         style={{ minWidth: 210 }}
                       />
                       <select
                         className="pdf-select"
-                        value={newRegionLevel}
+                        value={newRegionType === "elevation" ? "" : newRegionLevel}
                         onChange={(e) => setNewRegionLevel(e.target.value)}
-                        disabled={busy}
+                        disabled={busy || newRegionType === "elevation"}
                         aria-label="New region floor level"
                       >
-                        {projectLevels.length === 0 ? (
-                          <option value="">Extract levels on Elevation/Section first</option>
+                        {newRegionType === "elevation" ? (
+                          <option value="">Elevation (N/A)</option>
+                        ) : availableLevelOptions.length === 0 ? (
+                          <>
+                            <option value="">Extract levels on Elevation/Section first</option>
+                            <option value="ALL">All Stories (Typical)</option>
+                          </>
                         ) : (
                           <>
                             <option value="">Select Level...</option>
-                            {projectLevels.map((lv) => {
-                              const lvLabel = lv.name || lv.id;
-                              return (
-                                <option key={lv.id} value={lv.id}>
-                                  {lvLabel} ({lv.elevation_m} m)
-                                </option>
-                              );
-                            })}
+                            <option value="ALL">All Stories (Typical)</option>
+                            {availableLevelOptions.map((lv) => (
+                              <option key={lv.id} value={lv.id}>
+                                {lv.label}
+                              </option>
+                            ))}
                           </>
                         )}
                       </select>
@@ -2175,24 +2246,36 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
                     <div className="pdf-region-cards">
                       {pageRegions.map((reg) => {
                         const isAct = reg.region_id === activeRegionId;
+                        const isElevReg = (reg.region_type || "plan") === "elevation";
                         const currentLevel = reg.floor_level || "";
                         const hasCurrentInList =
                           !currentLevel ||
-                          projectLevels.some(
-                            (lv) => lv.id === currentLevel || lv.name === currentLevel
+                          currentLevel.toUpperCase() === "ALL" ||
+                          availableLevelOptions.some(
+                            (lv) => lv.id.toUpperCase() === currentLevel.toUpperCase()
                           );
                         return (
                           <div
                             key={reg.region_id}
                             className={`pdf-region-card ${isAct ? "active" : ""}`}
+                            style={isElevReg ? { borderLeftColor: "#f59e0b" } : undefined}
                             onClick={() => setActiveRegionId(reg.region_id)}
                           >
                             <div className="pdf-region-card-main">
-                              <strong>{reg.name}</strong>
+                              <strong>
+                                {isElevReg ? "[ELEV] " : ""}
+                                {reg.name}
+                              </strong>
                               <small>
-                                {reg.floor_level ? `Level: ${reg.floor_level} · ` : ""}
+                                {isElevReg
+                                  ? "Elevation Region · "
+                                  : reg.floor_level
+                                  ? `Level: ${reg.floor_level === "ALL" ? "All Stories (Typical)" : reg.floor_level} · `
+                                  : ""}
                                 {Math.round(reg.width_px)}×{Math.round(reg.height_px)} px ·{" "}
-                                {reg.origin_px
+                                {isElevReg
+                                  ? "Scoped datum extraction"
+                                  : reg.origin_px
                                   ? `Origin (${Math.round(reg.origin_px.x_px)}, ${Math.round(reg.origin_px.y_px)})`
                                   : "Origin not set"}
                               </small>
@@ -2200,35 +2283,65 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
                             <div className="pdf-cand-actions">
                               <select
                                 className="region-level-select"
-                                value={currentLevel}
+                                value={reg.region_type || "plan"}
                                 disabled={busy}
-                                title="Assign floor level from ProjectState.levels"
-                                aria-label={`Floor level for ${reg.name}`}
+                                title="Switch region between Plan and Elevation"
+                                aria-label={`Region type for ${reg.name}`}
                                 onClick={(ev) => ev.stopPropagation()}
                                 onChange={(ev) => {
                                   ev.stopPropagation();
                                   handleUpdateRegionMeta(reg.region_id, {
-                                    floor_level: ev.target.value,
+                                    region_type: ev.target.value,
                                   });
                                 }}
                               >
-                                {projectLevels.length === 0 ? (
-                                  <option value="">Extract levels on Elevation/Section first</option>
-                                ) : (
-                                  <option value="">-- Level --</option>
-                                )}
-                                {!hasCurrentInList && (
-                                  <option value={currentLevel}>{currentLevel} (unmatched)</option>
-                                )}
-                                {projectLevels.map((lv) => {
-                                  const lvLabel = lv.name || lv.id;
-                                  return (
-                                    <option key={lv.id} value={lv.id}>
-                                      {lvLabel} ({lv.elevation_m} m)
-                                    </option>
-                                  );
-                                })}
+                                <option value="plan">Plan</option>
+                                <option value="elevation">Elevation</option>
                               </select>
+                              {isElevReg ? (
+                                <button
+                                  type="button"
+                                  className="mini-btn on-approve"
+                                  disabled={busy}
+                                  onClick={(ev) => {
+                                    ev.stopPropagation();
+                                    handleExtractLevels(reg.region_id);
+                                  }}
+                                  title="Extract floor-to-floor levels strictly inside this elevation region"
+                                >
+                                  Extract Region Levels
+                                </button>
+                              ) : (
+                                <select
+                                  className="region-level-select"
+                                  value={currentLevel}
+                                  disabled={busy}
+                                  title="Assign floor level from ProjectState.levels or All Stories (Typical)"
+                                  aria-label={`Floor level for ${reg.name}`}
+                                  onClick={(ev) => ev.stopPropagation()}
+                                  onChange={(ev) => {
+                                    ev.stopPropagation();
+                                    handleUpdateRegionMeta(reg.region_id, {
+                                      floor_level: ev.target.value,
+                                    });
+                                  }}
+                                >
+                                  {availableLevelOptions.length === 0 ? (
+                                    <option value="">Extract levels on Elevation/Section first</option>
+                                  ) : (
+                                    <option value="">-- Level --</option>
+                                  )}
+                                  <option value="ALL">All Stories (Typical)</option>
+                                  {!hasCurrentInList && (
+                                    <option value={currentLevel}>{currentLevel} (unmatched)</option>
+                                  )}
+                                  {availableLevelOptions.map((lv) => (
+                                    <option key={lv.id} value={lv.id}>
+                                      {lv.label}
+                                    </option>
+                                  ))}
+                                </select>
+                              )}
                               <button
                                 type="button"
                                 className="mini-btn on-reject"
@@ -2289,7 +2402,7 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
                       Structural Floor-to-Floor Level Extraction
                     </span>
                     <div className="pdf-inline-form">
-                      <button disabled={busy} onClick={handleExtractLevels}>
+                      <button disabled={busy} onClick={() => handleExtractLevels(null)}>
                         Extract Floor Levels
                       </button>
                       <small className="pdf-hint">
@@ -2578,34 +2691,45 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
                     {/* Saved PlanRegion Boxes & (0,0) Origin Crosshairs */}
                     {pageRegions.map((reg) => {
                       const isActiveReg = reg.region_id === activeRegionId;
+                      const isElevReg = (reg.region_type || "plan") === "elevation";
                       const strokeW = Math.max(activePage.width_px * 0.0022, 1.8) * invZ;
                       const fontSize = Math.max(activePage.width_px * 0.012, 12) * invZ;
                       const cross = Math.max(activePage.width_px * 0.01, 12) * invZ;
+                      const boxStroke = isElevReg
+                        ? isActiveReg
+                          ? "#f59e0b"
+                          : "#d97706"
+                        : isActiveReg
+                        ? "#38bdf8"
+                        : "#94a3b8";
+                      const boxFill = isElevReg ? "#f59e0b" : isActiveReg ? "#38bdf8" : "none";
+                      const boxFillOp = isElevReg ? (isActiveReg ? 0.12 : 0.06) : isActiveReg ? 0.04 : 0;
                       return (
-                        <g key={reg.region_id} opacity={isActiveReg ? 0.96 : 0.48}>
+                        <g key={reg.region_id} opacity={isActiveReg ? 0.96 : 0.62}>
                           <rect
                             x={reg.x_px}
                             y={reg.y_px}
                             width={Math.max(10, reg.width_px)}
                             height={Math.max(10, reg.height_px)}
-                            fill={isActiveReg ? "#38bdf8" : "none"}
-                            fillOpacity={isActiveReg ? 0.04 : 0}
-                            stroke={isActiveReg ? "#38bdf8" : "#94a3b8"}
+                            fill={boxFill}
+                            fillOpacity={boxFillOp}
+                            stroke={boxStroke}
                             strokeWidth={strokeW}
                             strokeDasharray={`${strokeW * 4} ${strokeW * 3}`}
                           />
                           <text
                             x={reg.x_px + 10 * invZ}
                             y={reg.y_px + fontSize + 6 * invZ}
-                            fill={isActiveReg ? "#38bdf8" : "#cbd5e1"}
+                            fill={isElevReg ? "#fbbf24" : isActiveReg ? "#38bdf8" : "#cbd5e1"}
                             fontSize={fontSize}
                             fontWeight="800"
                             stroke="#0b1220"
                             strokeWidth={strokeW * 1.4}
                             paintOrder="stroke"
                           >
+                            {isElevReg ? "[ELEV] " : ""}
                             {reg.name}
-                            {reg.floor_level ? ` (${reg.floor_level})` : ""}
+                            {!isElevReg && reg.floor_level ? ` (${reg.floor_level})` : ""}
                           </text>
                           {reg.origin_px && (
                             <g>
@@ -3009,7 +3133,7 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
 
             {/* Right Review & Transfer Panel */}
             <aside className="pdf-review-col">
-              {isElevationOrSection ? (
+              {showLevelsPanel && (
                 <>
                   <div className="pdf-review-header">
                     <div>
@@ -3226,7 +3350,8 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
                     </small>
                   </div>
                 </>
-              ) : (
+              )}
+              {!isElevationOrSection && (
                 <>
                   <div className="pdf-review-header">
                     <div>

@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import math
 from math import hypot
 from pathlib import Path
 from uuid import uuid4
@@ -154,6 +155,57 @@ def _region_bounds(page_info: PageInfo, region: PlanRegion | None) -> tuple[floa
         float(region.x_px + region.width_px),
         float(region.y_px + region.height_px),
     )
+
+
+def _exclude_region_boxes(exclude_regions: list[PlanRegion] | None) -> list[tuple[float, float, float, float]]:
+    if not exclude_regions:
+        return []
+    return [
+        (float(r.x_px), float(r.y_px), float(r.x_px + r.width_px), float(r.y_px + r.height_px))
+        for r in exclude_regions
+    ]
+
+
+def _point_in_any_box(x: float, y: float, boxes: list[tuple[float, float, float, float]]) -> bool:
+    for ex0, ey0, ex1, ey1 in boxes:
+        if ex0 <= x <= ex1 and ey0 <= y <= ey1:
+            return True
+    return False
+
+
+def _segment_excluded_by_boxes(
+    axis: str,
+    coord: float,
+    lo: float,
+    hi: float,
+    boxes: list[tuple[float, float, float, float]],
+) -> bool:
+    if not boxes:
+        return False
+    mid = 0.5 * (lo + hi)
+    if axis == "x":
+        return _point_in_any_box(coord, mid, boxes)
+    return _point_in_any_box(mid, coord, boxes)
+
+
+def _mask_image_exclude_boxes(
+    img: np.ndarray,
+    offset_x: float,
+    offset_y: float,
+    boxes: list[tuple[float, float, float, float]],
+) -> np.ndarray:
+    if not boxes:
+        return img
+    masked = img.copy()
+    h, w = masked.shape[:2]
+    for ex0, ey0, ex1, ey1 in boxes:
+        x0 = max(0, int(math.floor(ex0 - offset_x)))
+        y0 = max(0, int(math.floor(ey0 - offset_y)))
+        x1 = min(w, int(math.ceil(ex1 - offset_x)))
+        y1 = min(h, int(math.ceil(ey1 - offset_y)))
+        if x1 > x0 and y1 > y0:
+            masked[y0:y1, x0:x1] = 255
+    return masked
 
 
 def _in_outer_border_margin(
@@ -861,6 +913,7 @@ def detect_shaded_hatched_columns(
     pixels_per_meter: float | None = None,
     origin_px: PointPx | None = None,
     use_vector: bool = True,
+    exclude_regions: list[PlanRegion] | None = None,
 ) -> list[ColumnCandidate]:
     """
     Hybrid vector + strict mid-gray raster detector for shaded or hatched square/rectangular columns.
@@ -875,6 +928,10 @@ def detect_shaded_hatched_columns(
     full_img = _load_grayscale_image(pdf_path, png_path, page_info)
     if full_img is None:
         return []
+
+    exclude_boxes = _exclude_region_boxes(exclude_regions)
+    if exclude_boxes:
+        full_img = _mask_image_exclude_boxes(full_img, 0.0, 0.0, exclude_boxes)
 
     full_h, full_w = full_img.shape[:2]
     bounds = _region_bounds(page_info, region)
@@ -1382,6 +1439,8 @@ def detect_shaded_hatched_columns(
 
         if opts.require_near_grid and not near_grid:
             continue
+        if exclude_boxes and _point_in_any_box(cx, cy, exclude_boxes):
+            continue
 
         x_m: float | None = None
         y_m: float | None = None
@@ -1427,10 +1486,12 @@ def detect_vector_elements(
     existing_grids: list[GridCandidate] | None = None,
     pixels_per_meter: float | None = None,
     origin_px: PointPx | None = None,
+    exclude_regions: list[PlanRegion] | None = None,
 ) -> DetectionOutput:
     """Extract grid lines (including merged dashed segments + endpoint labels) and shaded/hatched columns."""
     opts = options if options is not None else ExtractionOptions()
     bounds = _region_bounds(page_info, region)
+    exclude_boxes = _exclude_region_boxes(exclude_regions)
     bx0, by0, bx1, by1 = bounds
     bw = max(bx1 - bx0, 1.0)
     bh = max(by1 - by0, 1.0)
@@ -1463,12 +1524,20 @@ def detect_vector_elements(
                     if w <= 3.5 and h >= min_seg_len:
                         xc = (x0 + x1) * 0.5
                         clipped = _clip_segment_to_bounds("x", xc, y0, y1, bounds)
-                        if clipped and not _in_outer_border_margin("x", xc, clipped[0], clipped[1], bounds, opts.border_margin_ratio):
+                        if (
+                            clipped
+                            and not _segment_excluded_by_boxes("x", xc, clipped[0], clipped[1], exclude_boxes)
+                            and not _in_outer_border_margin("x", xc, clipped[0], clipped[1], bounds, opts.border_margin_ratio)
+                        ):
                             vert_segs.append((xc, clipped[0], clipped[1]))
                     elif h <= 3.5 and w >= min_seg_len:
                         yc = (y0 + y1) * 0.5
                         clipped = _clip_segment_to_bounds("y", yc, x0, x1, bounds)
-                        if clipped and not _in_outer_border_margin("y", yc, clipped[0], clipped[1], bounds, opts.border_margin_ratio):
+                        if (
+                            clipped
+                            and not _segment_excluded_by_boxes("y", yc, clipped[0], clipped[1], exclude_boxes)
+                            and not _in_outer_border_margin("y", yc, clipped[0], clipped[1], bounds, opts.border_margin_ratio)
+                        ):
                             horiz_segs.append((yc, clipped[0], clipped[1]))
 
                 for x1, y1, x2, y2 in line_segs:
@@ -1481,13 +1550,19 @@ def detect_vector_elements(
                         xc = (x1 + x2) * 0.5
                         clipped = _clip_segment_to_bounds("x", xc, y1, y2, bounds)
                         if clipped and (clipped[1] - clipped[0]) >= min_seg_len:
-                            if not _in_outer_border_margin("x", xc, clipped[0], clipped[1], bounds, opts.border_margin_ratio):
+                            if (
+                                not _segment_excluded_by_boxes("x", xc, clipped[0], clipped[1], exclude_boxes)
+                                and not _in_outer_border_margin("x", xc, clipped[0], clipped[1], bounds, opts.border_margin_ratio)
+                            ):
                                 vert_segs.append((xc, clipped[0], clipped[1]))
                     elif dy <= max(2.0, length * 0.025):
                         yc = (y1 + y2) * 0.5
                         clipped = _clip_segment_to_bounds("y", yc, x1, x2, bounds)
                         if clipped and (clipped[1] - clipped[0]) >= min_seg_len:
-                            if not _in_outer_border_margin("y", yc, clipped[0], clipped[1], bounds, opts.border_margin_ratio):
+                            if (
+                                not _segment_excluded_by_boxes("y", yc, clipped[0], clipped[1], exclude_boxes)
+                                and not _in_outer_border_margin("y", yc, clipped[0], clipped[1], bounds, opts.border_margin_ratio)
+                            ):
                                 horiz_segs.append((yc, clipped[0], clipped[1]))
 
             words: list[tuple[int, float, float, str]] = []
@@ -1499,7 +1574,8 @@ def detect_vector_elements(
                     wx = ((float(wr.x0) + float(wr.x1)) * 0.5 - ox) * sx
                     wy = ((float(wr.y0) + float(wr.y1)) * 0.5 - oy) * sy
                     if bx0 - pad <= wx <= bx1 + pad and by0 - pad <= wy <= by1 + pad:
-                        words.append((idx_w, wx, wy, str(text)))
+                        if not _point_in_any_box(wx, wy, exclude_boxes):
+                            words.append((idx_w, wx, wy, str(text)))
 
             vert_clusters = _cluster_1d(vert_segs, tol=opts.cluster_tolerance_px)
             horiz_clusters = _cluster_1d(horiz_segs, tol=opts.cluster_tolerance_px)
@@ -1635,6 +1711,7 @@ def detect_vector_elements(
             pixels_per_meter=pixels_per_meter,
             origin_px=origin_px,
             use_vector=True,
+            exclude_regions=exclude_regions,
         )
 
     scope_label = f" in region '{region.name}'" if region is not None else ""
@@ -1665,6 +1742,7 @@ def detect_raster_elements(
     existing_grids: list[GridCandidate] | None = None,
     pixels_per_meter: float | None = None,
     origin_px: PointPx | None = None,
+    exclude_regions: list[PlanRegion] | None = None,
 ) -> DetectionOutput:
     """OpenCV raster fallback detector with border margin exclusion, dashed-grid merging, and shaded/hatched column scanning."""
     opts = options if options is not None else ExtractionOptions()
@@ -1672,6 +1750,7 @@ def detect_raster_elements(
     if full_img is None:
         raise FileNotFoundError(f"Rendered page image not found: {png_path}")
 
+    exclude_boxes = _exclude_region_boxes(exclude_regions)
     full_h, full_w = full_img.shape[:2]
     if region is not None:
         rx0 = max(0, int(round(region.x_px)))
@@ -1685,6 +1764,9 @@ def detect_raster_elements(
         img = full_img
         offset_x, offset_y = 0.0, 0.0
         region_id = None
+
+    if exclude_boxes:
+        img = _mask_image_exclude_boxes(img, offset_x, offset_y, exclude_boxes)
 
     grids: list[GridCandidate] = []
     if opts.detect_grids:
@@ -1813,6 +1895,7 @@ def detect_raster_elements(
             pixels_per_meter=pixels_per_meter,
             origin_px=origin_px,
             use_vector=False,
+            exclude_regions=exclude_regions,
         )
 
     if not opts.detect_grids and opts.detect_columns:
@@ -1963,9 +2046,12 @@ def extract_levels_from_elevation_or_section(
     pdf_path: Path,
     png_path: Path,
     page_info: PageInfo,
+    region: PlanRegion | None = None,
+    calibration: ScaleCalibration | None = None,
 ) -> tuple[list[DetectedLevel], list[str]]:
     """
-    Extract ONLY structural floor-to-floor & roof framing levels from elevation/section sheets:
+    Extract ONLY structural floor-to-floor & roof framing levels from elevation/section sheets
+    or a region-scoped elevation box:
       - Ignores ceiling, firewall, parapet, natural grade/NGL, road, sidewalk, sill, lintel,
         coping, ridge, eave, building height, and scale text.
       - Filters micro-step non-story slivers (< 1.50 m gap from an adjacent structural floor).
@@ -1973,9 +2059,28 @@ def extract_levels_from_elevation_or_section(
     """
     page_w = float(page_info.width_px)
     page_h = float(page_info.height_px)
-    top_limit = page_h * 0.03
-    bottom_limit = page_h * 0.88
-    min_datum_span = page_w * 0.45
+    bounds = _region_bounds(page_info, region)
+    bx0, by0, bx1, by1 = bounds
+    bw = max(bx1 - bx0, 1.0)
+    bh = max(by1 - by0, 1.0)
+    region_id = region.region_id if region is not None else None
+
+    if region is not None:
+        top_limit = by0
+        bottom_limit = by1
+        min_datum_span = bw * 0.35
+        pad_x = max(bw * 0.08, 36.0)
+        pad_y = max(bh * 0.05, 18.0)
+        text_x_lo, text_x_hi = bx0 - pad_x, bx1 + pad_x
+        text_y_lo, text_y_hi = by0 - pad_y, by1 + pad_y
+        right_elev_x = bx0 + bw * 0.45
+    else:
+        top_limit = page_h * 0.03
+        bottom_limit = page_h * 0.88
+        min_datum_span = page_w * 0.45
+        text_x_lo, text_x_hi = 0.0, page_w
+        text_y_lo, text_y_hi = 0.0, bottom_limit + page_h * 0.02
+        right_elev_x = page_w * 0.45
 
     horiz_segs: list[tuple[float, float, float]] = []
     text_lines: list[dict] = []
@@ -1995,7 +2100,9 @@ def extract_levels_from_elevation_or_section(
                 if (y1 - y0) <= 3.5 and (x1 - x0) >= 6.0:
                     yc = (y0 + y1) * 0.5
                     if top_limit <= yc <= bottom_limit:
-                        horiz_segs.append((yc, x0, x1))
+                        clipped = _clip_segment_to_bounds("y", yc, x0, x1, bounds) if region is not None else (x0, x1)
+                        if clipped:
+                            horiz_segs.append((yc, clipped[0], clipped[1]))
             for x1, y1, x2, y2 in line_segs:
                 dx = abs(x2 - x1)
                 dy = abs(y2 - y1)
@@ -2003,7 +2110,10 @@ def extract_levels_from_elevation_or_section(
                 if length >= 4.0 and dy <= max(2.5, length * 0.02):
                     yc = (y1 + y2) * 0.5
                     if top_limit <= yc <= bottom_limit:
-                        horiz_segs.append((yc, min(x1, x2), max(x1, x2)))
+                        seg_lo, seg_hi = min(x1, x2), max(x1, x2)
+                        clipped = _clip_segment_to_bounds("y", yc, seg_lo, seg_hi, bounds) if region is not None else (seg_lo, seg_hi)
+                        if clipped:
+                            horiz_segs.append((yc, clipped[0], clipped[1]))
 
         text_dict = page.get_text("dict")
         for block in text_dict.get("blocks", []):
@@ -2027,8 +2137,9 @@ def extract_levels_from_elevation_or_section(
                 y1 = (float(lr.y1) - oy) * sy
                 x0, x1 = min(x0, x1), max(x0, x1)
                 y0, y1 = min(y0, y1), max(y0, y1)
+                cx = (x0 + x1) * 0.5
                 cy = (y0 + y1) * 0.5
-                if cy > bottom_limit + page_h * 0.02:
+                if not (text_x_lo <= cx <= text_x_hi and text_y_lo <= cy <= text_y_hi):
                     continue
                 text_lines.append(
                     {
@@ -2039,7 +2150,7 @@ def extract_levels_from_elevation_or_section(
                         "y0": y0,
                         "x1": x1,
                         "y1": y1,
-                        "cx": (x0 + x1) * 0.5,
+                        "cx": cx,
                         "cy": cy,
                     }
                 )
@@ -2059,7 +2170,7 @@ def extract_levels_from_elevation_or_section(
         t["is_ceiling_part"] = ("CEILING" in t["upper"]) or ("CEILING" in t["block_upper"])
         if not t["is_ceiling_part"]:
             for cln in ceiling_lines:
-                if abs(t["cy"] - cln["cy"]) <= 24.0 and abs(t["cx"] - cln["cx"]) <= page_w * 0.10:
+                if abs(t["cy"] - cln["cy"]) <= 24.0 and abs(t["cx"] - cln["cx"]) <= bw * 0.14:
                     t["is_ceiling_part"] = True
                     break
 
@@ -2071,26 +2182,39 @@ def extract_levels_from_elevation_or_section(
     if not datum_clusters and png_path.exists():
         img = cv2.imread(str(png_path), cv2.IMREAD_GRAYSCALE)
         if img is not None:
-            edges = cv2.Canny(cv2.GaussianBlur(img, (3, 3), 0), 50, 150)
-            raw_lines = cv2.HoughLinesP(
-                edges,
-                rho=1,
-                theta=np.pi / 180.0,
-                threshold=30,
-                minLineLength=max(20, int(page_w * 0.04)),
-                maxLineGap=25,
-            )
-            r_segs: list[tuple[float, float, float]] = []
-            if raw_lines is not None:
-                for ln in np.asarray(raw_lines).reshape(-1, 4):
-                    x1, y1, x2, y2 = [float(v) for v in ln]
-                    if abs(y2 - y1) <= 3.0 and top_limit <= (y1 + y2) * 0.5 <= bottom_limit:
-                        r_segs.append(((y1 + y2) * 0.5, min(x1, x2), max(x1, x2)))
-            datum_clusters = [
-                cl
-                for cl in _cluster_1d(r_segs, tol=7.0)
-                if cl["span"] >= min_datum_span
-            ]
+            if region is not None:
+                fh, fw = img.shape[:2]
+                rx0 = max(0, int(round(bx0)))
+                ry0 = max(0, int(round(by0)))
+                rx1 = min(fw, int(round(bx1)))
+                ry1 = min(fh, int(round(by1)))
+                crop_img = img[ry0:ry1, rx0:rx1]
+                off_x, off_y = float(rx0), float(ry0)
+            else:
+                crop_img = img
+                off_x, off_y = 0.0, 0.0
+            if crop_img.size > 0:
+                edges = cv2.Canny(cv2.GaussianBlur(crop_img, (3, 3), 0), 50, 150)
+                raw_lines = cv2.HoughLinesP(
+                    edges,
+                    rho=1,
+                    theta=np.pi / 180.0,
+                    threshold=30,
+                    minLineLength=max(20, int(bw * 0.04)),
+                    maxLineGap=25,
+                )
+                r_segs: list[tuple[float, float, float]] = []
+                if raw_lines is not None:
+                    for ln in np.asarray(raw_lines).reshape(-1, 4):
+                        lx1, ly1, lx2, ly2 = [float(v) for v in ln]
+                        y_mid = (ly1 + ly2) * 0.5 + off_y
+                        if abs(ly2 - ly1) <= 3.0 and top_limit <= y_mid <= bottom_limit:
+                            r_segs.append((y_mid, min(lx1, lx2) + off_x, max(lx1, lx2) + off_x))
+                datum_clusters = [
+                    cl
+                    for cl in _cluster_1d(r_segs, tol=7.0)
+                    if cl["span"] >= min_datum_span
+                ]
 
     all_structural_lines = [
         t
@@ -2123,7 +2247,7 @@ def extract_levels_from_elevation_or_section(
 
     candidates: list[DetectedLevel] = []
     global_warnings: list[str] = []
-    y_match_tol = max(page_h * 0.032, 28.0)
+    y_match_tol = max(bh * (0.045 if region is not None else 0.032), 24.0 if region is not None else 28.0)
 
     for cl in datum_clusters:
         dy_coord = cl["coord"]
@@ -2152,7 +2276,7 @@ def extract_levels_from_elevation_or_section(
         for t in nearby_struct:
             if not chosen_kw:
                 chosen_kw.append(t)
-            elif abs(t["cy"] - chosen_kw[0]["cy"]) <= 20.0 and abs(t["x0"] - chosen_kw[0]["x0"]) <= page_w * 0.18:
+            elif abs(t["cy"] - chosen_kw[0]["cy"]) <= 20.0 and abs(t["x0"] - chosen_kw[0]["x0"]) <= bw * 0.22:
                 chosen_kw.append(t)
         chosen_kw.sort(key=lambda t: (t["y0"], t["x0"]))
         name = " ".join(t["text"] for t in chosen_kw).strip()
@@ -2163,7 +2287,7 @@ def extract_levels_from_elevation_or_section(
         nearby_elev_right = [
             (t, v)
             for t, v in right_elev_lines
-            if abs(t["cy"] - dy_coord) <= y_match_tol and t["cx"] >= page_w * 0.45
+            if abs(t["cy"] - dy_coord) <= y_match_tol and t["cx"] >= right_elev_x
         ]
         nearby_elev_any = [
             (t, v) for t, v in right_elev_lines if abs(t["cy"] - dy_coord) <= y_match_tol
@@ -2187,6 +2311,7 @@ def extract_levels_from_elevation_or_section(
                 elevation_m=elevation_m,
                 story_height_m=None,
                 page_number=page_info.page_number,
+                region_id=region_id,
                 y_px=round(dy_coord, 2),
                 confidence=conf,
                 review_status=ReviewStatus.PENDING,
@@ -2228,6 +2353,20 @@ def extract_levels_from_elevation_or_section(
                 candidates[idx].warnings = [
                     "No millimeter dimension matched between datums; defaulted +3.00 m — verify."
                 ]
+    elif (
+        len(candidates) >= 2
+        and all(c.confidence < 0.80 for c in candidates)
+        and calibration is not None
+        and calibration.confirmed
+        and calibration.pixels_per_m > 0
+    ):
+        # Confirmed ScaleCalibration fallback: derive elevations from vertical pixel spacing
+        candidates.sort(key=lambda l: -l.y_px)
+        base_y = candidates[0].y_px
+        for idx, cand in enumerate(candidates):
+            cand.elevation_m = round((base_y - cand.y_px) / calibration.pixels_per_m, 3) if idx > 0 else 0.0
+            cand.confidence = 0.82
+            cand.warnings = []
 
     # Sort ascending by elevation_m (tie-break bottom-to-top by descending y_px)
     candidates.sort(key=lambda l: (l.elevation_m, -l.y_px))
@@ -2326,6 +2465,7 @@ def run_detection(
     existing_grids: list[GridCandidate] | None = None,
     pixels_per_meter: float | None = None,
     origin_px: PointPx | None = None,
+    exclude_regions: list[PlanRegion] | None = None,
 ) -> DetectionOutput:
     """Dispatch page detection across vector (PyMuPDF), raster (OpenCV), and VLM placeholder."""
     opts = options if options is not None else ExtractionOptions()
@@ -2342,6 +2482,7 @@ def run_detection(
             existing_grids=existing_grids,
             pixels_per_meter=pixels_per_meter,
             origin_px=origin_px,
+            exclude_regions=exclude_regions,
         )
     if method == "raster":
         return detect_raster_elements(
@@ -2353,6 +2494,7 @@ def run_detection(
             existing_grids=existing_grids,
             pixels_per_meter=pixels_per_meter,
             origin_px=origin_px,
+            exclude_regions=exclude_regions,
         )
 
     if page_info.classification == "vector":
@@ -2366,6 +2508,7 @@ def run_detection(
             existing_grids=existing_grids,
             pixels_per_meter=pixels_per_meter,
             origin_px=origin_px,
+            exclude_regions=exclude_regions,
         )
         if result.grids or result.columns:
             return result
@@ -2378,6 +2521,7 @@ def run_detection(
             existing_grids=existing_grids,
             pixels_per_meter=pixels_per_meter,
             origin_px=origin_px,
+            exclude_regions=exclude_regions,
         )
         fallback.method_used = "raster_fallback"
         return fallback
@@ -2393,6 +2537,7 @@ def run_detection(
             existing_grids=existing_grids,
             pixels_per_meter=pixels_per_meter,
             origin_px=origin_px,
+            exclude_regions=exclude_regions,
         )
         if vec.grids or vec.columns:
             return vec
@@ -2405,6 +2550,7 @@ def run_detection(
             existing_grids=existing_grids,
             pixels_per_meter=pixels_per_meter,
             origin_px=origin_px,
+            exclude_regions=exclude_regions,
         )
         ras.method_used = "raster_fallback"
         return ras
@@ -2418,4 +2564,5 @@ def run_detection(
         existing_grids=existing_grids,
         pixels_per_meter=pixels_per_meter,
         origin_px=origin_px,
+        exclude_regions=exclude_regions,
     )

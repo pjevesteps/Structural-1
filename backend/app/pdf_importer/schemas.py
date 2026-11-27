@@ -16,6 +16,7 @@ SheetType = Literal[
     "unknown",
 ]
 OpeningCategory = Literal["stairwell", "airwell", "shaft_other"]
+RegionType = Literal["plan", "elevation"]
 DetectionMethod = Literal["auto", "vector", "raster", "vlm"]
 CandidateSource = Literal["vector", "raster", "manual", "vlm", "cad"]
 ColumnFillMode = Literal["shaded_or_hatched", "gray_shaded_only", "any_filled"]
@@ -83,6 +84,7 @@ class PlanRegion(BaseModel):
     region_id: str
     page_number: int = Field(ge=1)
     name: str = Field(min_length=1)
+    region_type: RegionType = "plan"
     floor_level: str = ""
     x_px: float
     y_px: float
@@ -96,6 +98,7 @@ class RegionCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     page_number: int = Field(ge=1)
     name: str = Field(min_length=1)
+    region_type: RegionType = "plan"
     floor_level: str = ""
     x_px: float
     y_px: float
@@ -107,6 +110,7 @@ class RegionCreateRequest(BaseModel):
 class RegionUpdateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str | None = None
+    region_type: RegionType | None = None
     floor_level: str | None = None
     origin_px: PointPx | None = None
     x_px: float | None = None
@@ -202,12 +206,18 @@ class DetectedLevel(BaseModel):
     elevation_m: float
     story_height_m: float | None = None
     page_number: int = Field(ge=1)
+    region_id: str | None = None
     y_px: float
     confidence: float = Field(ge=0.0, le=1.0, default=0.75)
     review_status: ReviewStatus = ReviewStatus.PENDING
     engineer_approved: bool = False
     warnings: list[str] = Field(default_factory=list)
     transferred: bool = False
+
+
+class ExtractLevelsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    region_id: str | None = None
 
 
 class LevelCreateRequest(BaseModel):
