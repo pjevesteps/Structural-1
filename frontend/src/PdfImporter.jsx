@@ -159,6 +159,9 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
   const [openingLabel, setOpeningLabel] = useState("STAIR-1");
   const [openingVertices, setOpeningVertices] = useState([]);
   const [levelEdits, setLevelEdits] = useState({});
+  const [imgRevision, setImgRevision] = useState(0);
+  const [showCadLayers, setShowCadLayers] = useState(false);
+  const [cadLayerDraft, setCadLayerDraft] = useState([]);
 
   async function apiJson(url, options) {
     const res = await fetch(url, options);
@@ -202,6 +205,14 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
     loadImportsList();
     loadProjectLevels();
   }, [project.project_id]);
+
+  useEffect(() => {
+    if (doc?.cad_layers && Array.isArray(doc.cad_layers)) {
+      setCadLayerDraft(doc.cad_layers.filter((ly) => ly.selected).map((ly) => ly.name));
+    } else {
+      setCadLayerDraft([]);
+    }
+  }, [doc?.doc_id, doc?.cad_layers]);
 
   const activePage = useMemo(() => {
     if (!doc) return null;
@@ -1497,6 +1508,54 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
     }
   }
 
+  async function handleApplyCadLayers() {
+    if (!doc) return;
+    setBusy(true);
+    setError("");
+    try {
+      const updated = await apiJson(
+        `/api/projects/${pid}/pdf-imports/${encodeURIComponent(doc.doc_id)}/cad-layers`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ selected_layers: cadLayerDraft }),
+        }
+      );
+      setDoc(updated);
+      setImgRevision((v) => v + 1);
+      setNotice(
+        `Applied ${cadLayerDraft.length} DXF layer(s) and re-rendered sheet preview. Re-run detection if you want to refresh candidates.`
+      );
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleQuickSetUnit(newUnit) {
+    if (!doc || !activePage || !newUnit) return;
+    setBusy(true);
+    setError("");
+    try {
+      const updated = await apiJson(
+        `/api/projects/${pid}/pdf-imports/${encodeURIComponent(doc.doc_id)}/pages/${activePage.page_number}/set-unit`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ unit: newUnit, page_number: activePage.page_number }),
+        }
+      );
+      setDoc(updated);
+      setUnit(newUnit);
+      setNotice(`Drawing unit overridden to '${newUnit}' and all page coordinates recalculated in meters.`);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function handleUpdateLevel(levelId, patch) {
     if (!doc) return;
     setBusy(true);
@@ -1640,9 +1699,58 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
   const canLockMaster = Boolean(
     activeRegion && activeCalibration && (activeRegion.origin_px || activeCalibration.origin_px) && counts.approvedGrids > 0 && !busy
   );
+  const footprintSummary = useMemo(() => {
+    const xs = activeRegionGrids
+      .filter((g) => g.axis === "x" && typeof g.coord_m === "number" && Number.isFinite(g.coord_m))
+      .map((g) => g.coord_m)
+      .sort((a, b) => a - b);
+    const ys = activeRegionGrids
+      .filter((g) => g.axis === "y" && typeof g.coord_m === "number" && Number.isFinite(g.coord_m))
+      .map((g) => g.coord_m)
+      .sort((a, b) => a - b);
+    const colXs = pageCols
+      .filter((c) => c.status !== "rejected" && typeof c.x_m === "number" && Number.isFinite(c.x_m))
+      .map((c) => c.x_m)
+      .sort((a, b) => a - b);
+    const colYs = pageCols
+      .filter((c) => c.status !== "rejected" && typeof c.y_m === "number" && Number.isFinite(c.y_m))
+      .map((c) => c.y_m)
+      .sort((a, b) => a - b);
+
+    const xVals = xs.length >= 2 ? xs : colXs;
+    const yVals = ys.length >= 2 ? ys : colYs;
+    const xSpan = xVals.length >= 2 ? xVals[xVals.length - 1] - xVals[0] : 0;
+    const ySpan = yVals.length >= 2 ? yVals[yVals.length - 1] - yVals[0] : 0;
+
+    const bays = [];
+    for (let i = 1; i < xs.length; i++) {
+      const d = xs[i] - xs[i - 1];
+      if (d > 1e-4) bays.push(d);
+    }
+    for (let i = 1; i < ys.length; i++) {
+      const d = ys[i] - ys[i - 1];
+      if (d > 1e-4) bays.push(d);
+    }
+    const minBay = bays.length > 0 ? Math.min(...bays) : null;
+    const maxBay = bays.length > 0 ? Math.max(...bays) : null;
+
+    const hasSpan = xSpan > 0 || ySpan > 0;
+    const maxSpan = Math.max(xSpan, ySpan);
+    const unitMismatch =
+      hasSpan &&
+      (maxSpan < 1.5 ||
+        maxSpan > 250.0 ||
+        (minBay !== null && minBay < 0.5) ||
+        (maxBay !== null && maxBay > 30.0));
+
+    return { hasSpan, xSpan, ySpan, minBay, maxBay, unitMismatch };
+  }, [activeRegionGrids, pageCols]);
+
   const imageUrl =
     doc && activePage
-      ? `/api/projects/${pid}/pdf-imports/${encodeURIComponent(doc.doc_id)}/pages/${activePage.page_number}/image`
+      ? `/api/projects/${pid}/pdf-imports/${encodeURIComponent(doc.doc_id)}/pages/${activePage.page_number}/image${
+          imgRevision > 0 ? `?v=${imgRevision}` : ""
+        }`
       : null;
 
   // Inverse zoom scale for crisp overlays at high magnification
@@ -2475,6 +2583,75 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
                           ? `Span: ${draftPixelDist.toFixed(1)} px`
                           : "Use Calibrate (2-Pt) and click two known reference points."}
                       </small>
+                      {activeCalibration && (
+                        <div
+                          style={{
+                            display: "flex",
+                            flexWrap: "wrap",
+                            alignItems: "center",
+                            gap: "8px",
+                            marginTop: "6px",
+                            padding: "6px 8px",
+                            borderRadius: "6px",
+                            background: footprintSummary.unitMismatch
+                              ? "rgba(245, 158, 11, 0.14)"
+                              : "rgba(56, 189, 248, 0.08)",
+                            border: footprintSummary.unitMismatch
+                              ? "1px solid rgba(245, 158, 11, 0.55)"
+                              : "1px solid rgba(148, 163, 184, 0.2)",
+                            fontSize: "11px",
+                          }}
+                        >
+                          {footprintSummary.hasSpan ? (
+                            <span>
+                              <strong>Footprint:</strong> {footprintSummary.xSpan.toFixed(2)} ×{" "}
+                              {footprintSummary.ySpan.toFixed(2)} m
+                              {footprintSummary.minBay !== null && (
+                                <>
+                                  {" "}
+                                  · <strong>Bays:</strong> {footprintSummary.minBay.toFixed(2)}–
+                                  {footprintSummary.maxBay.toFixed(2)} m
+                                </>
+                              )}{" "}
+                              · <strong>Unit:</strong> {activeCalibration.unit}
+                            </span>
+                          ) : (
+                            <span>
+                              <strong>Active Unit:</strong> {activeCalibration.unit}
+                            </span>
+                          )}
+                          {footprintSummary.unitMismatch && (
+                            <span
+                              style={{
+                                background: "#92400e",
+                                color: "#fef3c7",
+                                padding: "2px 6px",
+                                borderRadius: "4px",
+                                fontWeight: 700,
+                              }}
+                            >
+                              Possible Unit Mismatch
+                            </span>
+                          )}
+                          <label style={{ display: "inline-flex", alignItems: "center", gap: "4px" }}>
+                            <span>Quick Unit:</span>
+                            <select
+                              className="pdf-select"
+                              aria-label="Quick override drawing unit"
+                              value={activeCalibration.unit}
+                              disabled={busy}
+                              onChange={(e) => handleQuickSetUnit(e.target.value)}
+                              style={{ padding: "2px 6px", fontSize: "11px" }}
+                            >
+                              {UNITS.map((u) => (
+                                <option key={u} value={u}>
+                                  {u}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                        </div>
+                      )}
                     </div>
 
                     <div className="pdf-control-group">
@@ -2509,6 +2686,122 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
                       </div>
                     </div>
                   </div>
+
+                  {/* Collapsible DXF Layer Filter Panel (CAD imports only) */}
+                  {doc.source_format === "CAD" && (doc.cad_layers || []).length > 0 && (
+                    <div className="pdf-detect-settings" style={{ marginBottom: "8px" }}>
+                      <button
+                        type="button"
+                        className="pdf-settings-toggle"
+                        onClick={() => setShowCadLayers((v) => !v)}
+                      >
+                        <span>{showCadLayers ? "▾" : "▸"} DXF Layers</span>
+                        <small>
+                          {cadLayerDraft.length} / {doc.cad_layers.length} selected
+                          {doc.detected_cad_unit ? ` · Unit: ${doc.detected_cad_unit}` : ""}
+                        </small>
+                      </button>
+                      {showCadLayers && (
+                        <div style={{ padding: "8px 10px", display: "flex", flexDirection: "column", gap: "8px" }}>
+                          <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", alignItems: "center" }}>
+                            <button
+                              type="button"
+                              className="mini-btn"
+                              disabled={busy}
+                              onClick={() =>
+                                setCadLayerDraft(
+                                  doc.cad_layers
+                                    .filter(
+                                      (ly) =>
+                                        ly.is_on &&
+                                        !ly.is_frozen &&
+                                        ["structural", "grid", "opening"].includes(ly.category)
+                                    )
+                                    .map((ly) => ly.name)
+                                )
+                              }
+                            >
+                              Select Structural
+                            </button>
+                            <button
+                              type="button"
+                              className="mini-btn"
+                              disabled={busy}
+                              onClick={() => setCadLayerDraft(doc.cad_layers.map((ly) => ly.name))}
+                            >
+                              Select All
+                            </button>
+                            <button
+                              type="button"
+                              className="mini-btn"
+                              disabled={busy}
+                              onClick={() =>
+                                setCadLayerDraft(
+                                  doc.cad_layers.filter((ly) => ly.selected).map((ly) => ly.name)
+                                )
+                              }
+                            >
+                              Reset
+                            </button>
+                            <button
+                              type="button"
+                              className="mini-btn on-approve"
+                              disabled={busy || cadLayerDraft.length === 0}
+                              onClick={handleApplyCadLayers}
+                            >
+                              Apply Layers &amp; Re-Render
+                            </button>
+                          </div>
+                          <div
+                            style={{
+                              display: "grid",
+                              gridTemplateColumns: "repeat(auto-fill, minmax(190px, 1fr))",
+                              gap: "6px",
+                              maxHeight: "170px",
+                              overflowY: "auto",
+                            }}
+                          >
+                            {doc.cad_layers.map((ly) => {
+                              const checked = cadLayerDraft.includes(ly.name);
+                              return (
+                                <label
+                                  key={ly.name}
+                                  className="pdf-check-chip"
+                                  style={{ justifyContent: "space-between", fontSize: "11px" }}
+                                  title={`Category: ${ly.category} | Entities: ${ly.entity_count} | ${
+                                    ly.is_frozen ? "Frozen" : ly.is_on ? "On" : "Off"
+                                  }`}
+                                >
+                                  <span style={{ display: "inline-flex", alignItems: "center", gap: "5px", overflow: "hidden" }}>
+                                    <input
+                                      type="checkbox"
+                                      checked={checked}
+                                      onChange={(e) => {
+                                        if (e.target.checked) {
+                                          setCadLayerDraft((prev) =>
+                                            prev.includes(ly.name) ? prev : [...prev, ly.name]
+                                          );
+                                        } else {
+                                          setCadLayerDraft((prev) => prev.filter((n) => n !== ly.name));
+                                        }
+                                      }}
+                                    />
+                                    <span style={{ textOverflow: "ellipsis", overflow: "hidden", whiteSpace: "nowrap" }}>
+                                      {ly.name}
+                                    </span>
+                                  </span>
+                                  <small style={{ opacity: 0.75, whiteSpace: "nowrap" }}>
+                                    {ly.category.slice(0, 4)} · {ly.entity_count}
+                                    {ly.is_frozen ? " (F)" : !ly.is_on ? " (Off)" : ""}
+                                  </small>
+                                </label>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
 
                   {/* Collapsible Detection Settings Bar */}
                   <div className="pdf-detect-settings">

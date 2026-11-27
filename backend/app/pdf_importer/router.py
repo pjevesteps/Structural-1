@@ -24,6 +24,7 @@ from .schemas import (
     ManualGridTraceRequest,
     OpeningCreateRequest,
     PageUpdateRequest,
+    QuickUnitScaleRequest,
     RegionCreateRequest,
     RegionUpdateRequest,
     ScaleCalibrationRequest,
@@ -32,6 +33,7 @@ from .schemas import (
     TransferLevelsResponse,
     TransferRequest,
     TransferResponse,
+    UpdateCadLayersRequest,
 )
 from ..cad.dwg_converter import DwgConverterUnavailableError
 from . import cad_importer, service
@@ -147,6 +149,37 @@ def calibrate_pdf_page(
 def confirm_pdf_page_calibration(project_id: str, doc_id: str, page_number: int):
     try:
         return service.confirm_calibration(project_id, doc_id, page_number)
+    except Exception as exc:
+        raise _handle_error(exc)
+
+
+@router.post(
+    "/{doc_id}/pages/{page_number}/set-unit",
+    response_model=ImportDocumentState,
+)
+def set_pdf_page_unit(
+    project_id: str,
+    doc_id: str,
+    page_number: int,
+    payload: QuickUnitScaleRequest,
+):
+    try:
+        return service.set_page_unit(project_id, doc_id, page_number, payload)
+    except Exception as exc:
+        raise _handle_error(exc)
+
+
+@router.post(
+    "/{doc_id}/cad-layers",
+    response_model=ImportDocumentState,
+)
+def update_cad_document_layers(
+    project_id: str,
+    doc_id: str,
+    payload: UpdateCadLayersRequest,
+):
+    try:
+        return cad_importer.update_cad_layers(project_id, doc_id, payload)
     except Exception as exc:
         raise _handle_error(exc)
 

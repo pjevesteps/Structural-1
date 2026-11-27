@@ -54,6 +54,7 @@ from .schemas import (
     PageUpdateRequest,
     PlanRegion,
     PointPx,
+    QuickUnitScaleRequest,
     RegionCreateRequest,
     RegionUpdateRequest,
     ReviewStatus,
@@ -105,6 +106,10 @@ def _audit_path(project_id: str, doc_id: str) -> Path:
 
 def _original_pdf_path(project_id: str, doc_id: str) -> Path:
     return _doc_dir(project_id, doc_id) / "original.pdf"
+
+
+def _original_dxf_path(project_id: str, doc_id: str) -> Path:
+    return _doc_dir(project_id, doc_id) / "original.dxf"
 
 
 def _pages_dir(project_id: str, doc_id: str) -> Path:
@@ -594,6 +599,64 @@ def confirm_calibration(project_id: str, doc_id: str, page_number: int) -> Impor
         doc_id,
         "scale_confirmed",
         {"page_number": page_number, "meters_per_px": cal.meters_per_px},
+    )
+    return state
+
+
+def set_page_unit(
+    project_id: str,
+    doc_id: str,
+    page_number: int,
+    req: QuickUnitScaleRequest,
+) -> ImportDocumentState:
+    """
+    1-click unit scale override: reinterprets the existing ScaleCalibration's known_distance
+    in req.unit, confirms calibration, updates detected_cad_unit for CAD docs, and recalculates
+    all grid and column coordinates in meters on page_number.
+    """
+    state = get_import(project_id, doc_id)
+    _get_page(state, page_number)
+
+    cal = state.calibrations.get(str(page_number))
+    if cal is None:
+        raise ValueError(
+            f"Page {page_number} has not been calibrated yet. Run 2-point Scale Calibration first."
+        )
+
+    prev_unit = cal.unit
+    pixel_distance, real_distance_m, meters_per_px, pixels_per_m = compute_scale_metrics(
+        cal.p1.x_px,
+        cal.p1.y_px,
+        cal.p2.x_px,
+        cal.p2.y_px,
+        cal.known_distance,
+        req.unit,
+    )
+    now = _utc_now()
+    cal.unit = req.unit
+    cal.pixel_distance = round(pixel_distance, 4)
+    cal.real_distance_m = round(real_distance_m, 6)
+    cal.meters_per_px = round(meters_per_px, 8)
+    cal.pixels_per_m = round(pixels_per_m, 4)
+    cal.confirmed = True
+    cal.confirmed_at = now
+    if state.source_format == "CAD":
+        state.detected_cad_unit = req.unit
+
+    _recalculate_page_coordinates(state, page_number)
+    _save_state(state)
+    _append_audit(
+        project_id,
+        doc_id,
+        "unit_scale_overridden",
+        {
+            "page_number": page_number,
+            "previous_unit": prev_unit,
+            "new_unit": req.unit,
+            "known_distance": cal.known_distance,
+            "meters_per_px": cal.meters_per_px,
+            "pixels_per_m": cal.pixels_per_m,
+        },
     )
     return state
 

@@ -2156,3 +2156,175 @@ def test_elevation_regions_isolation_selective_reextract_and_all_story_mapping(i
     # 4 columns x 2 stories (GF->2F, 2F->ROOF) = 8 column members
     col_members = [m for m in sm["members"] if m["member_type"] == "column"]
     assert len(col_members) == 8
+
+
+def _make_mixed_layer_dxf_bytes() -> bytes:
+    """Create a millimeter DXF ($INSUNITS=4) with S-GRID, S-COLS, A-FURN, BORDER, and FROZEN-NOISE layers."""
+    import io
+    import ezdxf
+
+    doc = ezdxf.new("R2010")
+    doc.header["$INSUNITS"] = 4  # millimeters
+    doc.layers.add("S-GRID")
+    doc.layers.add("S-COLS")
+    doc.layers.add("A-FURN")
+    doc.layers.add("BORDER")
+    frozen_layer = doc.layers.add("FROZEN-NOISE")
+    frozen_layer.freeze()
+
+    msp = doc.modelspace()
+    # Outer title border (extends viewport to -5000..15000 mm)
+    msp.add_lwpolyline(
+        [(-5000, -5000), (15000, -5000), (15000, 15000), (-5000, 15000)],
+        close=True,
+        dxfattribs={"layer": "BORDER"},
+    )
+    # 2x2 Grids (5000 mm x 4000 mm) on S-GRID
+    for gx, lbl in [(0, "A"), (5000, "B")]:
+        msp.add_line((gx, -1000), (gx, 5000), dxfattribs={"layer": "S-GRID"})
+        msp.add_circle((gx, 5600), 400, dxfattribs={"layer": "S-GRID"})
+        msp.add_text(lbl, dxfattribs={"layer": "S-GRID", "height": 250}).set_placement((gx, 5600))
+    for gy, lbl in [(0, "1"), (4000, "2")]:
+        msp.add_line((-1000, gy), (6000, gy), dxfattribs={"layer": "S-GRID"})
+        msp.add_circle((-1600, gy), 400, dxfattribs={"layer": "S-GRID"})
+        msp.add_text(lbl, dxfattribs={"layer": "S-GRID", "height": 250}).set_placement((-1600, gy))
+    # 4 Columns (400x400 mm) on S-COLS
+    for cx in (0, 5000):
+        for cy in (0, 4000):
+            msp.add_lwpolyline(
+                [(cx - 200, cy - 200), (cx + 200, cy - 200), (cx + 200, cy + 200), (cx - 200, cy + 200)],
+                close=True,
+                dxfattribs={"layer": "S-COLS"},
+            )
+    # Furniture clutter on A-FURN
+    msp.add_lwpolyline([(1500, 1500), (3500, 1500), (3500, 2500), (1500, 2500)], close=True, dxfattribs={"layer": "A-FURN"})
+    msp.add_line((1500, 1500), (3500, 2500), dxfattribs={"layer": "A-FURN"})
+    # Frozen noise on FROZEN-NOISE
+    msp.add_line((2000, 500), (3000, 3500), dxfattribs={"layer": "FROZEN-NOISE"})
+
+    buf = io.StringIO()
+    doc.write(buf)
+    return buf.getvalue().encode("utf-8")
+
+
+def test_dxf_layer_filtering_viewport_locked_rerender_and_quick_unit_override(isolated_env):
+    """
+    Verify:
+      1. Legacy ImportDocumentState JSON without cad_layers / detected_cad_unit deserializes cleanly.
+      2. CAD upload discovers S-GRID, S-COLS, A-FURN, BORDER, FROZEN-NOISE with smart defaults
+         (S-GRID & S-COLS selected; A-FURN, BORDER, FROZEN-NOISE unselected) and persists original.dxf.
+      3. POST /cad-layers toggles BORDER & A-FURN on, increasing rendered drawing_count while keeping
+         calibration & pixel coordinates 100% viewport-locked.
+      4. POST /pages/1/set-unit recalculates grid.coord_m & col.x_m/y_m accurately (mm <-> m) and
+         returns 400 on an uncalibrated PDF page.
+    """
+    client, _ = isolated_env
+    from backend.app.pdf_importer.schemas import ImportDocumentState
+
+    # 1. Legacy ImportDocumentState without cad_layers / detected_cad_unit
+    legacy_doc = ImportDocumentState.model_validate(
+        {
+            "doc_id": "doc-legacy",
+            "project_id": "P-LEG",
+            "filename": "old.pdf",
+            "source_format": "PDF",
+            "sha256": "abc123",
+            "file_size_bytes": 100,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "page_count": 1,
+            "pages": [
+                {
+                    "page_number": 1,
+                    "width_pt": 600.0,
+                    "height_pt": 400.0,
+                    "width_px": 1200,
+                    "height_px": 800,
+                    "dpi": 144,
+                    "classification": "vector",
+                    "image_filename": "page_001.png",
+                }
+            ],
+        }
+    )
+    assert legacy_doc.cad_layers == []
+    assert legacy_doc.detected_cad_unit is None
+
+    # 2. Upload mixed-layer DXF
+    pid = "TEST-CAD-LAYERS"
+    assert client.post("/api/projects", json=_make_sample_project(pid)).status_code == 200
+    dxf_bytes = _make_mixed_layer_dxf_bytes()
+    up = client.post(
+        f"/api/projects/{pid}/pdf-imports/upload-cad",
+        files={"file": ("mixed_layers.dxf", dxf_bytes, "application/dxf")},
+    )
+    assert up.status_code == 200, up.text
+    st = up.json()
+    doc_id = st["doc_id"]
+    assert st["source_format"] == "CAD"
+    assert st["detected_cad_unit"] == "mm"
+    assert st["calibrations"]["1"]["unit"] == "mm"
+
+    layers_by_name = {ly["name"]: ly for ly in st["cad_layers"]}
+    assert {"S-GRID", "S-COLS", "A-FURN", "BORDER", "FROZEN-NOISE"}.issubset(layers_by_name.keys())
+    assert layers_by_name["S-GRID"]["selected"] is True
+    assert layers_by_name["S-COLS"]["selected"] is True
+    assert layers_by_name["A-FURN"]["selected"] is False
+    assert layers_by_name["BORDER"]["selected"] is False
+    assert layers_by_name["FROZEN-NOISE"]["is_frozen"] is True
+    assert layers_by_name["FROZEN-NOISE"]["selected"] is False
+
+    base_drawings = st["pages"][0]["drawing_count"]
+    orig_cal = st["calibrations"]["1"]
+    orig_grid_px = [(g["label"], g["coord_px"]) for g in st["grid_candidates"]]
+    orig_col_px = [(c["column_id"], c["x_px"], c["y_px"]) for c in st["column_candidates"]]
+
+    # 3. Toggle BORDER & A-FURN ON -> drawing_count increases, viewport pixel coordinates stay locked!
+    upd = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/cad-layers",
+        json={"selected_layers": ["S-GRID", "S-COLS", "A-FURN", "BORDER"]},
+    )
+    assert upd.status_code == 200, upd.text
+    st2 = upd.json()
+    assert st2["pages"][0]["drawing_count"] > base_drawings
+    assert st2["calibrations"]["1"]["p1"] == orig_cal["p1"]
+    assert st2["calibrations"]["1"]["p2"] == orig_cal["p2"]
+    assert [(g["label"], g["coord_px"]) for g in st2["grid_candidates"]] == orig_grid_px
+    assert [(c["column_id"], c["x_px"], c["y_px"]) for c in st2["column_candidates"]] == orig_col_px
+
+    # 4. Quick unit override mm -> m -> mm recalculates coord_m & col x_m/y_m accurately (1000x)
+    x_grid_b_mm = next(g for g in st2["grid_candidates"] if g["axis"] == "x" and g["label"] == "B")
+    assert x_grid_b_mm["coord_m"] == pytest.approx(5.0, abs=0.05)
+
+    to_m = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/pages/1/set-unit",
+        json={"unit": "m", "page_number": 1},
+    )
+    assert to_m.status_code == 200, to_m.text
+    st_m = to_m.json()
+    assert st_m["detected_cad_unit"] == "m"
+    assert st_m["calibrations"]["1"]["unit"] == "m"
+    x_grid_b_m = next(g for g in st_m["grid_candidates"] if g["axis"] == "x" and g["label"] == "B")
+    assert x_grid_b_m["coord_m"] == pytest.approx(5000.0, rel=0.01)
+
+    back_mm = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/pages/1/set-unit",
+        json={"unit": "mm", "page_number": 1},
+    )
+    assert back_mm.status_code == 200, back_mm.text
+    x_grid_b_back = next(g for g in back_mm.json()["grid_candidates"] if g["axis"] == "x" and g["label"] == "B")
+    assert x_grid_b_back["coord_m"] == pytest.approx(5.0, abs=0.05)
+
+    # Uncalibrated PDF page returns 400 on set-unit
+    pdf_up = client.post(
+        f"/api/projects/{pid}/pdf-imports",
+        files={"file": ("uncal.pdf", _make_combined_plan_and_elevation_pdf(), "application/pdf")},
+    )
+    assert pdf_up.status_code == 200
+    pdf_doc_id = pdf_up.json()["doc_id"]
+    uncal_res = client.post(
+        f"/api/projects/{pid}/pdf-imports/{pdf_doc_id}/pages/1/set-unit",
+        json={"unit": "mm", "page_number": 1},
+    )
+    assert uncal_res.status_code == 400
+    assert "calibrated" in uncal_res.json()["detail"].lower()

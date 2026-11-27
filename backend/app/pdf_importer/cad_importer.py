@@ -14,38 +14,61 @@ from .. import storage
 from ..cad.dwg_converter import convert_dwg_to_dxf
 from .inspector import DEFAULT_RENDER_DPI
 from .schemas import (
+    CadLayerCategory,
+    CadLayerInfo,
     ColumnCandidate,
     DetectedOpening,
     GridCandidate,
     ImportDocumentState,
+    LengthUnit,
     PageInfo,
     PlanRegion,
     PointPx,
     ReviewStatus,
     ScaleCalibration,
+    UpdateCadLayersRequest,
 )
 from . import service as pdf_service
 
-# DXF $INSUNITS -> meters per drawing unit
-_INSUNITS_TO_M: dict[int, float] = {
-    1: 0.0254,  # inches
-    2: 0.3048,  # feet
-    4: 0.001,   # millimeters
-    5: 0.01,    # centimeters
-    6: 1.0,     # meters
+# DXF $INSUNITS -> (LengthUnit, meters per drawing unit)
+_INSUNITS_MAP: dict[int, tuple[LengthUnit, float]] = {
+    1: ("in", 0.0254),  # inches
+    2: ("ft", 0.3048),  # feet
+    4: ("mm", 0.001),   # millimeters
+    5: ("cm", 0.01),    # centimeters
+    6: ("m", 1.0),      # meters
 }
 
 _GRID_LABEL_RE = re.compile(r"^([A-Z]{1,2}'?|\d{1,2}'?)$")
+_SHORT_MARKER_RE = re.compile(
+    r"^(?:[A-Z]{1,2}'?|\d{1,2}'?|[+-]?\d+(?:\.\d{1,3})?\s*(?:m|M|mm|MM)?|"
+    r"(?:EL\.?\s*[+-]?\d+(?:\.\d+)?)|(?:GF|GL|1F|2F|3F|4F|5F|6F|7F|8F|9F|B1|B2|RD|RB|RF|ROOF|BASE).*)$",
+    re.IGNORECASE,
+)
+
+_CLUTTER_LAYER_TOKENS = (
+    "DEFPOINTS",
+    "FURN",
+    "HATCH",
+    "DIM",
+    "TITLE",
+    "BORDER",
+    "TBLK",
+    "LANDSCAPE",
+    "PLANT",
+    "CAR",
+    "VEHICLE",
+)
 
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _detect_unit_scale_to_m(doc: ezdxf.document.Drawing) -> float:
+def _detect_unit_and_scale(doc: ezdxf.document.Drawing) -> tuple[LengthUnit, float]:
     insunits = int(doc.header.get("$INSUNITS", 0) or 0)
-    if insunits in _INSUNITS_TO_M:
-        return _INSUNITS_TO_M[insunits]
+    if insunits in _INSUNITS_MAP:
+        return _INSUNITS_MAP[insunits]
 
     # Unitless DXF: infer scale from coordinate extents
     xs: list[float] = []
@@ -65,10 +88,47 @@ def _detect_unit_scale_to_m(doc: ezdxf.document.Drawing) -> float:
     if xs and ys:
         extent = max(max(xs) - min(xs), max(ys) - min(ys))
         if extent > 1000.0:
-            return 0.001  # mm
+            return ("mm", 0.001)
         if extent > 120.0:
-            return 0.01   # cm
-    return 1.0
+            return ("cm", 0.01)
+    return ("m", 1.0)
+
+
+def _detect_unit_scale_to_m(doc: ezdxf.document.Drawing) -> float:
+    return _detect_unit_and_scale(doc)[1]
+
+
+def _classify_cad_layer(layer_name: str) -> CadLayerCategory:
+    up = (layer_name or "0").strip().upper()
+    if any(tok in up for tok in ("GRID", "AXIS")):
+        return "grid"
+    if any(tok in up for tok in ("OPEN", "VOID", "STAIR", "SHAFT", "AIRWELL")):
+        return "opening"
+    if any(tok in up for tok in ("COL", "BEAM", "SLAB", "FTG", "FOOTING", "FOUND", "STRUCT", "S-", "ST-")):
+        return "structural"
+    if any(tok in up for tok in ("DEFPOINTS", "DIM", "TEXT", "ANNO", "NOTE", "TITLE", "BORDER", "TBLK", "HATCH", "SYMBOL")):
+        return "annotation"
+    if any(tok in up for tok in ("FURN", "EQPT", "FIXT", "DOOR", "WIN", "WALL", "ARCH", "A-")):
+        return "architectural"
+    return "other"
+
+
+def _default_layer_selected(name: str, is_on: bool, is_frozen: bool, category: CadLayerCategory) -> bool:
+    if not is_on or is_frozen:
+        return False
+    up = (name or "").strip().upper()
+    if any(tok in up for tok in _CLUTTER_LAYER_TOKENS):
+        return False
+    if category == "annotation":
+        return False
+    return True
+
+
+def _is_short_grid_or_level_marker(text: str) -> bool:
+    cleaned = (text or "").strip()
+    if not cleaned or len(cleaned) > 28:
+        return False
+    return bool(_SHORT_MARKER_RE.match(cleaned))
 
 
 def _is_dashed_or_center(ent, doc: ezdxf.document.Drawing) -> bool:
@@ -118,46 +178,48 @@ def _cluster_values(entries: list[tuple[float, dict]], tol: float = 0.12) -> lis
     return clusters
 
 
-def upload_cad_plan(project_id: str, filename: str, raw_bytes: bytes) -> ImportDocumentState:
+def _parse_dxf_document(
+    doc: ezdxf.document.Drawing,
+    u2m: float,
+) -> tuple[
+    tuple[float, float, float, float],
+    list[dict],
+    list[dict],
+    list[dict],
+    list[dict],
+    list[CadLayerInfo],
+]:
     """
-    Import an architectural .dxf or .dwg floor plan directly into Module 02:
-      1. Converts .dwg -> .dxf via local DWG converter if needed (raises DwgConverterUnavailableError -> HTTP 503).
-      2. Parses exact millimeter/meter geometry via ezdxf ($INSUNITS aware).
-      3. Extracts GridCandidates, ColumnCandidates, and DetectedOpenings in exact meters.
-      4. Renders a crisp vector PDF + PNG preview into the project's imports dir with pre-confirmed
-         exact scale calibration so the existing Module 02 UI & Transfer workflow work seamlessly.
+    Parse all supported modelspace primitives (LINE, LWPOLYLINE, HATCH, CIRCLE, TEXT, MTEXT),
+    compute full-modelspace bounding box in meters (for viewport-locked rendering), and build
+    CadLayerInfo metadata with entity counts and frozen/off states.
     """
-    project = storage.load_project(project_id)
-    if not raw_bytes:
-        raise ValueError("Uploaded CAD file is empty.")
+    layer_flags: dict[str, tuple[bool, bool]] = {}
+    for layer_rec in doc.layers:
+        lname = str(layer_rec.dxf.name)
+        try:
+            is_on = not bool(layer_rec.is_off())
+        except Exception:
+            is_on = True
+        try:
+            is_frozen = bool(layer_rec.is_frozen())
+        except Exception:
+            is_frozen = False
+        layer_flags[lname] = (is_on, is_frozen)
 
-    lower_name = (filename or "plan.dxf").lower()
-    if lower_name.endswith(".dwg"):
-        dxf_bytes = convert_dwg_to_dxf(raw_bytes)
-    elif lower_name.endswith(".dxf"):
-        dxf_bytes = raw_bytes
-    else:
-        raise ValueError("Unsupported CAD format. Upload an AutoCAD .dxf or .dwg file.")
-
-    try:
-        dxf_text = dxf_bytes.decode("utf-8", errors="replace")
-        doc = ezdxf.read(io.StringIO(dxf_text))
-    except Exception as exc:
-        raise ValueError(f"Could not parse DXF file: {exc}") from exc
-
-    u2m = _detect_unit_scale_to_m(doc)
-    msp = doc.modelspace()
-
-    # --- 1. Collect raw primitives in meters ---
+    layer_counts: dict[str, int] = {}
     lines_m: list[dict] = []
     polys_m: list[dict] = []
     circles_m: list[dict] = []
     texts_m: list[dict] = []
 
-    for ent in msp:
+    for ent in doc.modelspace():
         et = ent.dxftype()
-        layer = (getattr(ent.dxf, "layer", "0") or "0")
+        if et not in ("LINE", "LWPOLYLINE", "HATCH", "CIRCLE", "TEXT", "MTEXT"):
+            continue
+        layer = str(getattr(ent.dxf, "layer", "0") or "0")
         layer_up = layer.upper()
+        layer_counts[layer] = layer_counts.get(layer, 0) + 1
         dashed = _is_dashed_or_center(ent, doc)
 
         if et == "LINE":
@@ -205,7 +267,6 @@ def upload_cad_plan(project_id: str, filename: str, raw_bytes: bytes) -> ImportD
     if not lines_m and not polys_m and not circles_m:
         raise ValueError("Uploaded DXF contains no modelspace geometry (lines, polylines, or circles).")
 
-    # Compute overall drawing bounding box in meters
     all_x: list[float] = []
     all_y: list[float] = []
     for ln in lines_m:
@@ -219,10 +280,196 @@ def upload_cad_plan(project_id: str, filename: str, raw_bytes: bytes) -> ImportD
         all_x.extend([ci["cx"] - ci["r"], ci["cx"] + ci["r"]])
         all_y.extend([ci["cy"] - ci["r"], ci["cy"] + ci["r"]])
 
-    min_x_m, max_x_m = min(all_x), max(all_x)
-    min_y_m, max_y_m = min(all_y), max(all_y)
+    full_bounds_m = (min(all_x), max(all_x), min(all_y), max(all_y))
+
+    all_layer_names = sorted(set(layer_counts.keys()) | set(layer_flags.keys()))
+    cad_layers: list[CadLayerInfo] = []
+    for lname in all_layer_names:
+        cnt = layer_counts.get(lname, 0)
+        if cnt == 0 and lname not in layer_counts:
+            # Skip empty boilerplate layers with 0 entities unless explicitly referenced
+            continue
+        is_on, is_frozen = layer_flags.get(lname, (True, False))
+        cat = _classify_cad_layer(lname)
+        sel = _default_layer_selected(lname, is_on, is_frozen, cat)
+        cad_layers.append(
+            CadLayerInfo(
+                name=lname,
+                entity_count=cnt,
+                is_on=is_on,
+                is_frozen=is_frozen,
+                selected=sel,
+                category=cat,
+            )
+        )
+
+    # Fallback: if smart defaults leave zero layers selected, select all non-frozen/on layers
+    if cad_layers and not any(ly.selected for ly in cad_layers):
+        for ly in cad_layers:
+            if ly.is_on and not ly.is_frozen:
+                ly.selected = True
+    if cad_layers and not any(ly.selected for ly in cad_layers):
+        for ly in cad_layers:
+            ly.selected = True
+
+    return full_bounds_m, lines_m, polys_m, circles_m, texts_m, cad_layers
+
+
+def _filter_primitives_by_layers(
+    lines_m: list[dict],
+    polys_m: list[dict],
+    circles_m: list[dict],
+    texts_m: list[dict],
+    selected_layers: set[str],
+    cad_layers: list[CadLayerInfo],
+    keep_annotation_markers: bool = True,
+) -> tuple[list[dict], list[dict], list[dict], list[dict]]:
+    layer_by_name = {ly.name: ly for ly in cad_layers}
+
+    f_lines = [ln for ln in lines_m if ln["layer"] in selected_layers]
+    f_polys = [pl for pl in polys_m if pl["layer"] in selected_layers]
+    f_circles = [ci for ci in circles_m if ci["layer"] in selected_layers]
+    f_texts: list[dict] = []
+    for tx in texts_m:
+        if tx["layer"] in selected_layers:
+            f_texts.append(tx)
+        elif keep_annotation_markers:
+            ly = layer_by_name.get(tx["layer"])
+            if (
+                ly is not None
+                and ly.category == "annotation"
+                and ly.is_on
+                and not ly.is_frozen
+                and _is_short_grid_or_level_marker(tx["text"])
+            ):
+                f_texts.append(tx)
+    return f_lines, f_polys, f_circles, f_texts
+
+
+def _render_dxf_preview(
+    project_id: str,
+    doc_id: str,
+    full_bounds_m: tuple[float, float, float, float],
+    lines_m: list[dict],
+    polys_m: list[dict],
+    circles_m: list[dict],
+    texts_m: list[dict],
+) -> tuple[int, int, float, float, float, float, float, callable]:
+    """
+    Render filtered DXF primitives to original.pdf and pages/page_001.png using the
+    FULL modelspace bounding box so toggling outer layers never shifts pixel coordinates.
+    """
+    min_x_m, max_x_m, min_y_m, max_y_m = full_bounds_m
     span_x_m = max(max_x_m - min_x_m, 2.0)
     span_y_m = max(max_y_m - min_y_m, 2.0)
+
+    page_w_pt = 960.0
+    page_h_pt = 680.0
+    margin_pt = 48.0
+    pt_per_m = min((page_w_pt - 2.0 * margin_pt) / span_x_m, (page_h_pt - 2.0 * margin_pt) / span_y_m)
+    mid_x_m = 0.5 * (min_x_m + max_x_m)
+    mid_y_m = 0.5 * (min_y_m + max_y_m)
+
+    def m_to_pt(xm: float, ym: float) -> tuple[float, float]:
+        return (
+            page_w_pt * 0.5 + (xm - mid_x_m) * pt_per_m,
+            page_h_pt * 0.5 - (ym - mid_y_m) * pt_per_m,
+        )
+
+    pdf_doc = pymupdf.open()
+    pg = pdf_doc.new_page(width=page_w_pt, height=page_h_pt)
+    shape = pg.new_shape()
+
+    for ln in lines_m:
+        a = m_to_pt(*ln["p1"])
+        b = m_to_pt(*ln["p2"])
+        col_rgb = (0.75, 0.25, 0.25) if ("GRID" in ln["layer_up"] or ln["dashed"]) else (0.18, 0.22, 0.28)
+        shape.draw_line(pymupdf.Point(a), pymupdf.Point(b))
+        shape.finish(color=col_rgb, width=0.6)
+
+    for pl in polys_m:
+        pts_pt = [pymupdf.Point(m_to_pt(px, py)) for px, py in pl["pts"]]
+        if pl["closed"]:
+            pts_pt.append(pts_pt[0])
+        shape.draw_polyline(pts_pt)
+        fill_rgb = (0.55, 0.65, 0.78) if (pl["hatched"] or "COL" in pl["layer_up"]) else None
+        stroke_rgb = (0.8, 0.15, 0.15) if any(t in pl["layer_up"] for t in ("OPEN", "VOID", "STAIR")) else (0.1, 0.2, 0.35)
+        shape.finish(color=stroke_rgb, fill=fill_rgb, width=0.8)
+
+    for ci in circles_m:
+        cpt = pymupdf.Point(m_to_pt(ci["cx"], ci["cy"]))
+        shape.draw_circle(cpt, max(ci["r"] * pt_per_m, 1.5))
+        shape.finish(color=(0.15, 0.45, 0.7), width=0.6)
+
+    shape.commit()
+
+    for tx in texts_m[:250]:
+        pt = pymupdf.Point(m_to_pt(tx["x"], tx["y"]))
+        pg.insert_text(pt, tx["text"][:28], fontsize=8, color=(0.15, 0.15, 0.15))
+
+    pages_dir = pdf_service._pages_dir(project_id, doc_id)
+    pages_dir.mkdir(parents=True, exist_ok=True)
+    pdf_path = pdf_service._original_pdf_path(project_id, doc_id)
+    pdf_doc.save(pdf_path)
+
+    zoom = DEFAULT_RENDER_DPI / 72.0
+    pix = pg.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False)
+    img_filename = "page_001.png"
+    pix.save(pages_dir / img_filename)
+    width_px, height_px = pix.width, pix.height
+    pdf_doc.close()
+
+    sx = width_px / page_w_pt
+    sy = height_px / page_h_pt
+    px_per_m = pt_per_m * sx
+
+    def m_to_px(xm: float, ym: float) -> tuple[float, float]:
+        x_pt, y_pt = m_to_pt(xm, ym)
+        return round(x_pt * sx, 2), round(y_pt * sy, 2)
+
+    return width_px, height_px, page_w_pt, page_h_pt, sx, sy, px_per_m, m_to_px
+
+
+def upload_cad_plan(project_id: str, filename: str, raw_bytes: bytes) -> ImportDocumentState:
+    """
+    Import an architectural .dxf or .dwg floor plan directly into Module 02:
+      1. Converts .dwg -> .dxf via local DWG converter if needed (raises DwgConverterUnavailableError -> HTTP 503).
+      2. Inspects doc.layers & modelspace geometry via ezdxf ($INSUNITS aware), applying smart default layer filtering.
+      3. Persists original.dxf alongside viewport-locked original.pdf & page_001.png.
+      4. Extracts GridCandidates, ColumnCandidates, and DetectedOpenings in exact meters with pre-confirmed calibration.
+    """
+    project = storage.load_project(project_id)
+    if not raw_bytes:
+        raise ValueError("Uploaded CAD file is empty.")
+
+    lower_name = (filename or "plan.dxf").lower()
+    if lower_name.endswith(".dwg"):
+        dxf_bytes = convert_dwg_to_dxf(raw_bytes)
+    elif lower_name.endswith(".dxf"):
+        dxf_bytes = raw_bytes
+    else:
+        raise ValueError("Unsupported CAD format. Upload an AutoCAD .dxf or .dwg file.")
+
+    try:
+        dxf_text = dxf_bytes.decode("utf-8", errors="replace")
+        doc = ezdxf.read(io.StringIO(dxf_text))
+    except Exception as exc:
+        raise ValueError(f"Could not parse DXF file: {exc}") from exc
+
+    detected_unit, u2m = _detect_unit_and_scale(doc)
+    full_bounds_m, all_lines_m, all_polys_m, all_circles_m, all_texts_m, cad_layers = _parse_dxf_document(doc, u2m)
+    selected_set = {ly.name for ly in cad_layers if ly.selected}
+    lines_m, polys_m, circles_m, texts_m = _filter_primitives_by_layers(
+        all_lines_m,
+        all_polys_m,
+        all_circles_m,
+        all_texts_m,
+        selected_set,
+        cad_layers,
+        keep_annotation_markers=True,
+    )
+
+    min_x_m, max_x_m, min_y_m, max_y_m = full_bounds_m
 
     # --- 2. Extract Grid Bubbles (circle + short grid label text) ---
     bubbles: list[dict] = []
@@ -303,7 +550,6 @@ def upload_cad_plan(project_id: str, filename: str, raw_bytes: bytes) -> ImportD
         cy_m = 0.5 * (min(pys) + max(pys))
         lup = pl["layer_up"]
 
-        # Check opening layer or diagonal X-lines inside polygon
         is_open_layer = any(tok in lup for tok in ("OPEN", "VOID", "STAIR", "SHAFT", "AIRWELL"))
         diag_lines_in_poly = []
         if w_m >= 0.6 and h_m >= 0.6 and area >= 0.5:
@@ -325,7 +571,6 @@ def upload_cad_plan(project_id: str, filename: str, raw_bytes: bytes) -> ImportD
         )
 
         if (is_open_layer or has_x_cross) and area >= 0.4:
-            # Deduplicate overlapping openings
             if not any(math.hypot(o["cx"] - cx_m, o["cy"] - cy_m) < 0.3 for o in extracted_openings):
                 cat = "stairwell" if "STAIR" in lup else ("airwell" if "AIR" in lup else "shaft_other")
                 lbl = next(
@@ -343,7 +588,6 @@ def upload_cad_plan(project_id: str, filename: str, raw_bytes: bytes) -> ImportD
                 extracted_openings.append({"pts": pts, "cx": cx_m, "cy": cy_m, "category": cat, "label": lbl[:24]})
             continue
 
-        # Column check: rectangular 0.20m..1.50m, aspect <= 3.0, rectangularity >= 0.80
         if 0.20 <= w_m <= 1.50 and 0.20 <= h_m <= 1.50:
             aspect = max(w_m, h_m) / max(min(w_m, h_m), 1e-4)
             rect_ratio = area / max(w_m * h_m, 1e-6)
@@ -362,7 +606,6 @@ def upload_cad_plan(project_id: str, filename: str, raw_bytes: bytes) -> ImportD
                         }
                     )
 
-    # Origin in raw meters (minimum grid intersection or min column coord or bbox min)
     if extracted_x_grids and extracted_y_grids:
         origin_x_m = min(g["coord_raw_m"] for g in extracted_x_grids)
         origin_y_m = min(g["coord_raw_m"] for g in extracted_y_grids)
@@ -373,72 +616,23 @@ def upload_cad_plan(project_id: str, filename: str, raw_bytes: bytes) -> ImportD
         origin_x_m = min_x_m
         origin_y_m = min_y_m
 
-    # --- 5. Render Vector Preview PDF & PNG via PyMuPDF ---
-    page_w_pt = 960.0
-    page_h_pt = 680.0
-    margin_pt = 48.0
-    pt_per_m = min((page_w_pt - 2.0 * margin_pt) / span_x_m, (page_h_pt - 2.0 * margin_pt) / span_y_m)
-    mid_x_m = 0.5 * (min_x_m + max_x_m)
-    mid_y_m = 0.5 * (min_y_m + max_y_m)
-
-    def m_to_pt(xm: float, ym: float) -> tuple[float, float]:
-        return (
-            page_w_pt * 0.5 + (xm - mid_x_m) * pt_per_m,
-            page_h_pt * 0.5 - (ym - mid_y_m) * pt_per_m,
-        )
-
-    pdf_doc = pymupdf.open()
-    pg = pdf_doc.new_page(width=page_w_pt, height=page_h_pt)
-    shape = pg.new_shape()
-
-    for ln in lines_m:
-        a = m_to_pt(*ln["p1"])
-        b = m_to_pt(*ln["p2"])
-        col_rgb = (0.75, 0.25, 0.25) if ("GRID" in ln["layer_up"] or ln["dashed"]) else (0.18, 0.22, 0.28)
-        shape.draw_line(pymupdf.Point(a), pymupdf.Point(b))
-        shape.finish(color=col_rgb, width=0.6)
-
-    for pl in polys_m:
-        pts_pt = [pymupdf.Point(m_to_pt(px, py)) for px, py in pl["pts"]]
-        if pl["closed"]:
-            pts_pt.append(pts_pt[0])
-        shape.draw_polyline(pts_pt)
-        fill_rgb = (0.55, 0.65, 0.78) if (pl["hatched"] or "COL" in pl["layer_up"]) else None
-        stroke_rgb = (0.8, 0.15, 0.15) if any(t in pl["layer_up"] for t in ("OPEN", "VOID", "STAIR")) else (0.1, 0.2, 0.35)
-        shape.finish(color=stroke_rgb, fill=fill_rgb, width=0.8)
-
-    for ci in circles_m:
-        cpt = pymupdf.Point(m_to_pt(ci["cx"], ci["cy"]))
-        shape.draw_circle(cpt, max(ci["r"] * pt_per_m, 1.5))
-        shape.finish(color=(0.15, 0.45, 0.7), width=0.6)
-
-    shape.commit()
-
-    for tx in texts_m[:250]:
-        pt = pymupdf.Point(m_to_pt(tx["x"], tx["y"]))
-        pg.insert_text(pt, tx["text"][:28], fontsize=8, color=(0.15, 0.15, 0.15))
-
     doc_id = f"cad-{uuid4().hex[:10]}"
     doc_dir = pdf_service._doc_dir(project_id, doc_id)
-    pages_dir = pdf_service._pages_dir(project_id, doc_id)
-    pages_dir.mkdir(parents=True, exist_ok=True)
-    pdf_path = pdf_service._original_pdf_path(project_id, doc_id)
-    pdf_doc.save(pdf_path)
+    doc_dir.mkdir(parents=True, exist_ok=True)
+    # Persist normalized DXF for viewport-locked layer re-rendering
+    pdf_service._original_dxf_path(project_id, doc_id).write_bytes(dxf_bytes)
 
-    zoom = DEFAULT_RENDER_DPI / 72.0
-    pix = pg.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False)
+    width_px, height_px, page_w_pt, page_h_pt, sx, sy, px_per_m, m_to_px = _render_dxf_preview(
+        project_id,
+        doc_id,
+        full_bounds_m,
+        lines_m,
+        polys_m,
+        circles_m,
+        texts_m,
+    )
+    margin_pt = 48.0
     img_filename = "page_001.png"
-    pix.save(pages_dir / img_filename)
-    width_px, height_px = pix.width, pix.height
-    pdf_doc.close()
-
-    sx = width_px / page_w_pt
-    sy = height_px / page_h_pt
-    px_per_m = pt_per_m * sx
-
-    def m_to_px(xm: float, ym: float) -> tuple[float, float]:
-        x_pt, y_pt = m_to_pt(xm, ym)
-        return round(x_pt * sx, 2), round(y_pt * sy, 2)
 
     orig_x_px, orig_y_px = m_to_px(origin_x_m, origin_y_m)
     p2_x_px, p2_y_px = m_to_px(origin_x_m + 1.0, origin_y_m)
@@ -450,6 +644,7 @@ def upload_cad_plan(project_id: str, filename: str, raw_bytes: bytes) -> ImportD
         region_id=region_id,
         page_number=1,
         name=f"CAD Plan ({filename})",
+        region_type="plan",
         floor_level=default_level,
         x_px=round(margin_pt * 0.5 * sx, 2),
         y_px=round(margin_pt * 0.5 * sy, 2),
@@ -459,13 +654,14 @@ def upload_cad_plan(project_id: str, filename: str, raw_bytes: bytes) -> ImportD
         auto_detected=True,
     )
 
+    known_in_unit = round(1.0 / u2m, 4)
     calibration = ScaleCalibration(
         page_number=1,
         p1=PointPx(x_px=orig_x_px, y_px=orig_y_px),
         p2=PointPx(x_px=p2_x_px, y_px=p2_y_px),
         origin_px=PointPx(x_px=orig_x_px, y_px=orig_y_px),
-        known_distance=1.0,
-        unit="m",
+        known_distance=known_in_unit,
+        unit=detected_unit,
         pixel_distance=round(px_per_m, 4),
         real_distance_m=1.0,
         meters_per_px=round(1.0 / px_per_m, 8),
@@ -473,7 +669,7 @@ def upload_cad_plan(project_id: str, filename: str, raw_bytes: bytes) -> ImportD
         confirmed=True,
         calibrated_at=now,
         confirmed_at=now,
-        notes=f"Exact CAD calibration from DXF coordinates (scale factor {u2m:g} m/unit).",
+        notes=f"Exact CAD calibration from DXF coordinates (unit={detected_unit}, scale={u2m:g} m/unit).",
     )
 
     grid_cands: list[GridCandidate] = []
@@ -527,7 +723,6 @@ def upload_cad_plan(project_id: str, filename: str, raw_bytes: bytes) -> ImportD
         cx_px, cy_px = m_to_px(col["x_m"], col["y_m"])
         rel_x = round(col["x_m"] - origin_x_m, 4)
         rel_y = round(col["y_m"] - origin_y_m, 4)
-        # Match nearest grid labels
         gx_lbl = min(extracted_x_grids, key=lambda g: abs(g["coord_raw_m"] - col["x_m"]))["label"] if extracted_x_grids else ""
         gy_lbl = min(extracted_y_grids, key=lambda g: abs(g["coord_raw_m"] - col["y_m"]))["label"] if extracted_y_grids else ""
         grid_ref = f"{gx_lbl}-{gy_lbl}" if (gx_lbl and gy_lbl) else ""
@@ -605,6 +800,8 @@ def upload_cad_plan(project_id: str, filename: str, raw_bytes: bytes) -> ImportD
         grid_candidates=grid_cands,
         column_candidates=col_cands,
         openings=opening_cands,
+        cad_layers=cad_layers,
+        detected_cad_unit=detected_unit,
     )
 
     pdf_service._save_state(state)
@@ -614,10 +811,90 @@ def upload_cad_plan(project_id: str, filename: str, raw_bytes: bytes) -> ImportD
         "upload_cad",
         {
             "filename": filename,
+            "detected_cad_unit": detected_unit,
             "unit_scale_to_m": u2m,
+            "layers_total": len(cad_layers),
+            "layers_selected": len(selected_set),
             "grids": len(grid_cands),
             "columns": len(col_cands),
             "openings": len(opening_cands),
+        },
+    )
+    return state
+
+
+def update_cad_layers(
+    project_id: str,
+    doc_id: str,
+    req: UpdateCadLayersRequest,
+) -> ImportDocumentState:
+    """
+    Update selected DXF layers and re-render original.pdf & pages/page_001.png from original.dxf
+    using the FULL modelspace bounding box (viewport-locked) so pixel coordinates of existing
+    regions, calibrations, master_grid, and approved/manual items never shift.
+    """
+    state = pdf_service.get_import(project_id, doc_id)
+    if state.source_format != "CAD":
+        raise ValueError("DXF layer filtering is only available for CAD (.dxf/.dwg) imports.")
+
+    dxf_path = pdf_service._original_dxf_path(project_id, doc_id)
+    if not dxf_path.is_file():
+        raise ValueError(
+            "Original DXF file is missing on this legacy CAD import. Re-upload the .dxf file to enable layer filtering."
+        )
+
+    try:
+        dxf_text = dxf_path.read_text(encoding="utf-8", errors="replace")
+        doc = ezdxf.read(io.StringIO(dxf_text))
+    except Exception as exc:
+        raise ValueError(f"Could not parse stored DXF file: {exc}") from exc
+
+    _, u2m = _detect_unit_and_scale(doc)
+    full_bounds_m, all_lines_m, all_polys_m, all_circles_m, all_texts_m, fresh_layers = _parse_dxf_document(doc, u2m)
+
+    selected_set = set(req.selected_layers)
+    # Preserve existing layer catalog order/entries and update selected flags
+    if state.cad_layers:
+        for ly in state.cad_layers:
+            ly.selected = ly.name in selected_set
+    else:
+        for ly in fresh_layers:
+            ly.selected = ly.name in selected_set
+        state.cad_layers = fresh_layers
+
+    lines_m, polys_m, circles_m, texts_m = _filter_primitives_by_layers(
+        all_lines_m,
+        all_polys_m,
+        all_circles_m,
+        all_texts_m,
+        selected_set,
+        state.cad_layers,
+        keep_annotation_markers=False,
+    )
+
+    _render_dxf_preview(
+        project_id,
+        doc_id,
+        full_bounds_m,
+        lines_m,
+        polys_m,
+        circles_m,
+        texts_m,
+    )
+
+    if state.pages:
+        state.pages[0].drawing_count = len(lines_m) + len(polys_m) + len(circles_m)
+        state.pages[0].text_word_count = len(texts_m)
+
+    pdf_service._save_state(state)
+    pdf_service._append_audit(
+        project_id,
+        doc_id,
+        "cad_layers_updated",
+        {
+            "selected_layers": sorted(selected_set),
+            "drawing_count": len(lines_m) + len(polys_m) + len(circles_m),
+            "text_word_count": len(texts_m),
         },
     )
     return state

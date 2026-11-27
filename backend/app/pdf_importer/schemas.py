@@ -17,6 +17,7 @@ SheetType = Literal[
 ]
 OpeningCategory = Literal["stairwell", "airwell", "shaft_other"]
 RegionType = Literal["plan", "elevation"]
+CadLayerCategory = Literal["structural", "grid", "opening", "architectural", "annotation", "other"]
 DetectionMethod = Literal["auto", "vector", "raster", "vlm"]
 CandidateSource = Literal["vector", "raster", "manual", "vlm", "cad"]
 ColumnFillMode = Literal["shaded_or_hatched", "gray_shaded_only", "any_filled"]
@@ -452,6 +453,27 @@ class TransferRecord(BaseModel):
     openings_count: int = 0
 
 
+class CadLayerInfo(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str
+    entity_count: int = 0
+    is_on: bool = True
+    is_frozen: bool = False
+    selected: bool = True
+    category: CadLayerCategory = "other"
+
+
+class UpdateCadLayersRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    selected_layers: list[str]
+
+
+class QuickUnitScaleRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    unit: LengthUnit
+    page_number: int = Field(default=1, ge=1)
+
+
 class ImportDocumentState(BaseModel):
     model_config = ConfigDict(extra="forbid")
     doc_id: str
@@ -472,6 +494,8 @@ class ImportDocumentState(BaseModel):
     detected_levels: list[DetectedLevel] = Field(default_factory=list)
     openings: list[DetectedOpening] = Field(default_factory=list)
     transfers: list[TransferRecord] = Field(default_factory=list)
+    cad_layers: list[CadLayerInfo] = Field(default_factory=list)
+    detected_cad_unit: LengthUnit | None = None
 
 
 PdfDocumentRecord = ImportDocumentState
