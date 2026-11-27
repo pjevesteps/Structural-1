@@ -23,6 +23,7 @@ from reportlab.platypus import (
 )
 
 from ..models import ProjectState
+from ..profile import EngineerProfile, resolve_signatory
 from ..staad import build_staad_text
 from .bom_engine import compute_bom_summary
 
@@ -40,8 +41,8 @@ INK = colors.HexColor("#0F172A")
 
 
 def _safe_pdf_text(text: str) -> str:
-    """Keep text strictly Latin-1 safe for built-in ReportLab Helvetica fonts."""
-    return (
+    """Keep text strictly Latin-1 safe (preserving Ñ/ñ) for built-in ReportLab Helvetica fonts."""
+    cleaned = (
         str(text)
         .replace("\u20b1", "PHP ")
         .replace("\u2014", " - ")
@@ -55,6 +56,7 @@ def _safe_pdf_text(text: str) -> str:
         .replace("\u00d8", "D")
         .replace("\u00f8", "d")
     )
+    return cleaned.encode("latin-1", "replace").decode("latin-1")
 
 
 def _make_numbered_canvas_class(header_left: str, footer_left: str):
@@ -101,11 +103,14 @@ def _make_numbered_canvas_class(header_left: str, footer_left: str):
     return NumberedCanvas
 
 
-def build_calculation_report_pdf(project: ProjectState) -> bytes:
+def build_calculation_report_pdf(
+    project: ProjectState,
+    profile: EngineerProfile | None = None,
+) -> bytes:
     """Build permit-ready Structural Calculation Report & BOM as A4 PDF bytes."""
     rep = project.reporting
     bom = rep.bom if rep.bom is not None else compute_bom_summary(project, rep.bom_params)
-    sig = rep.signatory
+    sig = resolve_signatory(rep.signatory, profile)
     opts = rep.options
     pi = project.project_info
     sm = project.structural_model
@@ -124,7 +129,7 @@ def build_calculation_report_pdf(project: ProjectState) -> bytes:
         topMargin=20 * mm,
         bottomMargin=18 * mm,
         title=f"{pi.project_name} - Structural Calculation Report",
-        author=sig.engineer_name or "Structural AI Office",
+        author=_safe_pdf_text(sig["engineer_name"] or "Structural AI Office"),
     )
     avail_w = A4[0] - 32 * mm
 
@@ -267,8 +272,8 @@ def build_calculation_report_pdf(project: ProjectState) -> bytes:
         [
             ["Project Name", pi.project_name],
             ["Project Code", pi.project_id],
-            ["Project Owner / Client", sig.project_owner or "To be filled by engineer"],
-            ["Project Location / Address", sig.project_address or pi.location or "Philippines"],
+            ["Project Owner / Client", sig["project_owner"] or "To be filled by engineer"],
+            ["Project Location / Address", sig["project_address"] or pi.location or "Philippines"],
             ["Applicable Design Codes", "NSCP 2015 Vol. 1 (7th Ed.), ACI 318, NBCP (PD 1096), PNS 49:2020"],
             ["Document Revision", opts.report_revision],
             ["Date Issued", date_str],
@@ -277,15 +282,22 @@ def build_calculation_report_pdf(project: ProjectState) -> bytes:
     )
 
     add_sub("Prepared, Signed & Sealed By")
+    sign_rows = [
+        ["Engineer Name", sig["engineer_name"] or "______________________________"],
+        ["Title / Designation", sig["title"]],
+        ["PRC License No. / Validity", f"{sig['prc_license_no'] or 'TBD'} (Valid: {sig['prc_validity'] or 'TBD'})"],
+        ["PTR No. / Date / Place", f"{sig['ptr_no'] or 'TBD'} / {sig['ptr_date'] or 'TBD'} / {sig['ptr_place'] or 'TBD'}"],
+        ["Tax Identification No. (TIN)", sig["tin"] or "TBD"],
+    ]
+    if sig["firm_name"]:
+        sign_rows.append(["Firm / Practice", sig["firm_name"]])
+    if sig["office_address"]:
+        sign_rows.append(["Office Address", sig["office_address"]])
+    if sig["contact_info"]:
+        sign_rows.append(["Contact Information", sig["contact_info"]])
     add_table(
         ["Credential", "Engineer Details"],
-        [
-            ["Engineer Name", sig.engineer_name or "______________________________"],
-            ["Title / Designation", sig.title],
-            ["PRC License No. / Validity", f"{sig.prc_license_no or 'TBD'} (Valid: {sig.prc_validity or 'TBD'})"],
-            ["PTR No. / Date / Place", f"{sig.ptr_no or 'TBD'} / {sig.ptr_date or 'TBD'} / {sig.ptr_place or 'TBD'}"],
-            ["Tax Identification No. (TIN)", sig.tin or "TBD"],
-        ],
+        sign_rows,
         col_weights=[32, 68],
     )
 
@@ -322,7 +334,7 @@ def build_calculation_report_pdf(project: ProjectState) -> bytes:
             ["Foundation System", "Mat / Raft Foundation (Winkler Springs)" if project.foundation_system == "mat_raft" else "Isolated & Combined Spread Footings"],
             ["Soil Bearing & Unit Weight (qa / gamma_s)", f"qa = {soil.allowable_bearing_kpa:.1f} kPa | gamma_s = {soil.soil_unit_weight_kn_m3:.1f} kN/m³ | phi = {soil.friction_angle_deg:.1f} deg"],
             ["Embedment / Water Table / Subgrade ks", f"Df = {soil.embedment_depth_m:.2f} m | Dw = {dw_str} | ks = {soil.subgrade_modulus_ks_kn_m3:,.0f} kN/m³"],
-            ["Geotechnical Report Reference (NBCP 302-5)", soil.report_ref or sig.geotech_report_ref],
+            ["Geotechnical Report Reference (NBCP 302-5)", soil.report_ref or sig["geotech_report_ref"]],
         ],
         col_weights=[40, 60],
     )
@@ -979,15 +991,22 @@ def build_calculation_report_pdf(project: ProjectState) -> bytes:
             st_body,
         )
     )
+    cert_rows = [
+        ["Signature over Printed Name", f"____________________________________   {sig['engineer_name'] or '[Engineer Name]'} ({sig['title']})"],
+        ["PRC License No. / Validity", f"{sig['prc_license_no'] or 'TBD'}  (Valid: {sig['prc_validity'] or 'TBD'})"],
+        ["PTR No. / Date / Place", f"{sig['ptr_no'] or 'TBD'} / {sig['ptr_date'] or 'TBD'} / {sig['ptr_place'] or 'TBD'}"],
+        ["Tax Identification No. (TIN)", sig["tin"] or "TBD"],
+    ]
+    if sig["firm_name"]:
+        cert_rows.append(["Firm / Practice", sig["firm_name"]])
+    if sig["office_address"]:
+        cert_rows.append(["Office Address", sig["office_address"]])
+    if sig["contact_info"]:
+        cert_rows.append(["Contact Information", sig["contact_info"]])
+    cert_rows.append(["Professional Dry Seal", "[ AFFIX DRY SEAL HERE ]"])
     add_table(
         ["Certification Field", "Engineer Attestation & Credentials"],
-        [
-            ["Signature over Printed Name", f"____________________________________   {sig.engineer_name or '[Engineer Name]'} ({sig.title})"],
-            ["PRC License No. / Validity", f"{sig.prc_license_no or 'TBD'}  (Valid: {sig.prc_validity or 'TBD'})"],
-            ["PTR No. / Date / Place", f"{sig.ptr_no or 'TBD'} / {sig.ptr_date or 'TBD'} / {sig.ptr_place or 'TBD'}"],
-            ["Tax Identification No. (TIN)", sig.tin or "TBD"],
-            ["Professional Dry Seal", "[ AFFIX DRY SEAL HERE ]"],
-        ],
+        cert_rows,
         col_weights=[32, 68],
     )
 

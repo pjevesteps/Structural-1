@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import EngineerProfileModal from "./EngineerProfileModal.jsx";
 import ProjectManagement from "./ProjectManagement.jsx";
 import PdfImporter from "./PdfImporter.jsx";
 import GeometryBuilder from "./GeometryBuilder.jsx";
@@ -35,6 +36,7 @@ export default function App() {
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [showModule01, setShowModule01] = useState(false);
+  const [showProfileModal, setShowProfileModal] = useState(false);
   const [importProject, setImportProject] = useState(null);
   const [geometryProject, setGeometryProject] = useState(null);
   const [sizingProject, setSizingProject] = useState(null);
@@ -166,6 +168,7 @@ export default function App() {
   function clearWorkspaceState() {
     setProjects([]);
     setShowModule01(false);
+    setShowProfileModal(false);
     setImportProject(null);
     setGeometryProject(null);
     setSizingProject(null);
@@ -406,6 +409,7 @@ export default function App() {
     }
     if (!proj || proj.corrupted) return;
     setShowModule01(false);
+    setShowProfileModal(false);
     persistActiveProjectId(proj.project_id);
     if (n === "02") setImportProject(proj);
     if (n === "03") setGeometryProject(proj);
@@ -505,6 +509,15 @@ export default function App() {
               </button>
             </>
           )}
+          <button
+            type="button"
+            className="secondary"
+            disabled={busy}
+            onClick={() => setShowProfileModal(true)}
+            title="Configure Engineer Profile for DXF title blocks and OBO reports"
+          >
+            Profile
+          </button>
           {authEnabled && authenticated && authUsername && (
             <span
               className="dash-active-pill"
@@ -911,6 +924,10 @@ export default function App() {
       )}
 
       <footer>{disclaimerText}</footer>
+      <EngineerProfileModal
+        open={showProfileModal}
+        onClose={() => setShowProfileModal(false)}
+      />
     </main>
   );
 }

@@ -16,6 +16,7 @@ from .auth import (
     verify_credentials,
 )
 from .models import ProjectRevisionSnapshot, ProjectState
+from .profile import EngineerProfile, load_engineer_profile, save_engineer_profile
 from .storage import (
     delete_project,
     ensure_data_dirs,
@@ -151,6 +152,20 @@ def auth_logout(request: Request):
     resp = JSONResponse(content={"status": "ok"})
     clear_session_cookie(resp, request)
     return resp
+
+
+@app.get("/api/profile")
+def get_profile():
+    profile = load_engineer_profile()
+    return JSONResponse(
+        content=profile.model_dump(),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.put("/api/profile", response_model=EngineerProfile)
+def put_profile(payload: EngineerProfile):
+    return save_engineer_profile(payload)
 
 @app.get("/api/projects")
 def projects():

@@ -11,6 +11,7 @@ from ..models import (
     ReportGenerationOptions,
     ReportState,
 )
+from ..profile import load_engineer_profile
 from .bom_engine import export_bom_csv, generate_report_state
 from .docx_builder import build_calculation_report_docx
 from .pdf_builder import build_calculation_report_pdf
@@ -69,8 +70,9 @@ def generate_report(project_id: str, payload: GenerateReportRequest | None = Non
 def download_report_docx(project_id: str):
     project = _load_or_404(project_id)
     _ensure_report_ready(project)
+    profile = load_engineer_profile()
     try:
-        docx_bytes = build_calculation_report_docx(project)
+        docx_bytes = build_calculation_report_docx(project, profile=profile)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -87,8 +89,9 @@ def download_report_docx(project_id: str):
 def download_report_pdf(project_id: str):
     project = _load_or_404(project_id)
     _ensure_report_ready(project)
+    profile = load_engineer_profile()
     try:
-        pdf_bytes = build_calculation_report_pdf(project)
+        pdf_bytes = build_calculation_report_pdf(project, profile=profile)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 

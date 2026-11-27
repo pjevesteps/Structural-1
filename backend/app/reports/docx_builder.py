@@ -12,6 +12,7 @@ from docx.oxml.ns import nsdecls, qn
 from docx.shared import Inches, Pt, RGBColor
 
 from ..models import ProjectState
+from ..profile import EngineerProfile, resolve_signatory
 from ..staad import build_staad_text
 from .bom_engine import compute_bom_summary
 
@@ -213,11 +214,14 @@ def _add_styled_table(
     spacer.paragraph_format.space_after = Pt(3)
 
 
-def build_calculation_report_docx(project: ProjectState) -> bytes:
+def build_calculation_report_docx(
+    project: ProjectState,
+    profile: EngineerProfile | None = None,
+) -> bytes:
     """Build permit-ready Structural Calculation Report & BOM as DOCX bytes."""
     rep = project.reporting
     bom = rep.bom if rep.bom is not None else compute_bom_summary(project, rep.bom_params)
-    sig = rep.signatory
+    sig = resolve_signatory(rep.signatory, profile)
     opts = rep.options
     pi = project.project_info
     sm = project.structural_model
@@ -291,8 +295,8 @@ def build_calculation_report_docx(project: ProjectState) -> bytes:
     cover_rows = [
         ["Project Name", pi.project_name],
         ["Project Code", pi.project_id],
-        ["Project Owner / Client", sig.project_owner or "To be filled by engineer"],
-        ["Project Location / Address", sig.project_address or pi.location or "Philippines"],
+        ["Project Owner / Client", sig["project_owner"] or "To be filled by engineer"],
+        ["Project Location / Address", sig["project_address"] or pi.location or "Philippines"],
         ["Applicable Codes & Standards", "NSCP 2015 Vol. 1 (7th Ed.), ACI 318, NBCP (PD 1096), PNS 49:2020"],
         ["Document Revision", opts.report_revision],
         ["Date Issued", date_str],
@@ -301,12 +305,18 @@ def build_calculation_report_docx(project: ProjectState) -> bytes:
 
     _add_subheading(doc, "Prepared, Signed & Sealed By")
     sign_rows = [
-        ["Engineer Name", sig.engineer_name or "______________________________"],
-        ["Title / Designation", sig.title],
-        ["PRC License No. / Validity", f"{sig.prc_license_no or 'TBD'}  (Valid until: {sig.prc_validity or 'TBD'})"],
-        ["PTR No. / Date / Place", f"{sig.ptr_no or 'TBD'}  /  {sig.ptr_date or 'TBD'}  /  {sig.ptr_place or 'TBD'}"],
-        ["Tax Identification No. (TIN)", sig.tin or "TBD"],
+        ["Engineer Name", sig["engineer_name"] or "______________________________"],
+        ["Title / Designation", sig["title"]],
+        ["PRC License No. / Validity", f"{sig['prc_license_no'] or 'TBD'}  (Valid until: {sig['prc_validity'] or 'TBD'})"],
+        ["PTR No. / Date / Place", f"{sig['ptr_no'] or 'TBD'}  /  {sig['ptr_date'] or 'TBD'}  /  {sig['ptr_place'] or 'TBD'}"],
+        ["Tax Identification No. (TIN)", sig["tin"] or "TBD"],
     ]
+    if sig["firm_name"]:
+        sign_rows.append(["Firm / Practice", sig["firm_name"]])
+    if sig["office_address"]:
+        sign_rows.append(["Office Address", sig["office_address"]])
+    if sig["contact_info"]:
+        sign_rows.append(["Contact Information", sig["contact_info"]])
     _add_styled_table(doc, ["Credential", "Details"], sign_rows, font_size=8.8)
 
     if rep.readiness_warnings:
@@ -338,7 +348,7 @@ def build_calculation_report_docx(project: ProjectState) -> bytes:
         ["Foundation System", "Mat / Raft Foundation (Winkler Springs)" if project.foundation_system == "mat_raft" else "Isolated & Combined Spread Footings"],
         ["Soil Investigation (qa / γs / φ)", f"qa = {soil.allowable_bearing_kpa:.1f} kPa | γs = {soil.soil_unit_weight_kn_m3:.1f} kN/m³ | φ = {soil.friction_angle_deg:.1f}°"],
         ["Embedment / Water Table / Subgrade ks", f"Df = {soil.embedment_depth_m:.2f} m | Dw = {dw_str} | ks = {soil.subgrade_modulus_ks_kn_m3:,.0f} kN/m³"],
-        ["Geotechnical Report Reference (NBCP 302-5)", soil.report_ref or sig.geotech_report_ref],
+        ["Geotechnical Report Reference (NBCP 302-5)", soil.report_ref or sig["geotech_report_ref"]],
     ]
     _add_styled_table(doc, ["Design Parameter", "Specified Value"], criteria_rows, font_size=8.5)
 
@@ -1012,13 +1022,19 @@ def build_calculation_report_docx(project: ProjectState) -> bytes:
         "and engineering verification.",
     )
     cert_rows = [
-        ["Signature over Printed Name", f"\n\n________________________________________\n{sig.engineer_name or '[Engineer Name]'}\n{sig.title}"],
-        ["PRC Registration No.", sig.prc_license_no or "______________________"],
-        ["PRC Validity Date", sig.prc_validity or "______________________"],
-        ["PTR No. / Date / Place Issued", f"{sig.ptr_no or '________'} / {sig.ptr_date or '________'} / {sig.ptr_place or '________'}"],
-        ["Tax Identification No. (TIN)", sig.tin or "______________________"],
-        ["Dry Seal Space", "\n\n[  AFFIX PROFESSIONAL DRY SEAL HERE  ]\n"],
+        ["Signature over Printed Name", f"\n\n________________________________________\n{sig['engineer_name'] or '[Engineer Name]'}\n{sig['title']}"],
+        ["PRC Registration No.", sig["prc_license_no"] or "______________________"],
+        ["PRC Validity Date", sig["prc_validity"] or "______________________"],
+        ["PTR No. / Date / Place Issued", f"{sig['ptr_no'] or '________'} / {sig['ptr_date'] or '________'} / {sig['ptr_place'] or '________'}"],
+        ["Tax Identification No. (TIN)", sig["tin"] or "______________________"],
     ]
+    if sig["firm_name"]:
+        cert_rows.append(["Firm / Practice", sig["firm_name"]])
+    if sig["office_address"]:
+        cert_rows.append(["Office Address", sig["office_address"]])
+    if sig["contact_info"]:
+        cert_rows.append(["Contact Information", sig["contact_info"]])
+    cert_rows.append(["Dry Seal Space", "\n\n[  AFFIX PROFESSIONAL DRY SEAL HERE  ]\n"])
     _add_styled_table(doc, ["Certification Field", "Engineer Attestation & Credentials"], cert_rows, font_size=8.8)
 
     out = io.BytesIO()

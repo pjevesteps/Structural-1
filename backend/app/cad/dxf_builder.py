@@ -19,6 +19,7 @@ from ..models import (
     CadSheetSummary,
     ProjectState,
 )
+from ..profile import EngineerProfile, resolve_signatory
 from ..reports.bom_engine import parse_bar_callout
 
 SHEET_DIMENSIONS_MM: dict[str, tuple[float, float]] = {
@@ -343,6 +344,7 @@ def _draw_title_block(
     sheet_no: str,
     sheet_title: str,
     scale_label: str,
+    profile: EngineerProfile | None = None,
 ) -> tuple[float, float, float, float]:
     """
     Draw outer border, inner frame, and right-hand NBCP title block.
@@ -362,7 +364,7 @@ def _draw_title_block(
     msp.add_line((tb_x0, tb_y0), (tb_x0, tb_y1), dxfattribs={"layer": "S-TITLEBLK"})
 
     pi = project.project_info
-    sig = project.reporting.signatory
+    sig = resolve_signatory(project.reporting.signatory, profile)
     rev = project.reporting.options.report_revision
     date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
@@ -387,8 +389,16 @@ def _draw_title_block(
     def box_y(frac: float) -> float:
         return tb_y0 + frac * tb_h
 
-    _add_text(msp, "STRUCTURAL AI OFFICE", tcx, box_y(0.955), 4.2 * k, "S-TITLEBLK", TextEntityAlignment.MIDDLE_CENTER)
-    _add_text(msp, "NSCP 2015 / ACI 318 / NBCP PD 1096", tcx, box_y(0.915), 2.3 * k, "S-TEXT", TextEntityAlignment.MIDDLE_CENTER)
+    _add_text(msp, (sig["firm_name"] or "STRUCTURAL AI OFFICE")[:30], tcx, box_y(0.955), 4.0 * k, "S-TITLEBLK", TextEntityAlignment.MIDDLE_CENTER)
+    _add_text(
+        msp,
+        (sig["office_address"] or "NSCP 2015 / ACI 318 / NBCP PD 1096")[:46],
+        tcx,
+        box_y(0.915),
+        2.1 * k,
+        "S-TEXT",
+        TextEntityAlignment.MIDDLE_CENTER,
+    )
 
     _add_text(msp, "PROJECT:", tx, box_y(0.855), 2.1 * k, "S-TEXT")
     _add_text(msp, pi.project_name[:34], tx, box_y(0.815), 3.2 * k, "S-TITLEBLK")
@@ -397,19 +407,19 @@ def _draw_title_block(
     _add_text(msp, f"CODE: {pi.project_id}", tx, box_y(0.742), 2.3 * k, "S-TEXT")
 
     _add_text(msp, "OWNER / CLIENT:", tx, box_y(0.695), 2.0 * k, "S-TEXT")
-    _add_text(msp, (sig.project_owner or "TO BE SPECIFIED")[:34], tx, box_y(0.66), 2.6 * k, "S-TITLEBLK")
+    _add_text(msp, (sig["project_owner"] or "TO BE SPECIFIED")[:34], tx, box_y(0.66), 2.6 * k, "S-TITLEBLK")
     _add_text(msp, "LOCATION:", tx, box_y(0.62), 2.0 * k, "S-TEXT")
-    loc = (sig.project_address or pi.location or "PHILIPPINES")[:36]
+    loc = (sig["project_address"] or pi.location or "PHILIPPINES")[:36]
     _add_text(msp, loc, tx, box_y(0.585), 2.4 * k, "S-TITLEBLK")
 
     _add_text(msp, "DESIGNED & SEALED BY:", tx, box_y(0.535), 2.1 * k, "S-TEXT")
-    _add_text(msp, (sig.engineer_name or "ENGINEER OF RECORD")[:32], tx, box_y(0.495), 2.9 * k, "S-TITLEBLK")
-    _add_text(msp, (sig.title or "Civil / Structural Engineer")[:36], tx, box_y(0.46), 2.1 * k, "S-TEXT")
-    _add_text(msp, f"PRC NO.: {sig.prc_license_no or 'TBD'}", tx, box_y(0.42), 2.2 * k, "S-TEXT")
-    _add_text(msp, f"VALID UNTIL: {sig.prc_validity or 'TBD'}", tx, box_y(0.39), 2.0 * k, "S-TEXT")
-    _add_text(msp, f"PTR NO.: {sig.ptr_no or 'TBD'}", tx, box_y(0.36), 2.0 * k, "S-TEXT")
-    _add_text(msp, f"PTR DATE/PLACE: {sig.ptr_date or '-'} / {sig.ptr_place or '-'}", tx, box_y(0.332), 1.85 * k, "S-TEXT")
-    _add_text(msp, f"TIN: {sig.tin or 'TBD'}", tx, box_y(0.308), 2.0 * k, "S-TEXT")
+    _add_text(msp, (sig["engineer_name"] or "ENGINEER OF RECORD")[:32], tx, box_y(0.495), 2.9 * k, "S-TITLEBLK")
+    _add_text(msp, (sig["title"] or "Civil / Structural Engineer")[:36], tx, box_y(0.46), 2.1 * k, "S-TEXT")
+    _add_text(msp, f"PRC NO.: {sig['prc_license_no'] or 'TBD'}", tx, box_y(0.42), 2.2 * k, "S-TEXT")
+    _add_text(msp, f"VALID UNTIL: {sig['prc_validity'] or 'TBD'}", tx, box_y(0.39), 2.0 * k, "S-TEXT")
+    _add_text(msp, f"PTR NO.: {sig['ptr_no'] or 'TBD'}", tx, box_y(0.36), 2.0 * k, "S-TEXT")
+    _add_text(msp, f"PTR DATE/PLACE: {sig['ptr_date'] or '-'} / {sig['ptr_place'] or '-'}", tx, box_y(0.332), 1.85 * k, "S-TEXT")
+    _add_text(msp, f"TIN: {sig['tin'] or 'TBD'}", tx, box_y(0.308), 2.0 * k, "S-TEXT")
 
     _add_text(msp, "SHEET CONTENTS:", tx, box_y(0.275), 2.0 * k, "S-TEXT")
     title_words = sheet_title.upper()
@@ -1583,6 +1593,7 @@ def _build_dxf_for_sheet_configs(
     project: ProjectState,
     opts: CadDrawingOptions,
     sheet_configs: list[CadSheetConfig],
+    profile: EngineerProfile | None = None,
 ) -> tuple[ezdxf.document.Drawing, CadDrawingState, dict[str, tuple[float, float, float, float]]]:
     w, h = SHEET_DIMENSIONS_MM[opts.sheet_size]
     k = w / 841.0
@@ -1616,7 +1627,9 @@ def _build_dxf_for_sheet_configs(
         else:
             scale_lbl = "NTS"
 
-        content_box = _draw_title_block(msp, ox, w, h, k, project, scfg.sheet_no, scfg.title, scale_lbl)
+        content_box = _draw_title_block(
+            msp, ox, w, h, k, project, scfg.sheet_no, scfg.title, scale_lbl, profile=profile
+        )
         sheet_bounds[scfg.sheet_no] = (ox, 0.0, ox + w, h)
 
         if scfg.sheet_no not in doc.layouts:
@@ -1667,6 +1680,7 @@ def _build_dxf_for_sheet_configs(
 def build_cad_document(
     project: ProjectState,
     options: CadDrawingOptions | None = None,
+    profile: EngineerProfile | None = None,
 ) -> tuple[ezdxf.document.Drawing, CadDrawingState, dict[str, tuple[float, float, float, float]]]:
     """
     Build the complete multi-sheet AutoCAD R2010 DXF document and return:
@@ -1682,17 +1696,25 @@ def build_cad_document(
     if not sheet_configs:
         raise ValueError("Enable at least one drawing section or add a sheet before generating CAD drawings.")
 
-    return _build_dxf_for_sheet_configs(project, opts, sheet_configs)
+    return _build_dxf_for_sheet_configs(project, opts, sheet_configs, profile=profile)
 
 
-def build_dxf_bytes(project: ProjectState, options: CadDrawingOptions | None = None) -> tuple[bytes, CadDrawingState]:
-    doc, state, _ = build_cad_document(project, options=options)
+def build_dxf_bytes(
+    project: ProjectState,
+    options: CadDrawingOptions | None = None,
+    profile: EngineerProfile | None = None,
+) -> tuple[bytes, CadDrawingState]:
+    doc, state, _ = build_cad_document(project, options=options, profile=profile)
     text_stream = io.StringIO()
     doc.write(text_stream)
     return text_stream.getvalue().encode("utf-8"), state
 
 
-def build_sheets_zip(project: ProjectState, options: CadDrawingOptions | None = None) -> bytes:
+def build_sheets_zip(
+    project: ProjectState,
+    options: CadDrawingOptions | None = None,
+    profile: EngineerProfile | None = None,
+) -> bytes:
     """Build a ZIP archive containing one standalone .dxf file per configured sheet."""
     _validate_cad_prerequisites(project)
     opts = (
@@ -1708,7 +1730,7 @@ def build_sheets_zip(project: ProjectState, options: CadDrawingOptions | None = 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
         for scfg in sheet_configs:
-            single_doc, _, _ = _build_dxf_for_sheet_configs(project, opts, [scfg])
+            single_doc, _, _ = _build_dxf_for_sheet_configs(project, opts, [scfg], profile=profile)
             s_io = io.StringIO()
             single_doc.write(s_io)
             safe_sno = scfg.sheet_no.replace("/", "-").replace(" ", "_")
@@ -1716,12 +1738,17 @@ def build_sheets_zip(project: ProjectState, options: CadDrawingOptions | None = 
     return buf.getvalue()
 
 
-def build_sheets_pdf(project: ProjectState, options: CadDrawingOptions | None = None) -> bytes:
+def build_sheets_pdf(
+    project: ProjectState,
+    options: CadDrawingOptions | None = None,
+    profile: EngineerProfile | None = None,
+) -> bytes:
     """
     Render each configured CAD sheet as a true-scale landscape vector PDF page
     (A1 = 841x594mm, A2 = 594x420mm, A3 = 420x297mm) with crisp CAD-to-Print colors.
     """
-    doc, state, sheet_bounds = build_cad_document(project, options=options)
+    doc, state, sheet_bounds = build_cad_document(project, options=options, profile=profile)
+    resolved_sig = resolve_signatory(project.reporting.signatory, profile)
     w_mm, h_mm = SHEET_DIMENSIONS_MM[state.options.sheet_size]
 
     layer_aci: dict[str, int] = {lname: aci for lname, aci, _, _ in CAD_LAYER_SPECS}
@@ -1731,7 +1758,7 @@ def build_sheets_pdf(project: ProjectState, options: CadDrawingOptions | None = 
     buf = io.BytesIO()
     c = rl_canvas.Canvas(buf, pagesize=(w_mm * RL_MM, h_mm * RL_MM))
     c.setTitle(f"{project.project_info.project_name} - Structural Plans")
-    c.setAuthor(project.reporting.signatory.engineer_name or "Structural AI Office")
+    c.setAuthor(resolved_sig["engineer_name"] or "Structural AI Office")
 
     msp_entities = list(doc.modelspace())
 
@@ -1855,12 +1882,13 @@ def render_sheet_svg(
     project: ProjectState,
     sheet_no: str | None = None,
     options: CadDrawingOptions | None = None,
+    profile: EngineerProfile | None = None,
 ) -> dict:
     """
     Render a selected sheet from the generated ezdxf document into layer-grouped SVG
     (<g data-layer="...">) for instant interactive browser CAD preview.
     """
-    doc, state, sheet_bounds = build_cad_document(project, options=options)
+    doc, state, sheet_bounds = build_cad_document(project, options=options, profile=profile)
     target_no = sheet_no or state.sheets[0].sheet_no
     if target_no not in sheet_bounds:
         target_no = state.sheets[0].sheet_no
