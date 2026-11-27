@@ -235,7 +235,8 @@ def test_manual_member_support_approval_and_staad_export(isolated_env, tmp_path:
     assert gen.status_code == 200, gen.text
     sm = gen.json()
     assert len(sm["nodes"]) == 12
-    assert len(sm["slab_panels"]) == 2  # 2F and ROOF bays
+    assert len(sm["slab_panels"]) == 1  # 2F only; ROOF framing is not an RC slab by default
+    assert sm["slab_panels"][0]["floor_level"] == "2F"
 
     # 2. Manually add a diagonal/secondary beam on 2F between opposite corners, then delete it
     f2_nodes = [n for n in sm["nodes"] if n["floor_level"] == "2F"]

@@ -279,9 +279,22 @@ def _side_is_connected(
     return True
 
 
+def _is_roof_deck_level_id(level_id: str) -> bool:
+    u = (level_id or "").strip().upper()
+    return "ROOF DECK" in u or "ROOFDECK" in u or u in {"RD", "R-DECK"}
+
+
 def _is_roof_level_id(level_id: str) -> bool:
     u = (level_id or "").strip().upper()
     return "ROOF" in u or u in {"RB", "RD", "RF"}
+
+
+def _is_roof_framing_level_id(level_id: str) -> bool:
+    """Return True for roof framing levels (ROOF, ROOF_LEVEL, ROOF BEAM, RB, RF) that are not an RC roof deck."""
+    u = (level_id or "").strip().upper()
+    if _is_roof_deck_level_id(u):
+        return False
+    return "ROOF" in u or u in {"RB", "RF", "R"}
 
 
 def is_perimeter_beam_pair(
@@ -603,11 +616,13 @@ def generate_structural_model(
             )
         )
 
-    # 4. Slab Panel Detection (framing levels above base)
+    # 4. Slab Panel Detection (suspended framing levels above base; roof framing excluded unless include_roof_slab=True)
     slab_panels: list[SlabPanel] = []
     if opts.auto_detect_slab_panels:
         for lv_idx, lv in enumerate(levels):
             if lv_idx == 0:
+                continue
+            if not opts.include_roof_slab and _is_roof_framing_level_id(lv.id):
                 continue
             lv_nodes = [n for n in nodes if n.floor_level == lv.id]
             beam_edges = level_beam_edges.get(lv.id, set())

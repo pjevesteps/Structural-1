@@ -370,3 +370,96 @@ def test_staad_export_with_properties_cracked_releases_wrapping_and_legacy_compa
     legacy = ProjectState.model_validate(legacy_raw)
     assert legacy.member_sizing.sections == []
     assert legacy.member_sizing.member_assignments == []
+
+
+def test_roof_framing_bays_excluded_from_rc_slabs_by_default(isolated_env):
+    """
+    Verify:
+      1. Roof-level framing bays (ROOF, ROOF_LEVEL) are NOT generated as RC slab panels or
+         scheduled in Module 04 Slab Panel Thickness Schedule by default (include_roof_slab=False),
+         while suspended floor (2F) slab panels remain intact.
+      2. Explicit opt-in (include_roof_slab=True) generates and schedules ROOF RC slab panels.
+      3. Explicit RC roof deck levels (RD / ROOF DECK) continue to generate and schedule RC slabs by default.
+      4. Legacy saved models that already contain S-ROOF-* in structural_model.slab_panels do not
+         schedule those roof framing bays in Module 04 auto-size unless include_roof_slab=True.
+    """
+    client, _ = isolated_env
+    cols = [
+        {"id": "C1", "grid": "A-1", "x_m": 0.0, "y_m": 0.0, "width_mm": 400.0, "depth_mm": 400.0},
+        {"id": "C2", "grid": "A-2", "x_m": 4.0, "y_m": 0.0, "width_mm": 400.0, "depth_mm": 400.0},
+        {"id": "C3", "grid": "A-3", "x_m": 8.0, "y_m": 0.0, "width_mm": 400.0, "depth_mm": 400.0},
+        {"id": "C4", "grid": "B-1", "x_m": 0.0, "y_m": 4.0, "width_mm": 400.0, "depth_mm": 400.0},
+        {"id": "C5", "grid": "B-2", "x_m": 4.0, "y_m": 4.0, "width_mm": 400.0, "depth_mm": 400.0},
+        {"id": "C6", "grid": "B-3", "x_m": 8.0, "y_m": 4.0, "width_mm": 400.0, "depth_mm": 400.0},
+    ]
+
+    # 1. Default ROOF & ROOF_LEVEL framing -> excluded from RC slabs; 2F intact
+    for pid, roof_id in [("P4-ROOF-DEF", "ROOF"), ("P4-ROOFLVL-DEF", "ROOF_LEVEL")]:
+        payload = {
+            "project_info": _base_project_info(pid),
+            "levels": [
+                {"id": "GF", "elevation_m": 0.0},
+                {"id": "2F", "elevation_m": 3.0},
+                {"id": roof_id, "elevation_m": 6.0},
+            ],
+            "columns": cols,
+        }
+        assert client.post("/api/projects", json=payload).status_code == 200
+        gen = client.post(
+            f"/api/projects/{pid}/geometry/generate",
+            json={"default_support_type": "FIXED", "include_base_tie_beams": True},
+        )
+        assert gen.status_code == 200, gen.text
+        sm = gen.json()
+        # Roof framing beams still exist on roof_id, but zero RC slab panels on roof_id
+        roof_beams = [m for m in sm["members"] if m["floor_level"] == roof_id and m["member_type"] != "column"]
+        assert len(roof_beams) > 0
+        assert len(sm["slab_panels"]) == 2
+        assert all(p["floor_level"] == "2F" for p in sm["slab_panels"])
+        assert not any(p["floor_level"] == roof_id for p in sm["slab_panels"])
+
+        sz = client.post(f"/api/projects/{pid}/sizing/auto-size")
+        assert sz.status_code == 200, sz.text
+        slab_asgns = sz.json()["slab_assignments"]
+        assert len(slab_asgns) == 2
+        assert all(sa["floor_level"] == "2F" for sa in slab_asgns)
+        assert not any(sa["floor_level"] == roof_id for sa in slab_asgns)
+
+    # 2. Explicit opt-in include_roof_slab=True -> ROOF bays ARE generated & scheduled
+    gen_opt = client.post(
+        "/api/projects/P4-ROOF-DEF/geometry/generate",
+        json={"default_support_type": "FIXED", "include_base_tie_beams": True, "include_roof_slab": True},
+    )
+    assert gen_opt.status_code == 200, gen_opt.text
+    assert len(gen_opt.json()["slab_panels"]) == 4
+    assert sum(1 for p in gen_opt.json()["slab_panels"] if p["floor_level"] == "ROOF") == 2
+    sz_opt = client.post("/api/projects/P4-ROOF-DEF/sizing/auto-size")
+    assert sz_opt.status_code == 200, sz_opt.text
+    assert len(sz_opt.json()["slab_assignments"]) == 4
+    assert sum(1 for sa in sz_opt.json()["slab_assignments"] if sa["floor_level"] == "ROOF") == 2
+
+    # 3. Explicit ROOF DECK level -> RC slabs generated & scheduled by default
+    rd_pid = "P4-ROOFDECK-DEF"
+    rd_payload = {
+        "project_info": _base_project_info(rd_pid),
+        "levels": [
+            {"id": "GF", "elevation_m": 0.0},
+            {"id": "2F", "elevation_m": 3.0},
+            {"id": "ROOF DECK", "elevation_m": 6.0},
+        ],
+        "columns": cols,
+    }
+    assert client.post("/api/projects", json=rd_payload).status_code == 200
+    rd_gen = client.post(f"/api/projects/{rd_pid}/geometry/generate")
+    assert rd_gen.status_code == 200, rd_gen.text
+    assert sum(1 for p in rd_gen.json()["slab_panels"] if p["floor_level"] == "ROOF DECK") == 2
+    rd_sz = client.post(f"/api/projects/{rd_pid}/sizing/auto-size")
+    assert rd_sz.status_code == 200, rd_sz.text
+    assert sum(1 for sa in rd_sz.json()["slab_assignments"] if sa["floor_level"] == "ROOF DECK") == 2
+
+    # 4. Legacy model already containing S-ROOF-1 with include_roof_slab=False -> auto_size_members excludes it
+    proj_legacy = ProjectState.model_validate(client.get("/api/projects/P4-ROOF-DEF").json())
+    proj_legacy.structural_model.options.include_roof_slab = False
+    sz_legacy = auto_size_members(proj_legacy)
+    assert all(sa.floor_level == "2F" for sa in sz_legacy.slab_assignments)
+    assert len(sz_legacy.slab_assignments) == 2

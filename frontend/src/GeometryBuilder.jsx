@@ -57,6 +57,7 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
   const [supportType, setSupportType] = useState("FIXED");
   const [includeBaseTies, setIncludeBaseTies] = useState(true);
   const [skipOpenings, setSkipOpenings] = useState(true);
+  const [includeRoofSlab, setIncludeRoofSlab] = useState(false);
   const [snapTol, setSnapTol] = useState("0.05");
   const [footingDepth, setFootingDepth] = useState("0.00");
 
@@ -94,6 +95,7 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
         setSupportType(sm.options.default_support_type || "FIXED");
         setIncludeBaseTies(sm.options.include_base_tie_beams ?? true);
         setSkipOpenings(sm.options.skip_beams_through_openings ?? true);
+        setIncludeRoofSlab(sm.options.include_roof_slab ?? false);
         setSnapTol(String(sm.options.snap_tolerance_m ?? 0.05));
         setFootingDepth(Number(sm.options.footing_depth_m ?? 0).toFixed(2));
       }
@@ -238,6 +240,7 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
           include_base_tie_beams: includeBaseTies,
           skip_beams_through_openings: skipOpenings,
           auto_detect_slab_panels: true,
+          include_roof_slab: includeRoofSlab,
           footing_depth_m: Math.min(6.0, Math.max(0.0, parseFloat(footingDepth) || 0.0)),
         }),
       });
@@ -963,6 +966,17 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
               onChange={(e) => setSkipOpenings(e.target.checked)}
             />
             <span>Skip Beams Through Openings</span>
+          </label>
+          <label
+            className="pdf-check-chip"
+            title="Schedule roof framing bays (ROOF / ROOF_LEVEL) as RC slab panels; leave unchecked for non-slab roof framing"
+          >
+            <input
+              type="checkbox"
+              checked={includeRoofSlab}
+              onChange={(e) => setIncludeRoofSlab(e.target.checked)}
+            />
+            <span>Include Roof RC Slab</span>
           </label>
           <label className="pdf-field-chip">
             <span>Snap Tol (m)</span>

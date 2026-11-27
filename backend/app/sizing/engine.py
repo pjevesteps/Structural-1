@@ -10,6 +10,7 @@ from ..models import (
     SizingOptions,
     SlabPropertyAssignment,
 )
+from ..geometry.generator import _is_roof_framing_level_id
 from .validator import validate_member_sizing
 
 COL_COLORS = ("#38bdf8", "#0ea5e9", "#7dd3fc", "#0284c7")
@@ -309,8 +310,11 @@ def auto_size_members(
     member_assignments.sort(key=lambda a: a.member_id)
 
     # --- 3. Slab Panel Preliminary Thickness ---
+    include_roof_slab = bool(getattr(model.options, "include_roof_slab", False))
     raw_slabs: list[tuple[str, str, float, float, bool]] = []
     for panel in model.slab_panels:
+        if not include_roof_slab and _is_roof_framing_level_id(panel.floor_level):
+            continue
         if panel.slab_action == "void":
             raw_slabs.append((panel.panel_id, panel.floor_level, 0.0, 0.0, True))
         elif panel.slab_action == "one_way":
