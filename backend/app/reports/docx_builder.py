@@ -15,6 +15,13 @@ from ..models import ProjectState
 from ..profile import EngineerProfile, resolve_signatory
 from ..staad import build_staad_text
 from .bom_engine import compute_bom_summary
+from .calc_sheets import (
+    ENGINEERING_DISCLAIMER,
+    build_governing_demand_rows,
+    build_member_calculation_sheets,
+    framing_system_summary,
+    nscp_code_reference_rows,
+)
 
 NAVY_HEX = "1B365D"
 SLATE_HEX = "334155"
@@ -217,12 +224,16 @@ def _add_styled_table(
 def build_calculation_report_docx(
     project: ProjectState,
     profile: EngineerProfile | None = None,
+    include_bom: bool | None = None,
 ) -> bytes:
     """Build permit-ready Structural Calculation Report & BOM as DOCX bytes."""
     rep = project.reporting
-    bom = rep.bom if rep.bom is not None else compute_bom_summary(project, rep.bom_params)
-    sig = resolve_signatory(rep.signatory, profile)
     opts = rep.options
+    should_include_bom = opts.include_bom_cost_estimate if include_bom is None else bool(include_bom)
+    bom = None
+    if should_include_bom:
+        bom = rep.bom if rep.bom is not None else compute_bom_summary(project, rep.bom_params)
+    sig = resolve_signatory(rep.signatory, profile)
     pi = project.project_info
     sm = project.structural_model
     ms = project.member_sizing
@@ -338,7 +349,9 @@ def build_calculation_report_docx(
     )
     soil = project.soil_investigation
     dw_str = f"{soil.water_table_depth_m:.2f} m below grade" if soil.water_table_depth_m is not None else "Not encountered"
+    framing_lbl, ductility_clause = framing_system_summary(project)
     criteria_rows = [
+        ["Framing System & Ductility (R)", f"{framing_lbl} ({ductility_clause})"],
         ["Concrete Compressive Strength (f'c)", f"{mat.fc_mpa:.1f} MPa"],
         ["Concrete Elastic Modulus (Ec = 4700√f'c)", f"{mat.ec_kn_m2:,.1f} kN/m² ({mat.ec_kn_m2 / 1000.0:,.1f} MPa)"],
         ["Unit Weight of Reinforced Concrete", f"{mat.density_kn_m3:.2f} kN/m³"],
@@ -351,6 +364,9 @@ def build_calculation_report_docx(
         ["Geotechnical Report Reference (NBCP 302-5)", soil.report_ref or sig["geotech_report_ref"]],
     ]
     _add_styled_table(doc, ["Design Parameter", "Specified Value"], criteria_rows, font_size=8.5)
+
+    _add_subheading(doc, "1.2 Governing NSCP 2015 & NBCP Code References")
+    _add_styled_table(doc, ["Code Clause", "Scope of Application"], nscp_code_reference_rows(), font_size=8.2)
 
     # =========================================================================
     # SECTION 2: STRUCTURAL GEOMETRY & MEMBER CATALOG
@@ -399,6 +415,7 @@ def build_calculation_report_docx(
     # =========================================================================
     # SECTION 3: NSCP 2015 GRAVITY, SEISMIC & WIND LOADS
     # =========================================================================
+    doc.add_page_break()
     _add_section_heading(doc, "Section 3 · NSCP 2015 Gravity, Seismic (Sec. 208) & Wind (Sec. 207) Loads")
 
     if lg.floor_loads:
@@ -502,9 +519,10 @@ def build_calculation_report_docx(
         _add_styled_table(doc, ["ID", "Basis", "Combination Name", "Load Factors"], combo_rows, font_size=7.6)
 
     # =========================================================================
-    # SECTION 4: ANALYSIS VERIFICATION, DRIFT & SUPPORT REACTIONS
+    # SECTION 4: ANALYSIS VERIFICATION, GOVERNING DEMANDS, DRIFT & REACTIONS
     # =========================================================================
-    _add_section_heading(doc, "Section 4 · Structural Analysis, Drift Verification & Support Reactions")
+    doc.add_page_break()
+    _add_section_heading(doc, "Section 4 · Structural Response, Governing Demands, Drift & Support Reactions")
     src_label = (
         f"STAAD.Pro Analysis Output ({ad.source_filename})"
         if ad.source == "staad_anl"
@@ -536,8 +554,20 @@ def build_calculation_report_docx(
             font_size=7.8,
         )
 
+    gov_demands = build_governing_demand_rows(project)
+    if gov_demands:
+        _add_subheading(doc, "4.2 Governing Member & Support Demand Envelopes")
+        _add_styled_table(
+            doc,
+            ["Response Quantity", "Governing Element", "Peak Demand", "Governing Combo", "Summary"],
+            gov_demands,
+            right_align_cols={2},
+            font_size=7.8,
+        )
+
     if ad.support_reactions:
-        _add_subheading(doc, "4.2 Foundation Support Reaction Envelopes (ASD & LRFD)")
+        _add_subheading(doc, "4.3 Foundation Support Reaction Envelopes (ASD & LRFD)")
+        rx_list = ad.support_reactions[:40]
         rxn_rows = [
             [
                 f"N{r.node_id}",
@@ -549,15 +579,21 @@ def build_calculation_report_docx(
                 f"{max(r.max_lrfd_mux_knm, r.max_lrfd_muz_knm):.1f}",
                 f"{r.max_lrfd_v_kn:.1f}",
             ]
-            for r in ad.support_reactions
+            for r in rx_list
         ]
         _add_styled_table(
             doc,
-            ["Node", "Grid", "Base Level", "ASD Fy Max (kN)", "ASD Fy Min (kN)", "LRFD Pu (kN)", "LRFD Mu (kNm)", "LRFD V (kN)"],
+            ["Node", "Grid", "Base Level", "ASD Fy Max (kN)", "ASD Fy Min (kN)", "LRFD Pu (kN)", "LRFD Mu (kN·m)", "LRFD V (kN)"],
             rxn_rows,
             right_align_cols={3, 4, 5, 6, 7},
             font_size=7.8,
         )
+        if len(ad.support_reactions) > 40:
+            _add_body(
+                doc,
+                f"Showing first 40 of {len(ad.support_reactions)} foundation supports; full envelopes are stored in the project file.",
+                italic=True,
+            )
 
     if ad.pinned_design_views:
         _add_subheading(doc, "4.3 Visual Design Verification & Utilization Maps")
@@ -590,6 +626,7 @@ def build_calculation_report_docx(
     # =========================================================================
     # SECTION 5: RC MEMBER DESIGN SCHEDULES
     # =========================================================================
+    doc.add_page_break()
     _add_section_heading(doc, "Section 5 · Reinforced Concrete Member Design Schedules")
     beam_pass = sum(1 for b in ad.beam_designs if b.status == "PASS")
     col_pass = sum(1 for c in ad.column_designs if c.status == "PASS")
@@ -813,7 +850,7 @@ def build_calculation_report_docx(
                         s.long_span_pos,
                         s.status,
                     ]
-                    for s in ad.slab_designs[:24]
+                    for s in ad.slab_designs
                 ]
                 _add_styled_table(
                     doc,
@@ -890,9 +927,35 @@ def build_calculation_report_docx(
                 )
 
     # =========================================================================
+    # SECTION 5B: PER-MEMBER DESIGN CALCULATION SHEETS (NSCP 2015)
+    # =========================================================================
+    calc_sheets = build_member_calculation_sheets(project)
+    if calc_sheets["beam_sheets"] or calc_sheets["col_sheets"] or calc_sheets["ftg_sheets"]:
+        doc.add_page_break()
+        _add_section_heading(doc, "Section 5B · Per-Member Design Calculation Sheets (NSCP 2015)")
+        _add_body(
+            doc,
+            "Identical member section tags are grouped below, presenting the governing (maximum DCR) "
+            "member verification per section group with factored demands, design capacities, DCR, "
+            "longitudinal/transverse reinforcement, and governing NSCP 2015 clauses.",
+        )
+        for sheet_group in (
+            calc_sheets["beam_sheets"] + calc_sheets["col_sheets"] + calc_sheets["ftg_sheets"]
+        ):
+            _add_subheading(doc, sheet_group["title"])
+            _add_styled_table(
+                doc,
+                ["Design Check", "Demand, Capacity & Reinforcement Verification", "Code Ref."],
+                sheet_group["rows"],
+                font_size=7.6,
+            )
+        _add_body(doc, ENGINEERING_DISCLAIMER, italic=True)
+
+    # =========================================================================
     # SECTION 6: BILL OF MATERIALS & COST ESTIMATE
     # =========================================================================
-    if opts.include_bom_cost_estimate:
+    if should_include_bom and bom is not None:
+        doc.add_page_break()
         _add_section_heading(doc, "Section 6 · Structural Bill of Materials & Cost Estimate (NBCP Sec. 302-5f)")
         _add_body(
             doc,
@@ -1012,6 +1075,7 @@ def build_calculation_report_docx(
     # =========================================================================
     # SECTION 7: PROFESSIONAL CERTIFICATION & DRY SEAL BLOCK
     # =========================================================================
+    doc.add_page_break()
     _add_section_heading(doc, "Section 7 · Professional Certification & Dry Seal Block (NBCP PD 1096)")
     _add_body(
         doc,

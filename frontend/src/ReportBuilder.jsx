@@ -73,6 +73,7 @@ export default function ReportBuilder({ project, onClose, onUpdated }) {
   const [regionalPresets, setRegionalPresets] = useState([]);
   const [compareRevId, setCompareRevId] = useState("");
   const [revDelta, setRevDelta] = useState(null);
+  const [deliverables, setDeliverables] = useState(null);
 
   async function apiJson(url, opts) {
     const res = await fetch(url, opts);
@@ -87,12 +88,14 @@ export default function ReportBuilder({ project, onClose, onUpdated }) {
     setBusy(true);
     setError("");
     try {
-      const [p, presetRes] = await Promise.all([
+      const [p, presetRes, statusRes] = await Promise.all([
         apiJson(`/api/projects/${pid}`),
         apiJson("/api/reports/cost-presets").catch(() => ({ presets: [] })),
+        apiJson(`/api/projects/${pid}/reports/status`).catch(() => null),
       ]);
       setFullProject(p);
       setRegionalPresets(presetRes.presets || []);
+      if (statusRes) setDeliverables(statusRes);
       if (p.reporting?.signatory) {
         const sig = { ...DEFAULT_SIGNATORY, ...p.reporting.signatory };
         if (!sig.project_address && p.project_info?.location) {
@@ -143,10 +146,12 @@ export default function ReportBuilder({ project, onClose, onUpdated }) {
       sizing?.member_assignments?.length &&
       ad?.generated_at
   );
-  const hasGeneratedReport = Boolean(bom || rep?.generated_at);
+  const srStatus = deliverables?.structural_report?.status || "missing";
+  const bomStatus = deliverables?.bom?.status || (bom ? "ready" : "missing");
+  const hasGeneratedReport = srStatus !== "missing" || Boolean(bom || rep?.generated_at);
 
   useEffect(() => {
-    if (activeTab !== "preview" || previewMode !== "pdf" || !hasPrereqs || !hasGeneratedReport) {
+    if (activeTab !== "preview" || previewMode !== "pdf" || !hasPrereqs || srStatus === "missing") {
       return;
     }
     let cancelled = false;
@@ -155,7 +160,7 @@ export default function ReportBuilder({ project, onClose, onUpdated }) {
       setPdfPreviewLoading(true);
       setPdfPreviewError("");
       try {
-        const res = await fetch(`/api/projects/${pid}/reports/download/pdf`);
+        const res = await fetch(`/api/projects/${pid}/reports/structural-report/preview/pdf`);
         if (!res.ok) {
           const body = await res.json().catch(() => ({}));
           throw new Error(body.detail || `Failed to load PDF preview (${res.status})`);
@@ -180,7 +185,7 @@ export default function ReportBuilder({ project, onClose, onUpdated }) {
     return () => {
       cancelled = true;
     };
-  }, [activeTab, previewMode, hasPrereqs, hasGeneratedReport, pid, pdfRefreshNonce]);
+  }, [activeTab, previewMode, hasPrereqs, srStatus, pid, pdfRefreshNonce]);
 
   useEffect(() => {
     return () => {
@@ -242,6 +247,8 @@ export default function ReportBuilder({ project, onClose, onUpdated }) {
         body: JSON.stringify(payload),
       });
       setFullProject((prev) => (prev ? { ...prev, reporting: updated } : prev));
+      const freshStatus = await apiJson(`/api/projects/${pid}/reports/status`).catch(() => null);
+      if (freshStatus) setDeliverables(freshStatus);
       setPdfRefreshNonce((n) => n + 1);
       setNotice(
         `Calculation report & BOM generated: ${fmtNum(updated.bom?.total_concrete_gross_m3, 2)} m³ concrete, ` +
@@ -254,6 +261,86 @@ export default function ReportBuilder({ project, onClose, onUpdated }) {
         setRevDelta(delta);
       }
       if (switchTab) setActiveTab(switchTab);
+      if (onUpdated) await onUpdated();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleGenerateStructuralReport(switchToPreview = false) {
+    setBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      const res = await apiJson(`/api/projects/${pid}/reports/structural-report/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ signatory, options }),
+      });
+      if (res.reporting) {
+        setFullProject((prev) => (prev ? { ...prev, reporting: res.reporting } : prev));
+      }
+      if (res.deliverables) setDeliverables(res.deliverables);
+      setPdfRefreshNonce((n) => n + 1);
+      setNotice("Structural Analysis & Design Report (DOCX & PDF) generated independently without altering BOM.");
+      if (switchToPreview) {
+        setPreviewMode("pdf");
+        setActiveTab("preview");
+      }
+      if (onUpdated) await onUpdated();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleGenerateBomOnly(switchToBom = false, overrideBomParams = null) {
+    setBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      const activeBp = overrideBomParams || bomParams;
+      const res = await apiJson(`/api/projects/${pid}/reports/bom/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          signatory,
+          bom_params: {
+            ...activeBp,
+            commercial_bar_length_m: Number(activeBp.commercial_bar_length_m),
+            labor_concrete_pct:
+              activeBp.labor_concrete_pct === "" || activeBp.labor_concrete_pct == null
+                ? null
+                : Number(activeBp.labor_concrete_pct),
+            labor_rebar_pct:
+              activeBp.labor_rebar_pct === "" || activeBp.labor_rebar_pct == null
+                ? null
+                : Number(activeBp.labor_rebar_pct),
+            labor_formwork_pct:
+              activeBp.labor_formwork_pct === "" || activeBp.labor_formwork_pct == null
+                ? null
+                : Number(activeBp.labor_formwork_pct),
+          },
+        }),
+      });
+      if (res.reporting) {
+        setFullProject((prev) => (prev ? { ...prev, reporting: res.reporting } : prev));
+      }
+      if (res.deliverables) setDeliverables(res.deliverables);
+      setNotice(
+        `BOM & Cost Estimate generated independently: ${fmtNum(res.bom?.total_concrete_gross_m3, 2)} m³ concrete, ` +
+          `${fmtNum(res.bom?.total_rebar_kg, 0)} kg rebar, Est. ${fmtPhp(res.bom?.grand_total_cost_php)}.`
+      );
+      if (compareRevId) {
+        const delta = await apiJson(
+          `/api/projects/${pid}/revisions/compare?base_rev=${encodeURIComponent(compareRevId)}`
+        ).catch(() => null);
+        setRevDelta(delta);
+      }
+      if (switchToBom) setActiveTab("bom");
       if (onUpdated) await onUpdated();
     } catch (err) {
       setError(err.message);
@@ -287,7 +374,7 @@ export default function ReportBuilder({ project, onClose, onUpdated }) {
     };
     setBomParams(next);
     if (hasPrereqs) {
-      handleGenerate(null, next);
+      handleGenerateBomOnly(false, next);
     }
   }
 
@@ -418,6 +505,159 @@ export default function ReportBuilder({ project, onClose, onUpdated }) {
           before generating Calculation Reports &amp; BOM.
         </div>
       )}
+
+      {/* Independent Deliverable Status & Controls */}
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))",
+          gap: "12px",
+          marginBottom: "12px",
+        }}
+      >
+        <div className="geom-panel" style={{ padding: "12px 14px" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px", marginBottom: "8px" }}>
+            <div>
+              <strong>Structural Analysis &amp; Design Report</strong>
+              <div style={{ fontSize: "11px", opacity: 0.75 }}>
+                NSCP 2015 Submittal (DOCX &amp; PDF) ·{" "}
+                {deliverables?.structural_report?.generated_at
+                  ? `Generated ${new Date(deliverables.structural_report.generated_at).toLocaleString()}`
+                  : "Not generated yet"}
+              </div>
+            </div>
+            <span
+              className={`report-paper-badge ${
+                srStatus === "ready" ? "pass" : srStatus === "stale" ? "fail" : ""
+              }`}
+              style={{
+                textTransform: "uppercase",
+                fontSize: "11px",
+                padding: "3px 8px",
+                borderRadius: "999px",
+                background:
+                  srStatus === "ready"
+                    ? "#065f46"
+                    : srStatus === "stale"
+                    ? "#92400e"
+                    : "#334155",
+                color: "#fff",
+              }}
+            >
+              {srStatus === "stale" ? "STALE" : srStatus.toUpperCase()}
+            </span>
+          </div>
+          {srStatus === "stale" && (
+            <div style={{ fontSize: "11px", color: "#fbbf24", marginBottom: "8px" }}>
+              Inputs, design results, or Engineer Profile changed since last generation. You can still download the existing artifact or regenerate to refresh.
+            </div>
+          )}
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
+            <button
+              type="button"
+              disabled={busy || !hasPrereqs}
+              onClick={() => handleGenerateStructuralReport(false)}
+            >
+              {srStatus === "missing" ? "Generate Structural Report" : "Regenerate Structural Report"}
+            </button>
+            <button
+              type="button"
+              className="secondary"
+              disabled={busy || srStatus === "missing"}
+              onClick={() => {
+                setPreviewMode("pdf");
+                setActiveTab("preview");
+              }}
+            >
+              Preview PDF
+            </button>
+            <button
+              type="button"
+              className="secondary"
+              disabled={busy || srStatus === "missing"}
+              onClick={() =>
+                triggerDownload(
+                  "structural-report/download/docx",
+                  `${project.project_id}_Structural_Calculation_Report.docx`
+                )
+              }
+            >
+              Report DOCX
+            </button>
+            <button
+              type="button"
+              className="secondary"
+              disabled={busy || srStatus === "missing"}
+              onClick={() =>
+                triggerDownload(
+                  "structural-report/download/pdf",
+                  `${project.project_id}_Structural_Calculation_Report.pdf`
+                )
+              }
+            >
+              Report PDF
+            </button>
+          </div>
+        </div>
+
+        <div className="geom-panel" style={{ padding: "12px 14px" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "8px", marginBottom: "8px" }}>
+            <div>
+              <strong>Bill of Materials &amp; Cost Estimate</strong>
+              <div style={{ fontSize: "11px", opacity: 0.75 }}>
+                Concrete, PNS 49 Rebar, Formwork &amp; PHP Cost (CSV) ·{" "}
+                {deliverables?.bom?.generated_at
+                  ? `Generated ${new Date(deliverables.bom.generated_at).toLocaleString()}`
+                  : "Not generated yet"}
+              </div>
+            </div>
+            <span
+              className={`report-paper-badge ${
+                bomStatus === "ready" ? "pass" : bomStatus === "stale" ? "fail" : ""
+              }`}
+              style={{
+                textTransform: "uppercase",
+                fontSize: "11px",
+                padding: "3px 8px",
+                borderRadius: "999px",
+                background:
+                  bomStatus === "ready"
+                    ? "#065f46"
+                    : bomStatus === "stale"
+                    ? "#92400e"
+                    : "#334155",
+                color: "#fff",
+              }}
+            >
+              {bomStatus === "stale" ? "STALE" : bomStatus.toUpperCase()}
+            </span>
+          </div>
+          {bomStatus === "stale" && (
+            <div style={{ fontSize: "11px", color: "#fbbf24", marginBottom: "8px" }}>
+              Sizing, BOM rates, or Engineer Profile changed since last generation. Existing CSV remains downloadable; regenerate to update.
+            </div>
+          )}
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "8px" }}>
+            <button
+              type="button"
+              disabled={busy || !hasPrereqs}
+              onClick={() => handleGenerateBomOnly(true)}
+            >
+              {bomStatus === "missing" ? "Generate BOM & Cost Estimate" : "Regenerate BOM"}
+            </button>
+            <button
+              type="button"
+              className="secondary"
+              disabled={busy || bomStatus === "missing"}
+              onClick={() =>
+                triggerDownload("bom/download/csv", `${project.project_id}_Structural_BOM.csv`)
+              }
+            >
+              BOM CSV
+            </button>
+          </div>
+        </div>
+      </div>
 
       {/* Workspace Grid */}
       <div className="geom-workspace">
@@ -822,7 +1062,7 @@ export default function ReportBuilder({ project, onClose, onUpdated }) {
                   />
                   <span>Include CHB</span>
                 </label>
-                <button disabled={busy || !hasPrereqs} onClick={() => handleGenerate()}>
+                <button disabled={busy || !hasPrereqs} onClick={() => handleGenerateBomOnly(false)}>
                   Recalculate BOM
                 </button>
               </div>
@@ -1111,7 +1351,7 @@ export default function ReportBuilder({ project, onClose, onUpdated }) {
                     Executive Summary
                   </button>
                 </div>
-                {previewMode === "pdf" && hasPrereqs && hasGeneratedReport && (
+                {previewMode === "pdf" && hasPrereqs && srStatus !== "missing" && (
                   <div className="loads-presets-row">
                     <button
                       type="button"
@@ -1150,7 +1390,7 @@ export default function ReportBuilder({ project, onClose, onUpdated }) {
                       <div className="loads-empty" style={{ display: "flex", flexDirection: "column", gap: "10px", alignItems: "center" }}>
                         <span>
                           Complete Modules <strong>03 (3D Geometry)</strong>, <strong>04 (Member Sizing)</strong>, and{" "}
-                          <strong>06 (Analysis &amp; RC Design)</strong>, then click <strong>Generate Report &amp; BOM</strong>{" "}
+                          <strong>06 (Analysis &amp; RC Design)</strong>, then click <strong>Generate Structural Report</strong>{" "}
                           to preview the full multi-page OBO Calculation Report PDF here.
                         </span>
                         <button type="button" className="secondary" onClick={() => setPreviewMode("summary")}>
@@ -1158,14 +1398,14 @@ export default function ReportBuilder({ project, onClose, onUpdated }) {
                         </button>
                       </div>
                     </div>
-                  ) : !hasGeneratedReport ? (
+                  ) : srStatus === "missing" ? (
                     <div className="geom-panel">
                       <div className="loads-empty" style={{ display: "flex", flexDirection: "column", gap: "10px", alignItems: "center" }}>
                         <span>
-                          Generate the report first to render the full multi-page NBCP Sec. 302-5 OBO PDF preview.
+                          The Structural Report PDF has not been generated yet. Generate it independently without affecting your BOM.
                         </span>
-                        <button type="button" disabled={busy} onClick={() => handleGenerate("preview")}>
-                          {busy ? "Generating..." : "Generate Report & BOM"}
+                        <button type="button" disabled={busy} onClick={() => handleGenerateStructuralReport(true)}>
+                          {busy ? "Generating..." : "Generate Structural Report"}
                         </button>
                       </div>
                     </div>
