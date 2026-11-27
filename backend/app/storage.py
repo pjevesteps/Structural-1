@@ -7,19 +7,50 @@ import shutil
 import stat
 from .models import ProjectState
 
-_ENV_DATA_ROOT = os.environ.get("STRUCTURAL_AI_DATA_DIR", "").strip()
-_DEFAULT_DATA_ROOT = (
-    Path(_ENV_DATA_ROOT).resolve()
-    if _ENV_DATA_ROOT
-    else Path(__file__).resolve().parents[2] / "data"
-)
+_DEFAULT_DATA_ROOT = Path(__file__).resolve().parents[2] / "data"
+_DEFAULT_PROJECTS_DIR = _DEFAULT_DATA_ROOT / "projects"
 
-DATA_DIR = _DEFAULT_DATA_ROOT / "projects"
-DATA_DIR.mkdir(parents=True, exist_ok=True)
+# Kept as module attribute for backward compatibility with tests that monkeypatch storage.DATA_DIR
+DATA_DIR = _DEFAULT_PROJECTS_DIR
+
+
+def get_data_dir() -> Path:
+    """
+    Resolve the persistent data root dynamically at runtime:
+      1. Honor monkeypatched storage.DATA_DIR (legacy test isolation).
+      2. Otherwise read DATA_DIR (Railway volume) or STRUCTURAL_AI_DATA_DIR env var.
+      3. Default to <repo>/data.
+    """
+    if DATA_DIR != _DEFAULT_PROJECTS_DIR:
+        return Path(DATA_DIR).resolve().parent
+    env_val = (os.getenv("DATA_DIR") or os.getenv("STRUCTURAL_AI_DATA_DIR") or "").strip()
+    if env_val:
+        return Path(env_val).resolve()
+    return _DEFAULT_DATA_ROOT.resolve()
+
+
+def get_projects_dir() -> Path:
+    if DATA_DIR != _DEFAULT_PROJECTS_DIR:
+        p = Path(DATA_DIR).resolve()
+    else:
+        p = get_data_dir() / "projects"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def ensure_data_dirs() -> Path:
+    """Create persistent volume root and required subdirectories on startup or before writes."""
+    root = get_data_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    get_projects_dir().mkdir(parents=True, exist_ok=True)
+    (root / "imports").mkdir(parents=True, exist_ok=True)
+    (root / "exports").mkdir(parents=True, exist_ok=True)
+    (root / "revisions").mkdir(parents=True, exist_ok=True)
+    return root
 
 
 def get_exports_dir() -> Path:
-    exports_dir = DATA_DIR.parent / "exports"
+    exports_dir = get_data_dir() / "exports"
     exports_dir.mkdir(parents=True, exist_ok=True)
     return exports_dir
 
@@ -41,8 +72,7 @@ def validate_project_id(project_id: str) -> str:
 
 def project_path(project_id: str) -> Path:
     safe = validate_project_id(project_id)
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    base = DATA_DIR.resolve()
+    base = get_projects_dir().resolve()
     target = (base / f"{safe}.json").resolve()
     if not target.is_relative_to(base):
         raise ValueError("Project path escapes storage directory.")
@@ -81,9 +111,10 @@ def _derive_stage(phases_done: dict[str, bool]) -> tuple[str, str]:
 
 def list_projects():
     items = []
-    if not DATA_DIR.exists():
+    projects_dir = get_projects_dir()
+    if not projects_dir.exists():
         return items
-    for path in DATA_DIR.glob("*.json"):
+    for path in projects_dir.glob("*.json"):
         try:
             mtime = path.stat().st_mtime
             updated_at = datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()
@@ -159,8 +190,8 @@ def delete_project(project_id: str) -> dict:
     Path.resolve().is_relative_to(...) confinement checks.
     """
     safe = validate_project_id(project_id)
-    projects_base = DATA_DIR.resolve()
-    data_root = DATA_DIR.parent.resolve()
+    projects_base = get_projects_dir().resolve()
+    data_root = get_data_dir().resolve()
 
     proj_file = (projects_base / f"{safe}.json").resolve()
     if not proj_file.is_relative_to(projects_base):

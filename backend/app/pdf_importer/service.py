@@ -73,7 +73,7 @@ def _utc_now() -> str:
 
 
 def get_imports_root() -> Path:
-    root = storage.DATA_DIR.parent / "imports"
+    root = storage.get_data_dir() / "imports"
     root.mkdir(parents=True, exist_ok=True)
     return root
 
