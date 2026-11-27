@@ -18,6 +18,7 @@ SheetType = Literal[
 OpeningCategory = Literal["stairwell", "airwell", "shaft_other"]
 RegionType = Literal["plan", "elevation"]
 CadLayerCategory = Literal["structural", "grid", "opening", "architectural", "annotation", "other"]
+BeamMemberType = Literal["primary_beam", "secondary_beam", "tie_beam", "trimmer_beam"]
 DetectionMethod = Literal["auto", "vector", "raster", "vlm"]
 CandidateSource = Literal["vector", "raster", "manual", "vlm", "cad"]
 ColumnFillMode = Literal["shaded_or_hatched", "gray_shaded_only", "any_filled"]
@@ -200,6 +201,32 @@ class ColumnCandidate(BaseModel):
     notes: str = ""
 
 
+class BeamCandidate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: str
+    page_number: int = Field(ge=1)
+    region_id: str | None = None
+    beam_id: str = ""
+    grid_ref: str = ""
+    member_type: BeamMemberType = "primary_beam"
+    x1_px: float
+    y1_px: float
+    x2_px: float
+    y2_px: float
+    x1_m: float | None = None
+    y1_m: float | None = None
+    x2_m: float | None = None
+    y2_m: float | None = None
+    angle_deg: float = 0.0
+    length_m: float | None = None
+    source: CandidateSource = "vector"
+    confidence: float = Field(ge=0.0, le=1.0, default=0.75)
+    status: ReviewStatus = ReviewStatus.PENDING
+    engineer_approved: bool = False
+    transferred: bool = False
+    notes: str = ""
+
+
 class DetectedLevel(BaseModel):
     model_config = ConfigDict(extra="forbid")
     level_id: str
@@ -306,6 +333,7 @@ class ExtractionOptions(BaseModel):
     require_grid_label: bool = True
     detect_grids: bool = True
     detect_columns: bool = True
+    detect_diagonal_beams: bool = True
     column_fill_mode: ColumnFillMode = "shaded_or_hatched"
     min_column_size_m: float = Field(default=0.18, gt=0.0, le=5.0)
     max_column_size_m: float = Field(default=1.10, gt=0.0, le=10.0)
@@ -331,6 +359,7 @@ class ExtractRequest(BaseModel):
     require_grid_label: bool | None = None
     detect_grids: bool | None = None
     detect_columns: bool | None = None
+    detect_diagonal_beams: bool | None = None
     column_fill_mode: ColumnFillMode | None = None
     min_column_size_m: float | None = Field(default=None, gt=0.0, le=5.0)
     max_column_size_m: float | None = Field(default=None, gt=0.0, le=10.0)
@@ -352,6 +381,7 @@ class ExtractRequest(BaseModel):
             "require_grid_label",
             "detect_grids",
             "detect_columns",
+            "detect_diagonal_beams",
             "column_fill_mode",
             "min_column_size_m",
             "max_column_size_m",
@@ -411,7 +441,66 @@ class CandidateReviewUpdate(BaseModel):
     grid: str | None = None
     width_mm: float | None = Field(default=None, gt=0)
     depth_mm: float | None = Field(default=None, gt=0)
+    x_px: float | None = None
+    y_px: float | None = None
+    coord_px: float | None = None
+    x1_px: float | None = None
+    y1_px: float | None = None
+    x2_px: float | None = None
+    y2_px: float | None = None
+    beam_id: str | None = None
+    member_type: BeamMemberType | None = None
     notes: str | None = None
+
+
+class ManualBeamRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    page_number: int = Field(default=1, ge=1)
+    region_id: str | None = None
+    x1_px: float
+    y1_px: float
+    x2_px: float
+    y2_px: float
+    beam_id: str = ""
+    member_type: BeamMemberType = "primary_beam"
+    status: ReviewStatus = ReviewStatus.APPROVED
+    notes: str = ""
+
+
+class SnapAndCleanRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    page_number: int = Field(default=1, ge=1)
+    region_id: str | None = None
+    snap_tolerance_mm: float = Field(default=120.0, gt=0.0, le=2000.0)
+    merge_grid_tolerance_mm: float = Field(default=80.0, gt=0.0, le=2000.0)
+    merge_column_tolerance_mm: float = Field(default=100.0, gt=0.0, le=2000.0)
+    snap_columns: bool = True
+    merge_duplicates: bool = True
+
+
+class DiagnosticIssue(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    severity: Literal["warning", "error", "info"]
+    code: str
+    message: str
+    candidate_ids: list[str] = Field(default_factory=list)
+
+
+class PreflightDiagnosticsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    doc_id: str
+    page_number: int
+    x_grid_count: int = 0
+    y_grid_count: int = 0
+    column_count: int = 0
+    approved_column_count: int = 0
+    diagonal_beam_count: int = 0
+    approved_diagonal_beam_count: int = 0
+    footprint_x_m: float | None = None
+    footprint_y_m: float | None = None
+    min_bay_m: float | None = None
+    max_bay_m: float | None = None
+    issues: list[DiagnosticIssue] = Field(default_factory=list)
 
 
 class BulkReviewRequest(BaseModel):
@@ -491,6 +580,7 @@ class ImportDocumentState(BaseModel):
     calibrations: dict[str, ScaleCalibration] = Field(default_factory=dict)
     grid_candidates: list[GridCandidate] = Field(default_factory=list)
     column_candidates: list[ColumnCandidate] = Field(default_factory=list)
+    beam_candidates: list[BeamCandidate] = Field(default_factory=list)
     detected_levels: list[DetectedLevel] = Field(default_factory=list)
     openings: list[DetectedOpening] = Field(default_factory=list)
     transfers: list[TransferRecord] = Field(default_factory=list)

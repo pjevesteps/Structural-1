@@ -19,15 +19,18 @@ from .schemas import (
     LevelExtractionResponse,
     LevelUpdateRequest,
     LockMasterGridRequest,
+    ManualBeamRequest,
     ManualColumnRequest,
     ManualGridRequest,
     ManualGridTraceRequest,
     OpeningCreateRequest,
     PageUpdateRequest,
+    PreflightDiagnosticsResponse,
     QuickUnitScaleRequest,
     RegionCreateRequest,
     RegionUpdateRequest,
     ScaleCalibrationRequest,
+    SnapAndCleanRequest,
     StampMasterGridRequest,
     TransferLevelsRequest,
     TransferLevelsResponse,
@@ -427,6 +430,44 @@ def add_manual_grid_candidate(
 ):
     try:
         return service.add_manual_grid(project_id, doc_id, payload)
+    except Exception as exc:
+        raise _handle_error(exc)
+
+
+@router.post("/{doc_id}/candidates/beams", response_model=ImportDocumentState)
+def add_manual_beam_candidate(
+    project_id: str,
+    doc_id: str,
+    payload: ManualBeamRequest,
+):
+    try:
+        return service.add_manual_beam(project_id, doc_id, payload)
+    except Exception as exc:
+        raise _handle_error(exc)
+
+
+@router.post("/{doc_id}/snap-and-clean", response_model=ImportDocumentState)
+def snap_and_clean_candidates(
+    project_id: str,
+    doc_id: str,
+    payload: SnapAndCleanRequest | None = Body(default=None),
+):
+    try:
+        req = payload if payload is not None else SnapAndCleanRequest()
+        return service.snap_and_clean(project_id, doc_id, req)
+    except Exception as exc:
+        raise _handle_error(exc)
+
+
+@router.get("/{doc_id}/pages/{page_number}/diagnostics", response_model=PreflightDiagnosticsResponse)
+def get_page_preflight_diagnostics(
+    project_id: str,
+    doc_id: str,
+    page_number: int,
+    region_id: str | None = Query(default=None),
+):
+    try:
+        return service.get_preflight_diagnostics(project_id, doc_id, page_number, region_id=region_id)
     except Exception as exc:
         raise _handle_error(exc)
 

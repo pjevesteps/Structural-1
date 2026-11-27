@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import math
 from math import hypot
 from pathlib import Path
@@ -11,8 +11,10 @@ import pymupdf
 
 from .inspector import px_to_plan_m
 from .schemas import (
+    BeamCandidate,
     ColumnCandidate,
     DetectedLevel,
+    DetectedOpening,
     DetectionMethod,
     ExtractionOptions,
     GridCandidate,
@@ -102,6 +104,7 @@ class DetectionOutput:
     method_used: str
     grids: list[GridCandidate]
     columns: list[ColumnCandidate]
+    beams: list[BeamCandidate] = field(default_factory=list)
     notice: str | None = None
 
 
@@ -1476,6 +1479,194 @@ def detect_shaded_hatched_columns(
     return columns
 
 
+def _point_in_polygon_px(px: float, py: float, poly: list[PointPx]) -> bool:
+    n = len(poly)
+    if n < 3:
+        return False
+    inside = False
+    j = n - 1
+    for i in range(n):
+        xi, yi = poly[i].x_px, poly[i].y_px
+        xj, yj = poly[j].x_px, poly[j].y_px
+        if ((yi > py) != (yj > py)) and (px < (xj - xi) * (py - yi) / (yj - yi + 1e-12) + xi):
+            inside = not inside
+        j = i
+    return inside
+
+
+def detect_diagonal_beams(
+    pdf_path: Path,
+    page_info: PageInfo,
+    calibration: ScaleCalibration | None = None,
+    region: PlanRegion | None = None,
+    grids: list[GridCandidate] | None = None,
+    columns: list[ColumnCandidate] | None = None,
+    openings: list[DetectedOpening] | None = None,
+    pixels_per_meter: float | None = None,
+    origin_px: PointPx | None = None,
+    exclude_regions: list[PlanRegion] | None = None,
+) -> list[BeamCandidate]:
+    """
+    Detect non-orthogonal (diagonal/skewed) framing beams (10 deg <= angle <= 80 deg) whose
+    endpoints snap cleanly to two distinct ColumnCandidate centers or X x Y grid intersections.
+    Excludes elevation regions, segments inside DetectedOpening polygons (e.g. X-crosses),
+    and short hatch/stair-tread strokes (< 0.8 m or < 24 px).
+    """
+    bounds = _region_bounds(page_info, region)
+    bx0, by0, bx1, by1 = bounds
+    exclude_boxes = _exclude_region_boxes(exclude_regions)
+    region_id = region.region_id if region is not None else None
+
+    effective_ppm: float | None = None
+    if calibration is not None and calibration.confirmed:
+        effective_ppm = calibration.pixels_per_m
+    elif pixels_per_meter is not None and pixels_per_meter > 0:
+        effective_ppm = pixels_per_meter
+    elif calibration is not None:
+        effective_ppm = calibration.pixels_per_m
+
+    effective_origin: PointPx | None = origin_px
+    if effective_origin is None:
+        if region is not None and region.origin_px is not None:
+            effective_origin = region.origin_px
+        elif calibration is not None:
+            effective_origin = calibration.origin_px
+
+    min_len_px = max(24.0, 0.8 * effective_ppm) if (effective_ppm and effective_ppm > 0) else 24.0
+    snap_tol_px = max(18.0, 0.15 * effective_ppm) if (effective_ppm and effective_ppm > 0) else 18.0
+
+    # Build anchor points: column centers + X x Y grid intersections
+    anchors: list[tuple[float, float, str]] = []
+    for c in columns or []:
+        if c.status == ReviewStatus.REJECTED:
+            continue
+        if bx0 - snap_tol_px <= c.x_px <= bx1 + snap_tol_px and by0 - snap_tol_px <= c.y_px <= by1 + snap_tol_px:
+            if not _point_in_any_box(c.x_px, c.y_px, exclude_boxes):
+                anchors.append((c.x_px, c.y_px, c.grid or c.column_id))
+
+    active_grids = [g for g in (grids or []) if g.status != ReviewStatus.REJECTED]
+    x_grids = [g for g in active_grids if g.axis == "x"]
+    y_grids = [g for g in active_grids if g.axis == "y"]
+    for gx in x_grids:
+        for gy in y_grids:
+            ix, iy = gx.coord_px, gy.coord_px
+            if bx0 - snap_tol_px <= ix <= bx1 + snap_tol_px and by0 - snap_tol_px <= iy <= by1 + snap_tol_px:
+                if not _point_in_any_box(ix, iy, exclude_boxes):
+                    if not any(hypot(ix - ax, iy - ay) <= 6.0 for ax, ay, _ in anchors):
+                        anchors.append((ix, iy, _format_grid_ref(gx.label, gy.label)))
+
+    if len(anchors) < 2:
+        return []
+
+    def _nearest_anchor(px: float, py: float) -> tuple[int, float, float, str] | None:
+        best_idx = -1
+        best_d = snap_tol_px
+        for idx, (ax, ay, lbl) in enumerate(anchors):
+            d = hypot(px - ax, py - ay)
+            if d <= best_d:
+                best_d = d
+                best_idx = idx
+        if best_idx < 0:
+            return None
+        ax, ay, lbl = anchors[best_idx]
+        return best_idx, ax, ay, lbl
+
+    active_openings = [o for o in (openings or []) if len(o.polygon_px) >= 3]
+    seen_pairs: dict[tuple[int, int], tuple[float, tuple[float, float, float, float, str, float]]] = {}
+
+    doc = pymupdf.open(pdf_path)
+    try:
+        page = doc[page_info.page_number - 1]
+        rot_mat = page.rotation_matrix
+        ox = float(page.rect.x0)
+        oy = float(page.rect.y0)
+        sx = float(page_info.width_px) / max(float(page.rect.width), 1.0)
+        sy = float(page_info.height_px) / max(float(page.rect.height), 1.0)
+
+        for drawing in page.get_drawings():
+            _, line_segs = _extract_rect_from_drawing(drawing, rot_mat, ox, oy, sx, sy)
+            for x1, y1, x2, y2 in line_segs:
+                dx = abs(x2 - x1)
+                dy = abs(y2 - y1)
+                seg_len = hypot(dx, dy)
+                if seg_len < min_len_px:
+                    continue
+                angle_deg = abs(math.degrees(math.atan2(dy, dx)))
+                if not (10.0 <= angle_deg <= 80.0):
+                    continue
+                mx, my = 0.5 * (x1 + x2), 0.5 * (y1 + y2)
+                if not (bx0 <= mx <= bx1 and by0 <= my <= by1):
+                    continue
+                if exclude_boxes and (
+                    _point_in_any_box(mx, my, exclude_boxes)
+                    or _point_in_any_box(x1, y1, exclude_boxes)
+                    or _point_in_any_box(x2, y2, exclude_boxes)
+                ):
+                    continue
+                if any(_point_in_polygon_px(mx, my, op.polygon_px) for op in active_openings):
+                    continue
+
+                a1 = _nearest_anchor(x1, y1)
+                a2 = _nearest_anchor(x2, y2)
+                if a1 is None or a2 is None or a1[0] == a2[0]:
+                    continue
+                i1, sx1, sy1, lbl1 = a1
+                i2, sx2, sy2, lbl2 = a2
+                snapped_len = hypot(sx2 - sx1, sy2 - sy1)
+                if snapped_len < min_len_px:
+                    continue
+                pair_key = (min(i1, i2), max(i1, i2))
+                if i1 > i2:
+                    sx1, sy1, lbl1, sx2, sy2, lbl2 = sx2, sy2, lbl2, sx1, sy1, lbl1
+                gref = f"{lbl1}-{lbl2}".strip("-") if (lbl1 or lbl2) else ""
+                snapped_angle = round(abs(math.degrees(math.atan2(abs(sy2 - sy1), abs(sx2 - sx1)))), 2)
+                prev = seen_pairs.get(pair_key)
+                if prev is None or snapped_len > prev[0]:
+                    seen_pairs[pair_key] = (snapped_len, (sx1, sy1, sx2, sy2, gref, snapped_angle))
+    finally:
+        doc.close()
+
+    beams: list[BeamCandidate] = []
+    for idx, (_, (_, (sx1, sy1, sx2, sy2, gref, ang))) in enumerate(sorted(seen_pairs.items()), start=1):
+        x1_m = y1_m = x2_m = y2_m = length_m = None
+        if effective_ppm is not None and effective_ppm > 0 and effective_origin is not None:
+            x1_m = round((sx1 - effective_origin.x_px) / effective_ppm, 4)
+            y1_m = round((effective_origin.y_px - sy1) / effective_ppm, 4)
+            x2_m = round((sx2 - effective_origin.x_px) / effective_ppm, 4)
+            y2_m = round((effective_origin.y_px - sy2) / effective_ppm, 4)
+            length_m = round(hypot(x2_m - x1_m, y2_m - y1_m), 4)
+        elif calibration is not None:
+            x1_m, y1_m = px_to_plan_m(sx1, sy1, calibration)
+            x2_m, y2_m = px_to_plan_m(sx2, sy2, calibration)
+            length_m = round(hypot(x2_m - x1_m, y2_m - y1_m), 4)
+
+        beams.append(
+            BeamCandidate(
+                id=_new_id("beam"),
+                page_number=page_info.page_number,
+                region_id=region_id,
+                beam_id=f"DB{idx}",
+                grid_ref=gref,
+                member_type="primary_beam",
+                x1_px=round(sx1, 2),
+                y1_px=round(sy1, 2),
+                x2_px=round(sx2, 2),
+                y2_px=round(sy2, 2),
+                x1_m=x1_m,
+                y1_m=y1_m,
+                x2_m=x2_m,
+                y2_m=y2_m,
+                angle_deg=ang,
+                length_m=length_m,
+                source="vector",
+                confidence=0.88,
+                status=ReviewStatus.PENDING,
+                notes=f"Detected diagonal beam ({ang:.1f} deg)",
+            )
+        )
+    return beams
+
+
 def detect_vector_elements(
     pdf_path: Path,
     page_info: PageInfo,
@@ -1484,6 +1675,8 @@ def detect_vector_elements(
     region: PlanRegion | None = None,
     png_path: Path | None = None,
     existing_grids: list[GridCandidate] | None = None,
+    existing_columns: list[ColumnCandidate] | None = None,
+    openings: list[DetectedOpening] | None = None,
     pixels_per_meter: float | None = None,
     origin_px: PointPx | None = None,
     exclude_regions: list[PlanRegion] | None = None,
@@ -1714,21 +1907,41 @@ def detect_vector_elements(
             exclude_regions=exclude_regions,
         )
 
+    beams: list[BeamCandidate] = []
+    if opts.detect_diagonal_beams and (region is None or region.region_type == "plan"):
+        all_cols_for_beams = list(columns) + [
+            c for c in (existing_columns or []) if c.status != ReviewStatus.REJECTED
+        ]
+        beams = detect_diagonal_beams(
+            pdf_path=pdf_path,
+            page_info=page_info,
+            calibration=calibration,
+            region=region,
+            grids=snap_grids,
+            columns=all_cols_for_beams,
+            openings=openings,
+            pixels_per_meter=pixels_per_meter,
+            origin_px=origin_px,
+            exclude_regions=exclude_regions,
+        )
+
     scope_label = f" in region '{region.name}'" if region is not None else ""
+    beam_suffix = f", {len(beams)} diagonal beam(s)" if beams else ""
     if not opts.detect_grids and opts.detect_columns:
         notice = (
             f"Shaded/hatched column scan{scope_label} ({opts.column_fill_mode}) found "
-            f"{len(columns)} column candidate(s); existing grids preserved."
+            f"{len(columns)} column candidate(s){beam_suffix}; existing grids preserved."
         )
     else:
         notice = (
-            f"Vector extraction{scope_label} found {len(grids)} grid line(s) and {len(columns)} column candidate(s). "
+            f"Vector extraction{scope_label} found {len(grids)} grid line(s), {len(columns)} column candidate(s){beam_suffix}. "
             "Engineer review is required before transfer."
         )
     return DetectionOutput(
         method_used="vector",
         grids=grids,
         columns=columns,
+        beams=beams,
         notice=notice,
     )
 
@@ -2463,6 +2676,8 @@ def run_detection(
     options: ExtractionOptions | None = None,
     region: PlanRegion | None = None,
     existing_grids: list[GridCandidate] | None = None,
+    existing_columns: list[ColumnCandidate] | None = None,
+    openings: list[DetectedOpening] | None = None,
     pixels_per_meter: float | None = None,
     origin_px: PointPx | None = None,
     exclude_regions: list[PlanRegion] | None = None,
@@ -2480,6 +2695,8 @@ def run_detection(
             region=region,
             png_path=png_path,
             existing_grids=existing_grids,
+            existing_columns=existing_columns,
+            openings=openings,
             pixels_per_meter=pixels_per_meter,
             origin_px=origin_px,
             exclude_regions=exclude_regions,
@@ -2506,11 +2723,13 @@ def run_detection(
             region=region,
             png_path=png_path,
             existing_grids=existing_grids,
+            existing_columns=existing_columns,
+            openings=openings,
             pixels_per_meter=pixels_per_meter,
             origin_px=origin_px,
             exclude_regions=exclude_regions,
         )
-        if result.grids or result.columns:
+        if result.grids or result.columns or result.beams:
             return result
         fallback = detect_raster_elements(
             png_path,
@@ -2535,11 +2754,13 @@ def run_detection(
             region=region,
             png_path=png_path,
             existing_grids=existing_grids,
+            existing_columns=existing_columns,
+            openings=openings,
             pixels_per_meter=pixels_per_meter,
             origin_px=origin_px,
             exclude_regions=exclude_regions,
         )
-        if vec.grids or vec.columns:
+        if vec.grids or vec.columns or vec.beams:
             return vec
         ras = detect_raster_elements(
             png_path,

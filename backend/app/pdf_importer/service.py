@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -9,7 +10,7 @@ from uuid import uuid4
 import pymupdf
 
 from .. import storage
-from ..models import Column, FloorOpening, GridLine, Level, ProjectState
+from ..models import Column, FloorOpening, GridLine, Level, ManualBeamOverride, ProjectState
 from .detector import (
     extract_levels_from_elevation_or_section,
     probe_columns_at_grid_intersections,
@@ -29,6 +30,7 @@ from .schemas import (
     ApplyMasterGridRequest,
     ApplyMasterGridResponse,
     AuditEntry,
+    BeamCandidate,
     BulkReviewRequest,
     CandidateReviewUpdate,
     ColumnCandidate,
@@ -36,6 +38,7 @@ from .schemas import (
     CopyOpeningsResponse,
     DetectedLevel,
     DetectedOpening,
+    DiagnosticIssue,
     ExtractRequest,
     ExtractionResponse,
     GridCandidate,
@@ -45,6 +48,7 @@ from .schemas import (
     LevelExtractionResponse,
     LevelUpdateRequest,
     LockMasterGridRequest,
+    ManualBeamRequest,
     ManualColumnRequest,
     ManualGridRequest,
     ManualGridTraceRequest,
@@ -54,12 +58,14 @@ from .schemas import (
     PageUpdateRequest,
     PlanRegion,
     PointPx,
+    PreflightDiagnosticsResponse,
     QuickUnitScaleRequest,
     RegionCreateRequest,
     RegionUpdateRequest,
     ReviewStatus,
     ScaleCalibration,
     ScaleCalibrationRequest,
+    SnapAndCleanRequest,
     StampMasterGridRequest,
     TransferLevelsRequest,
     TransferLevelsResponse,
@@ -270,6 +276,17 @@ def _recalculate_page_coordinates(state: ImportDocumentState, page_number: int) 
         reg = _find_region(state, col.region_id)
         origin = reg.origin_px if (reg and reg.origin_px is not None) else cal.origin_px
         col.x_m, col.y_m = _px_to_m_with_origin(col.x_px, col.y_px, cal.pixels_per_m, origin)
+    for beam in state.beam_candidates:
+        if beam.page_number != page_number:
+            continue
+        reg = _find_region(state, beam.region_id)
+        origin = reg.origin_px if (reg and reg.origin_px is not None) else cal.origin_px
+        beam.x1_m, beam.y1_m = _px_to_m_with_origin(beam.x1_px, beam.y1_px, cal.pixels_per_m, origin)
+        beam.x2_m, beam.y2_m = _px_to_m_with_origin(beam.x2_px, beam.y2_px, cal.pixels_per_m, origin)
+        dx_m = beam.x2_m - beam.x1_m
+        dy_m = beam.y2_m - beam.y1_m
+        beam.length_m = round(math.hypot(dx_m, dy_m), 4)
+        beam.angle_deg = round(math.degrees(math.atan2(abs(dy_m), abs(dx_m))), 2)
 
 
 def _recompute_page_story_heights(state: ImportDocumentState, page_number: int) -> None:
@@ -816,6 +833,9 @@ def delete_region(
     for o in state.openings:
         if o.region_id == region_id:
             o.region_id = None
+    for b in state.beam_candidates:
+        if b.region_id == region_id:
+            b.region_id = None
 
     _save_state(state)
     _append_audit(project_id, doc_id, "region_deleted", {"region_id": region_id})
@@ -868,6 +888,19 @@ def extract_page(
         and g.status != ReviewStatus.REJECTED
         and (req.region_id is None or g.region_id == req.region_id or g.region_id is None)
     ]
+    existing_region_columns = [
+        c
+        for c in state.column_candidates
+        if c.page_number == page_number
+        and c.status != ReviewStatus.REJECTED
+        and (req.region_id is None or c.region_id == req.region_id or c.region_id is None)
+    ]
+    page_openings = [
+        o
+        for o in state.openings
+        if o.page_number == page_number
+        and (req.region_id is None or o.region_id == req.region_id or o.region_id is None)
+    ]
 
     output = run_detection(
         pdf_path=pdf_path,
@@ -878,6 +911,8 @@ def extract_page(
         options=options,
         region=region,
         existing_grids=existing_region_grids,
+        existing_columns=existing_region_columns,
+        openings=page_openings,
         pixels_per_meter=effective_ppm,
         origin_px=effective_origin,
         exclude_regions=exclude_regions,
@@ -907,6 +942,18 @@ def extract_page(
                     and (req.region_id is None or c.region_id == req.region_id)
                 )
             ]
+        if options.detect_diagonal_beams:
+            state.beam_candidates = [
+                b
+                for b in state.beam_candidates
+                if not (
+                    b.page_number == page_number
+                    and b.source != "manual"
+                    and not b.engineer_approved
+                    and b.status != ReviewStatus.APPROVED
+                    and (req.region_id is None or b.region_id == req.region_id)
+                )
+            ]
 
     existing_col_ids = {c.column_id for c in state.column_candidates}
     next_num = 1
@@ -917,10 +964,21 @@ def extract_page(
             col.column_id = f"C{next_num}"
         existing_col_ids.add(col.column_id)
 
+    existing_beam_ids = {b.beam_id for b in state.beam_candidates if b.beam_id}
+    next_bnum = 1
+    for bm in output.beams:
+        if not bm.beam_id or bm.beam_id in existing_beam_ids:
+            while f"DB{next_bnum}" in existing_beam_ids:
+                next_bnum += 1
+            bm.beam_id = f"DB{next_bnum}"
+        existing_beam_ids.add(bm.beam_id)
+
     if options.detect_grids:
         state.grid_candidates.extend(output.grids)
     if options.detect_columns:
         state.column_candidates.extend(output.columns)
+    if options.detect_diagonal_beams:
+        state.beam_candidates.extend(output.beams)
     _recalculate_page_coordinates(state, page_number)
     _save_state(state)
 
@@ -936,6 +994,7 @@ def extract_page(
             "options": options.model_dump(),
             "grids_detected": len(output.grids) if options.detect_grids else 0,
             "columns_detected": len(output.columns) if options.detect_columns else 0,
+            "beams_detected": len(output.beams) if options.detect_diagonal_beams else 0,
         },
     )
 
@@ -1324,14 +1383,25 @@ def delete_element(
     state = get_import(project_id, doc_id)
     orig_g = len(state.grid_candidates)
     orig_c = len(state.column_candidates)
+    orig_b = len(state.beam_candidates)
 
     state.grid_candidates = [g for g in state.grid_candidates if g.id != element_id]
     state.column_candidates = [c for c in state.column_candidates if c.id != element_id]
+    state.beam_candidates = [b for b in state.beam_candidates if b.id != element_id]
 
-    if len(state.grid_candidates) == orig_g and len(state.column_candidates) == orig_c:
+    if (
+        len(state.grid_candidates) == orig_g
+        and len(state.column_candidates) == orig_c
+        and len(state.beam_candidates) == orig_b
+    ):
         raise KeyError(f"Element '{element_id}' not found.")
 
-    elem_type = "grid" if len(state.grid_candidates) < orig_g else "column"
+    if len(state.grid_candidates) < orig_g:
+        elem_type = "grid"
+    elif len(state.column_candidates) < orig_c:
+        elem_type = "column"
+    else:
+        elem_type = "beam"
     _save_state(state)
     _append_audit(
         project_id,
@@ -1981,6 +2051,155 @@ def add_manual_grid(
     return state
 
 
+def _nearest_grid_ref_px(
+    state: ImportDocumentState,
+    page_number: int,
+    region_id: str | None,
+    x_px: float,
+    y_px: float,
+    tol_px: float,
+) -> str:
+    x_grids = [
+        g
+        for g in state.grid_candidates
+        if g.page_number == page_number
+        and g.axis == "x"
+        and g.status != ReviewStatus.REJECTED
+        and (region_id is None or g.region_id == region_id or g.region_id is None)
+    ]
+    y_grids = [
+        g
+        for g in state.grid_candidates
+        if g.page_number == page_number
+        and g.axis == "y"
+        and g.status != ReviewStatus.REJECTED
+        and (region_id is None or g.region_id == region_id or g.region_id is None)
+    ]
+    best_x = min(x_grids, key=lambda g: abs(g.coord_px - x_px), default=None)
+    best_y = min(y_grids, key=lambda g: abs(g.coord_px - y_px), default=None)
+    if (
+        best_x is not None
+        and best_y is not None
+        and abs(best_x.coord_px - x_px) <= tol_px
+        and abs(best_y.coord_px - y_px) <= tol_px
+    ):
+        return f"{best_x.label}-{best_y.label}"
+    return ""
+
+
+def _endpoint_anchor_label(
+    state: ImportDocumentState,
+    page_number: int,
+    region_id: str | None,
+    x_px: float,
+    y_px: float,
+    tol_px: float,
+) -> str:
+    best_col = None
+    best_dist = tol_px + 1e-6
+    for c in state.column_candidates:
+        if (
+            c.page_number == page_number
+            and c.status != ReviewStatus.REJECTED
+            and (region_id is None or c.region_id == region_id or c.region_id is None)
+        ):
+            d = math.hypot(c.x_px - x_px, c.y_px - y_px)
+            if d < best_dist:
+                best_dist = d
+                best_col = c
+    if best_col is not None:
+        return best_col.grid or best_col.column_id
+    return _nearest_grid_ref_px(state, page_number, region_id, x_px, y_px, tol_px)
+
+
+def add_manual_beam(
+    project_id: str,
+    doc_id: str,
+    req: ManualBeamRequest,
+) -> ImportDocumentState:
+    state = get_import(project_id, doc_id)
+    _get_page(state, req.page_number)
+    region = _get_region(state, req.region_id) if req.region_id else None
+    if region is not None and region.region_type != "plan":
+        raise ValueError(f"Region '{region.name}' is an elevation region; diagonal beams only target 'plan' regions.")
+
+    if math.hypot(req.x2_px - req.x1_px, req.y2_px - req.y1_px) < 4.0:
+        raise ValueError("Beam endpoints must be distinct (at least 4 px apart).")
+
+    existing_ids = {b.beam_id for b in state.beam_candidates if b.beam_id}
+    beam_id = (req.beam_id or "").strip()
+    if not beam_id:
+        idx = 1
+        while f"DB{idx}" in existing_ids:
+            idx += 1
+        beam_id = f"DB{idx}"
+
+    cal = state.calibrations.get(str(req.page_number))
+    ppm = cal.pixels_per_m if cal is not None else (
+        state.master_grid.source_pixels_per_meter if state.master_grid is not None else None
+    )
+    origin = (region.origin_px if (region and region.origin_px is not None) else (cal.origin_px if cal else None))
+
+    x1_m = y1_m = x2_m = y2_m = length_m = None
+    if ppm is not None and origin is not None:
+        x1_m, y1_m = _px_to_m_with_origin(req.x1_px, req.y1_px, ppm, origin)
+        x2_m, y2_m = _px_to_m_with_origin(req.x2_px, req.y2_px, ppm, origin)
+        length_m = round(math.hypot(x2_m - x1_m, y2_m - y1_m), 4)
+
+    angle_deg = round(
+        math.degrees(math.atan2(abs(req.y2_px - req.y1_px), abs(req.x2_px - req.x1_px))),
+        2,
+    )
+    anchor_tol = max(18.0, 0.2 * ppm) if ppm is not None else 20.0
+    lbl1 = _endpoint_anchor_label(state, req.page_number, req.region_id, req.x1_px, req.y1_px, anchor_tol)
+    lbl2 = _endpoint_anchor_label(state, req.page_number, req.region_id, req.x2_px, req.y2_px, anchor_tol)
+    grid_ref = f"{lbl1}->{lbl2}" if (lbl1 and lbl2) else "DIAG"
+
+    candidate = BeamCandidate(
+        id=f"beam-{uuid4().hex[:8]}",
+        page_number=req.page_number,
+        region_id=req.region_id,
+        beam_id=beam_id,
+        grid_ref=grid_ref,
+        member_type=req.member_type,
+        x1_px=round(req.x1_px, 2),
+        y1_px=round(req.y1_px, 2),
+        x2_px=round(req.x2_px, 2),
+        y2_px=round(req.y2_px, 2),
+        x1_m=x1_m,
+        y1_m=y1_m,
+        x2_m=x2_m,
+        y2_m=y2_m,
+        angle_deg=angle_deg,
+        length_m=length_m,
+        source="manual",
+        confidence=1.0,
+        status=req.status,
+        engineer_approved=(req.status == ReviewStatus.APPROVED),
+        notes=req.notes or "Manually drawn diagonal beam",
+    )
+    state.beam_candidates.append(candidate)
+    _save_state(state)
+
+    _append_audit(
+        project_id,
+        doc_id,
+        "candidate_added",
+        {
+            "candidate_type": "beam",
+            "candidate_id": candidate.id,
+            "beam_id": candidate.beam_id,
+            "member_type": candidate.member_type,
+            "page_number": req.page_number,
+            "region_id": req.region_id,
+            "length_m": candidate.length_m,
+            "angle_deg": candidate.angle_deg,
+            "status": candidate.status.value,
+        },
+    )
+    return state
+
+
 def update_candidate(
     project_id: str,
     doc_id: str,
@@ -1996,6 +2215,25 @@ def update_candidate(
                 grid.engineer_approved = (req.status == ReviewStatus.APPROVED)
             if req.label is not None and req.label.strip():
                 grid.label = req.label.strip()
+            if req.coord_px is not None:
+                grid.coord_px = round(req.coord_px, 2)
+                if grid.axis == "x":
+                    grid.x1_px = grid.coord_px
+                    grid.x2_px = grid.coord_px
+                else:
+                    grid.y1_px = grid.coord_px
+                    grid.y2_px = grid.coord_px
+                cal = state.calibrations.get(str(grid.page_number))
+                ppm = cal.pixels_per_m if cal is not None else (
+                    state.master_grid.source_pixels_per_meter if state.master_grid is not None else None
+                )
+                reg = _find_region(state, grid.region_id)
+                origin = reg.origin_px if (reg and reg.origin_px is not None) else (cal.origin_px if cal else None)
+                if ppm is not None and origin is not None:
+                    if grid.axis == "x":
+                        grid.coord_m, _ = _px_to_m_with_origin(grid.coord_px, grid.y1_px, ppm, origin)
+                    else:
+                        _, grid.coord_m = _px_to_m_with_origin(grid.x1_px, grid.coord_px, ppm, origin)
             if req.notes is not None:
                 grid.notes = req.notes
             _save_state(state)
@@ -2008,6 +2246,8 @@ def update_candidate(
                     "candidate_id": candidate_id,
                     "status": grid.status.value,
                     "label": grid.label,
+                    "coord_px": grid.coord_px,
+                    "coord_m": grid.coord_m,
                 },
             )
             return state
@@ -2025,6 +2265,27 @@ def update_candidate(
                 col.width_mm = req.width_mm
             if req.depth_mm is not None:
                 col.depth_mm = req.depth_mm
+            moved = False
+            if req.x_px is not None:
+                col.x_px = round(req.x_px, 2)
+                moved = True
+            if req.y_px is not None:
+                col.y_px = round(req.y_px, 2)
+                moved = True
+            if moved:
+                cal = state.calibrations.get(str(col.page_number))
+                ppm = cal.pixels_per_m if cal is not None else (
+                    state.master_grid.source_pixels_per_meter if state.master_grid is not None else None
+                )
+                reg = _find_region(state, col.region_id)
+                origin = reg.origin_px if (reg and reg.origin_px is not None) else (cal.origin_px if cal else None)
+                if ppm is not None and origin is not None:
+                    col.x_m, col.y_m = _px_to_m_with_origin(col.x_px, col.y_px, ppm, origin)
+                if req.grid is None:
+                    tol_px = max(12.0, 0.15 * ppm) if ppm is not None else 15.0
+                    inferred = _nearest_grid_ref_px(state, col.page_number, col.region_id, col.x_px, col.y_px, tol_px)
+                    if inferred:
+                        col.grid = inferred
             if req.notes is not None:
                 col.notes = req.notes
             _save_state(state)
@@ -2037,6 +2298,65 @@ def update_candidate(
                     "candidate_id": candidate_id,
                     "status": col.status.value,
                     "column_id": col.column_id,
+                    "x_px": col.x_px,
+                    "y_px": col.y_px,
+                    "x_m": col.x_m,
+                    "y_m": col.y_m,
+                    "grid": col.grid,
+                },
+            )
+            return state
+
+    for beam in state.beam_candidates:
+        if beam.id == candidate_id:
+            if req.status is not None:
+                beam.status = req.status
+                beam.engineer_approved = (req.status == ReviewStatus.APPROVED)
+            if req.beam_id is not None and req.beam_id.strip():
+                beam.beam_id = req.beam_id.strip()
+            if req.member_type is not None:
+                beam.member_type = req.member_type
+            moved = False
+            if req.x1_px is not None:
+                beam.x1_px = round(req.x1_px, 2)
+                moved = True
+            if req.y1_px is not None:
+                beam.y1_px = round(req.y1_px, 2)
+                moved = True
+            if req.x2_px is not None:
+                beam.x2_px = round(req.x2_px, 2)
+                moved = True
+            if req.y2_px is not None:
+                beam.y2_px = round(req.y2_px, 2)
+                moved = True
+            if moved:
+                beam.angle_deg = round(
+                    math.degrees(math.atan2(abs(beam.y2_px - beam.y1_px), abs(beam.x2_px - beam.x1_px))),
+                    2,
+                )
+                cal = state.calibrations.get(str(beam.page_number))
+                ppm = cal.pixels_per_m if cal is not None else (
+                    state.master_grid.source_pixels_per_meter if state.master_grid is not None else None
+                )
+                reg = _find_region(state, beam.region_id)
+                origin = reg.origin_px if (reg and reg.origin_px is not None) else (cal.origin_px if cal else None)
+                if ppm is not None and origin is not None:
+                    beam.x1_m, beam.y1_m = _px_to_m_with_origin(beam.x1_px, beam.y1_px, ppm, origin)
+                    beam.x2_m, beam.y2_m = _px_to_m_with_origin(beam.x2_px, beam.y2_px, ppm, origin)
+                    beam.length_m = round(math.hypot(beam.x2_m - beam.x1_m, beam.y2_m - beam.y1_m), 4)
+            if req.notes is not None:
+                beam.notes = req.notes
+            _save_state(state)
+            _append_audit(
+                project_id,
+                doc_id,
+                "candidate_reviewed",
+                {
+                    "candidate_type": "beam",
+                    "candidate_id": candidate_id,
+                    "status": beam.status.value,
+                    "beam_id": beam.beam_id,
+                    "member_type": beam.member_type,
                 },
             )
             return state
@@ -2063,6 +2383,11 @@ def bulk_review_candidates(
             col.status = req.status
             col.engineer_approved = (req.status == ReviewStatus.APPROVED)
             updated_count += 1
+    for beam in state.beam_candidates:
+        if beam.id in target_ids:
+            beam.status = req.status
+            beam.engineer_approved = (req.status == ReviewStatus.APPROVED)
+            updated_count += 1
 
     if updated_count == 0:
         raise KeyError("No matching candidates found for bulk review.")
@@ -2080,6 +2405,416 @@ def bulk_review_candidates(
         },
     )
     return state
+
+
+def snap_and_clean(
+    project_id: str,
+    doc_id: str,
+    req: SnapAndCleanRequest,
+) -> ImportDocumentState:
+    state = get_import(project_id, doc_id)
+    _get_page(state, req.page_number)
+
+    cal = state.calibrations.get(str(req.page_number))
+    if cal is None or not cal.confirmed:
+        raise ValueError(
+            f"Page {req.page_number} scale calibration must be confirmed before running Snap & Clean."
+        )
+
+    if req.region_id is not None:
+        reg = _get_region(state, req.region_id)
+        if reg.page_number != req.page_number:
+            raise ValueError(
+                f"Region '{req.region_id}' belongs to page {reg.page_number}, not page {req.page_number}."
+            )
+        if reg.region_type != "plan":
+            raise ValueError(
+                f"Region '{reg.name}' is an elevation region; Snap & Clean only targets 'plan' regions."
+            )
+
+    elevation_region_ids = {r.region_id for r in state.regions if r.region_type == "elevation"}
+
+    def _in_scope(page_num: int, region_id: str | None, status: ReviewStatus) -> bool:
+        if page_num != req.page_number or status == ReviewStatus.REJECTED:
+            return False
+        if req.region_id is not None:
+            return region_id == req.region_id
+        return region_id not in elevation_region_ids
+
+    ppm = cal.pixels_per_m
+    snap_tol_px = (req.snap_tolerance_mm / 1000.0) * ppm
+    merge_grid_tol_px = (req.merge_grid_tolerance_mm / 1000.0) * ppm
+    merge_col_tol_px = (req.merge_column_tolerance_mm / 1000.0) * ppm
+
+    merged_grids = 0
+    merged_columns = 0
+    snapped_columns = 0
+    snapped_beams = 0
+
+    if req.merge_duplicates:
+        # 1) Merge duplicate same-axis grids within merge_grid_tol_px
+        drop_grid_ids: set[str] = set()
+        grouped_grids: dict[tuple[str | None, str], list[GridCandidate]] = {}
+        for g in state.grid_candidates:
+            if _in_scope(g.page_number, g.region_id, g.status):
+                grouped_grids.setdefault((g.region_id, g.axis), []).append(g)
+
+        for _, group in grouped_grids.items():
+            group.sort(key=lambda g: g.coord_px)
+            clusters: list[list[GridCandidate]] = []
+            for g in group:
+                if clusters and abs(g.coord_px - clusters[-1][-1].coord_px) <= merge_grid_tol_px:
+                    clusters[-1].append(g)
+                else:
+                    clusters.append([g])
+            for cl in clusters:
+                if len(cl) <= 1:
+                    continue
+                cl.sort(
+                    key=lambda g: (
+                        1 if (g.status == ReviewStatus.APPROVED or g.engineer_approved) else 0,
+                        1 if g.source == "manual" else 0,
+                        1 if (g.label and not g.label.startswith("G")) else 0,
+                        g.confidence,
+                    ),
+                    reverse=True,
+                )
+                for dup in cl[1:]:
+                    drop_grid_ids.add(dup.id)
+                    merged_grids += 1
+        if drop_grid_ids:
+            state.grid_candidates = [g for g in state.grid_candidates if g.id not in drop_grid_ids]
+
+        # 2) Merge duplicate columns within merge_col_tol_px
+        drop_col_ids: set[str] = set()
+        grouped_cols: dict[str | None, list[ColumnCandidate]] = {}
+        for c in state.column_candidates:
+            if _in_scope(c.page_number, c.region_id, c.status):
+                grouped_cols.setdefault(c.region_id, []).append(c)
+
+        for _, group in grouped_cols.items():
+            group.sort(
+                key=lambda c: (
+                    1 if (c.status == ReviewStatus.APPROVED or c.engineer_approved) else 0,
+                    1 if c.source == "manual" else 0,
+                    c.confidence,
+                ),
+                reverse=True,
+            )
+            kept: list[ColumnCandidate] = []
+            for c in group:
+                if any(math.hypot(c.x_px - k.x_px, c.y_px - k.y_px) <= merge_col_tol_px for k in kept):
+                    drop_col_ids.add(c.id)
+                    merged_columns += 1
+                else:
+                    kept.append(c)
+        if drop_col_ids:
+            state.column_candidates = [c for c in state.column_candidates if c.id not in drop_col_ids]
+
+    if req.snap_columns:
+        scoped_x_grids = [
+            g
+            for g in state.grid_candidates
+            if g.axis == "x" and _in_scope(g.page_number, g.region_id, g.status)
+        ]
+        scoped_y_grids = [
+            g
+            for g in state.grid_candidates
+            if g.axis == "y" and _in_scope(g.page_number, g.region_id, g.status)
+        ]
+
+        for col in state.column_candidates:
+            if not _in_scope(col.page_number, col.region_id, col.status):
+                continue
+            cand_x = [g for g in scoped_x_grids if col.region_id is None or g.region_id in (col.region_id, None)]
+            cand_y = [g for g in scoped_y_grids if col.region_id is None or g.region_id in (col.region_id, None)]
+            best_x = min(cand_x, key=lambda g: abs(g.coord_px - col.x_px), default=None)
+            best_y = min(cand_y, key=lambda g: abs(g.coord_px - col.y_px), default=None)
+            changed = False
+            matched_x = None
+            matched_y = None
+            if best_x is not None and abs(best_x.coord_px - col.x_px) <= snap_tol_px:
+                if abs(best_x.coord_px - col.x_px) > 1e-3:
+                    col.x_px = round(best_x.coord_px, 2)
+                    changed = True
+                matched_x = best_x
+            if best_y is not None and abs(best_y.coord_px - col.y_px) <= snap_tol_px:
+                if abs(best_y.coord_px - col.y_px) > 1e-3:
+                    col.y_px = round(best_y.coord_px, 2)
+                    changed = True
+                matched_y = best_y
+            if matched_x is not None and matched_y is not None:
+                new_ref = f"{matched_x.label}-{matched_y.label}"
+                if col.grid != new_ref:
+                    col.grid = new_ref
+                    changed = True
+            if changed:
+                snapped_columns += 1
+
+        # Also snap diagonal beam endpoints to nearest column center or grid intersection
+        anchors: list[tuple[float, float, str, str | None]] = []
+        for col in state.column_candidates:
+            if _in_scope(col.page_number, col.region_id, col.status):
+                anchors.append((col.x_px, col.y_px, col.grid or col.column_id, col.region_id))
+        for gx in scoped_x_grids:
+            for gy in scoped_y_grids:
+                if gx.region_id == gy.region_id or gx.region_id is None or gy.region_id is None:
+                    anchors.append((gx.coord_px, gy.coord_px, f"{gx.label}-{gy.label}", gx.region_id or gy.region_id))
+
+        for bm in state.beam_candidates:
+            if not _in_scope(bm.page_number, bm.region_id, bm.status):
+                continue
+            reg_anchors = [a for a in anchors if bm.region_id is None or a[3] in (bm.region_id, None)]
+            if not reg_anchors:
+                continue
+            a1 = min(reg_anchors, key=lambda a: math.hypot(a[0] - bm.x1_px, a[1] - bm.y1_px))
+            a2 = min(reg_anchors, key=lambda a: math.hypot(a[0] - bm.x2_px, a[1] - bm.y2_px))
+            nx1, ny1, lbl1 = bm.x1_px, bm.y1_px, ""
+            nx2, ny2, lbl2 = bm.x2_px, bm.y2_px, ""
+            if math.hypot(a1[0] - bm.x1_px, a1[1] - bm.y1_px) <= snap_tol_px:
+                nx1, ny1, lbl1 = round(a1[0], 2), round(a1[1], 2), a1[2]
+            if math.hypot(a2[0] - bm.x2_px, a2[1] - bm.y2_px) <= snap_tol_px:
+                nx2, ny2, lbl2 = round(a2[0], 2), round(a2[1], 2), a2[2]
+            if math.hypot(nx2 - nx1, ny2 - ny1) >= 4.0 and (
+                nx1 != bm.x1_px or ny1 != bm.y1_px or nx2 != bm.x2_px or ny2 != bm.y2_px
+            ):
+                bm.x1_px, bm.y1_px, bm.x2_px, bm.y2_px = nx1, ny1, nx2, ny2
+                if lbl1 and lbl2:
+                    bm.grid_ref = f"{lbl1}->{lbl2}"
+                snapped_beams += 1
+
+    _recalculate_page_coordinates(state, req.page_number)
+    _save_state(state)
+    _append_audit(
+        project_id,
+        doc_id,
+        "snap_and_clean",
+        {
+            "page_number": req.page_number,
+            "region_id": req.region_id,
+            "snap_tolerance_mm": req.snap_tolerance_mm,
+            "merge_grid_tolerance_mm": req.merge_grid_tolerance_mm,
+            "merge_column_tolerance_mm": req.merge_column_tolerance_mm,
+            "merged_grids": merged_grids,
+            "merged_columns": merged_columns,
+            "snapped_columns": snapped_columns,
+            "snapped_beams": snapped_beams,
+        },
+    )
+    return state
+
+
+def get_preflight_diagnostics(
+    project_id: str,
+    doc_id: str,
+    page_number: int,
+    region_id: str | None = None,
+) -> PreflightDiagnosticsResponse:
+    project = _ensure_project_exists(project_id)
+    state = _load_state(project_id, doc_id)
+    _get_page(state, page_number)
+
+    if region_id is not None:
+        reg = _get_region(state, region_id)
+        if reg.page_number != page_number:
+            raise ValueError(
+                f"Region '{region_id}' belongs to page {reg.page_number}, not page {page_number}."
+            )
+        if reg.region_type != "plan":
+            raise ValueError(
+                f"Region '{reg.name}' is an elevation region; pre-flight diagnostics only inspect 'plan' regions."
+            )
+
+    elevation_region_ids = {r.region_id for r in state.regions if r.region_type == "elevation"}
+
+    def _in_scope(pnum: int, reg_id: str | None, status: ReviewStatus) -> bool:
+        if pnum != page_number or status == ReviewStatus.REJECTED:
+            return False
+        if region_id is not None:
+            return reg_id == region_id
+        return reg_id not in elevation_region_ids
+
+    x_grids = [
+        g for g in state.grid_candidates if g.axis == "x" and _in_scope(g.page_number, g.region_id, g.status)
+    ]
+    y_grids = [
+        g for g in state.grid_candidates if g.axis == "y" and _in_scope(g.page_number, g.region_id, g.status)
+    ]
+    cols = [
+        c for c in state.column_candidates if _in_scope(c.page_number, c.region_id, c.status)
+    ]
+    beams = [
+        b for b in state.beam_candidates if _in_scope(b.page_number, b.region_id, b.status)
+    ]
+
+    cal = state.calibrations.get(str(page_number))
+    ppm = cal.pixels_per_m if cal is not None else (
+        state.master_grid.source_pixels_per_meter if state.master_grid is not None else None
+    )
+
+    x_coords_m = sorted([g.coord_m for g in x_grids if g.coord_m is not None])
+    y_coords_m = sorted([g.coord_m for g in y_grids if g.coord_m is not None])
+    footprint_x_m = round(x_coords_m[-1] - x_coords_m[0], 3) if len(x_coords_m) >= 2 else None
+    footprint_y_m = round(y_coords_m[-1] - y_coords_m[0], 3) if len(y_coords_m) >= 2 else None
+
+    bays: list[float] = []
+    for arr in (x_coords_m, y_coords_m):
+        for i in range(len(arr) - 1):
+            span = round(arr[i + 1] - arr[i], 3)
+            if span > 1e-4:
+                bays.append(span)
+    min_bay_m = min(bays) if bays else None
+    max_bay_m = max(bays) if bays else None
+
+    issues: list[DiagnosticIssue] = []
+
+    # 1) Duplicate same-axis grids (< 150 mm, or < 8 px if uncalibrated)
+    dup_grid_tol_px = (0.15 * ppm) if ppm is not None else 8.0
+    dup_grid_ids: list[str] = []
+    for axis_name, arr in (("X", x_grids), ("Y", y_grids)):
+        arr_sorted = sorted(arr, key=lambda g: g.coord_px)
+        for i in range(len(arr_sorted) - 1):
+            g1, g2 = arr_sorted[i], arr_sorted[i + 1]
+            if g1.region_id != g2.region_id:
+                continue
+            gap_px = abs(g2.coord_px - g1.coord_px)
+            if gap_px < dup_grid_tol_px:
+                dup_grid_ids.extend([g1.id, g2.id])
+    if dup_grid_ids:
+        uniq = list(dict.fromkeys(dup_grid_ids))
+        issues.append(
+            DiagnosticIssue(
+                severity="warning",
+                code="duplicate_grids",
+                message=f"{len(uniq)} grid line(s) are closer than 150 mm to an adjacent same-axis grid. Run Merge Duplicates.",
+                candidate_ids=uniq,
+            )
+        )
+
+    # 2) Duplicate columns (< 200 mm, or < 10 px if uncalibrated)
+    dup_col_tol_px = (0.20 * ppm) if ppm is not None else 10.0
+    dup_col_ids: list[str] = []
+    for i in range(len(cols)):
+        for j in range(i + 1, len(cols)):
+            if cols[i].region_id != cols[j].region_id:
+                continue
+            if math.hypot(cols[i].x_px - cols[j].x_px, cols[i].y_px - cols[j].y_px) < dup_col_tol_px:
+                dup_col_ids.extend([cols[i].id, cols[j].id])
+    if dup_col_ids:
+        uniq = list(dict.fromkeys(dup_col_ids))
+        issues.append(
+            DiagnosticIssue(
+                severity="warning",
+                code="duplicate_columns",
+                message=f"{len(uniq)} column(s) overlap within 200 mm. Run Merge Duplicates.",
+                candidate_ids=uniq,
+            )
+        )
+
+    # 3) Orphan columns (> 150 mm from any X x Y grid intersection)
+    if x_grids and y_grids:
+        orphan_tol_px = (0.15 * ppm) if ppm is not None else 12.0
+        orphan_ids: list[str] = []
+        for col in cols:
+            dx = min((abs(col.x_px - gx.coord_px) for gx in x_grids), default=1e9)
+            dy = min((abs(col.y_px - gy.coord_px) for gy in y_grids), default=1e9)
+            if math.hypot(dx, dy) > orphan_tol_px:
+                orphan_ids.append(col.id)
+        if orphan_ids:
+            issues.append(
+                DiagnosticIssue(
+                    severity="warning",
+                    code="orphan_columns",
+                    message=f"{len(orphan_ids)} column(s) are > 150 mm from any grid intersection. Run Snap Columns to Grids.",
+                    candidate_ids=orphan_ids,
+                )
+            )
+
+    # 4) Extreme bay spans (< 1.0 m or > 12.0 m)
+    extreme_grid_ids: list[str] = []
+    extreme_spans: list[str] = []
+    for axis_name, arr in (("X", x_grids), ("Y", y_grids)):
+        arr_m = sorted([g for g in arr if g.coord_m is not None], key=lambda g: g.coord_m or 0.0)
+        for i in range(len(arr_m) - 1):
+            g1, g2 = arr_m[i], arr_m[i + 1]
+            if g1.region_id != g2.region_id:
+                continue
+            span = abs((g2.coord_m or 0.0) - (g1.coord_m or 0.0))
+            if span > 0.15 and (span < 1.0 or span > 12.0):
+                extreme_grid_ids.extend([g1.id, g2.id])
+                extreme_spans.append(f"{g1.label}-{g2.label}={span:.2f}m")
+    if extreme_grid_ids:
+        uniq = list(dict.fromkeys(extreme_grid_ids))
+        issues.append(
+            DiagnosticIssue(
+                severity="warning",
+                code="extreme_bay_span",
+                message=f"Unusual bay span(s) detected (<1.0 m or >12.0 m): {', '.join(extreme_spans[:4])}. Check scale/unit.",
+                candidate_ids=uniq,
+            )
+        )
+
+    # 5) Disconnected diagonal beams (either endpoint > 250 mm from all columns and grid intersections)
+    if beams:
+        beam_tol_px = (0.25 * ppm) if ppm is not None else 18.0
+        anchor_pts: list[tuple[float, float]] = [(c.x_px, c.y_px) for c in cols]
+        for gx in x_grids:
+            for gy in y_grids:
+                anchor_pts.append((gx.coord_px, gy.coord_px))
+        disconnected_ids: list[str] = []
+        for bm in beams:
+            if not anchor_pts:
+                disconnected_ids.append(bm.id)
+                continue
+            d1 = min(math.hypot(bm.x1_px - ax, bm.y1_px - ay) for ax, ay in anchor_pts)
+            d2 = min(math.hypot(bm.x2_px - ax, bm.y2_px - ay) for ax, ay in anchor_pts)
+            if d1 > beam_tol_px or d2 > beam_tol_px:
+                disconnected_ids.append(bm.id)
+        if disconnected_ids:
+            issues.append(
+                DiagnosticIssue(
+                    severity="warning",
+                    code="disconnected_beam",
+                    message=f"{len(disconnected_ids)} diagonal beam(s) have an endpoint > 250 mm from any column or grid intersection.",
+                    candidate_ids=disconnected_ids,
+                )
+            )
+
+    # 6) Missing floor-level assignment on plan regions for multi-story projects
+    if len(project.levels) > 2:
+        plan_regions = [
+            r
+            for r in state.regions
+            if r.page_number == page_number
+            and r.region_type == "plan"
+            and (region_id is None or r.region_id == region_id)
+        ]
+        unassigned = [r.name for r in plan_regions if not r.floor_level.strip()]
+        if unassigned:
+            issues.append(
+                DiagnosticIssue(
+                    severity="info",
+                    code="missing_floor_level",
+                    message=f"Plan region(s) missing floor level assignment ({', '.join(unassigned[:3])}). Assign a level or 'ALL'.",
+                    candidate_ids=[],
+                )
+            )
+
+    return PreflightDiagnosticsResponse(
+        doc_id=doc_id,
+        page_number=page_number,
+        x_grid_count=len(x_grids),
+        y_grid_count=len(y_grids),
+        column_count=len(cols),
+        approved_column_count=sum(1 for c in cols if c.status == ReviewStatus.APPROVED or c.engineer_approved),
+        diagonal_beam_count=len(beams),
+        approved_diagonal_beam_count=sum(1 for b in beams if b.status == ReviewStatus.APPROVED or b.engineer_approved),
+        footprint_x_m=footprint_x_m,
+        footprint_y_m=footprint_y_m,
+        min_bay_m=min_bay_m,
+        max_bay_m=max_bay_m,
+        issues=issues,
+    )
 
 
 def transfer_approved(
@@ -2123,10 +2858,18 @@ def transfer_approved(
         and (req.page_number is None or o.page_number == req.page_number)
         and (req.region_id is None or o.region_id == req.region_id)
     ]
+    approved_beams = [
+        b
+        for b in state.beam_candidates
+        if (b.status == ReviewStatus.APPROVED or b.engineer_approved)
+        and (b.region_id not in elevation_region_ids)
+        and (req.page_number is None or b.page_number == req.page_number)
+        and (req.region_id is None or b.region_id == req.region_id)
+    ]
 
-    if not approved_grids and not approved_cols and not approved_openings:
+    if not approved_grids and not approved_cols and not approved_openings and not approved_beams:
         raise ValueError(
-            "No engineer-approved grids, columns, or openings are ready to transfer. "
+            "No engineer-approved grids, columns, beams, or openings are ready to transfer. "
             "Approve at least one element before transferring."
         )
 
@@ -2134,6 +2877,7 @@ def transfer_approved(
         {g.page_number for g in approved_grids}
         | {c.page_number for c in approved_cols}
         | {o.page_number for o in approved_openings}
+        | {b.page_number for b in approved_beams}
     )
 
     # Verify scale confirmation for every involved page and recompute coordinates cleanly
@@ -2147,6 +2891,12 @@ def transfer_approved(
     for c in approved_cols:
         ppm, origin = _resolve_scale_and_origin(state, c.page_number, c.region_id, require_confirmed=True)
         c.x_m, c.y_m = _px_to_m_with_origin(c.x_px, c.y_px, ppm, origin)
+
+    for b in approved_beams:
+        ppm, origin = _resolve_scale_and_origin(state, b.page_number, b.region_id, require_confirmed=True)
+        b.x1_m, b.y1_m = _px_to_m_with_origin(b.x1_px, b.y1_px, ppm, origin)
+        b.x2_m, b.y2_m = _px_to_m_with_origin(b.x2_px, b.y2_px, ppm, origin)
+        b.length_m = round(math.hypot(b.x2_m - b.x1_m, b.y2_m - b.y1_m), 4)
 
     seen_batch_col_ids: set[str] = set()
     for c in approved_cols:
@@ -2264,6 +3014,50 @@ def transfer_approved(
         sm_dict["options"] = sm_opts
         updated_payload["structural_model"] = sm_dict
 
+    beams_transferred = 0
+    if approved_beams:
+        sm_dict = updated_payload.get("structural_model") or {}
+        existing_overrides = [
+            ManualBeamOverride.model_validate(mb) for mb in sm_dict.get("manual_beams", [])
+        ]
+        # Always preserve user-authored Module 03 overrides (non imp_beam_ IDs)
+        preserved = [
+            mb
+            for mb in existing_overrides
+            if not mb.override_id.startswith("imp_beam_") or req.merge_mode == "merge"
+        ]
+        override_map: dict[str, ManualBeamOverride] = {mb.override_id: mb for mb in preserved}
+
+        proj_levels = [Level.model_validate(lv) for lv in updated_payload.get("levels", [])]
+        proj_levels.sort(key=lambda lv: lv.elevation_m)
+        min_elev = proj_levels[0].elevation_m if proj_levels else 0.0
+        elevated_levels = [lv for lv in proj_levels if lv.elevation_m > min_elev + 1e-4]
+        default_target_levels = elevated_levels if elevated_levels else proj_levels
+
+        for b in approved_beams:
+            assert b.x1_m is not None and b.y1_m is not None and b.x2_m is not None and b.y2_m is not None
+            reg = _find_region(state, b.region_id)
+            fl = (reg.floor_level.strip() if reg and reg.floor_level else "")
+            if fl and fl.upper() != "ALL":
+                matched_lvls = [lv for lv in proj_levels if lv.id.upper() == fl.upper()]
+                target_lvls = matched_lvls if matched_lvls else default_target_levels
+            else:
+                target_lvls = default_target_levels
+            for lv in target_lvls:
+                ov_id = f"imp_beam_{b.id}_{lv.id}"
+                override_map[ov_id] = ManualBeamOverride(
+                    override_id=ov_id,
+                    floor_level=lv.id,
+                    start_xyz_m=[round(b.x1_m, 4), round(lv.elevation_m, 4), round(b.y1_m, 4)],
+                    end_xyz_m=[round(b.x2_m, 4), round(lv.elevation_m, 4), round(b.y2_m, 4)],
+                    member_type=b.member_type,
+                    grid_ref=b.grid_ref or b.beam_id or "DIAG",
+                )
+            beams_transferred += 1
+
+        sm_dict["manual_beams"] = [mb.model_dump() for mb in override_map.values()]
+        updated_payload["structural_model"] = sm_dict
+
     updated_project = ProjectState.model_validate(updated_payload)
 
     storage.save_project(updated_project)
@@ -2274,6 +3068,8 @@ def transfer_approved(
         c.transferred = True
     for o in approved_openings:
         o.transferred = True
+    for b in approved_beams:
+        b.transferred = True
 
     record = TransferRecord(
         transferred_at=_utc_now(),
@@ -2298,10 +3094,12 @@ def transfer_approved(
             "y_grids_transferred": y_count,
             "columns_transferred": len(approved_cols),
             "openings_transferred": openings_transferred,
+            "beams_transferred": beams_transferred,
             "column_ids": [c.column_id for c in approved_cols],
         },
     )
 
+    beam_note = f", and {beams_transferred} diagonal beam(s)" if beams_transferred else ""
     return TransferResponse(
         project_id=project_id,
         doc_id=doc_id,
@@ -2313,7 +3111,7 @@ def transfer_approved(
         total_project_openings=len(updated_project.openings),
         notice=(
             f"Transferred {x_count} X-grid(s), {y_count} Y-grid(s), "
-            f"{len(approved_cols)} column(s), and {openings_transferred} opening(s) "
+            f"{len(approved_cols)} column(s), {openings_transferred} opening(s){beam_note} "
             f"into project '{project_id}'.{roof_note} Independent structural review remains required."
         ),
         project=updated_project,

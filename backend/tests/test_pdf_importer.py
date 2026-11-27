@@ -2328,3 +2328,354 @@ def test_dxf_layer_filtering_viewport_locked_rerender_and_quick_unit_override(is
     )
     assert uncal_res.status_code == 400
     assert "calibrated" in uncal_res.json()["detail"].lower()
+
+
+def test_p3_legacy_state_and_snap_clean_and_diagnostics(isolated_env):
+    """
+    Verify Module 02 P3:
+    1. Legacy ImportDocumentState JSON without beam_candidates deserializes cleanly.
+    2. POST /snap-and-clean returns 400 when page is uncalibrated.
+    3. GET /pages/1/diagnostics flags duplicate_grids, duplicate_columns, orphan_columns,
+       extreme_bay_span, and disconnected_beam.
+    4. POST /snap-and-clean merges duplicates and snaps off-grid columns to intersections.
+    5. PATCH /candidates/{id} with x_px/y_px or coord_px updates meters and grid ref.
+    """
+    client, _ = isolated_env
+    from backend.app.pdf_importer.schemas import ImportDocumentState
+
+    # 1. Backward compatibility: legacy state without beam_candidates
+    legacy = ImportDocumentState.model_validate(
+        {
+            "doc_id": "pdf-legacy-p3",
+            "project_id": "LEGACY-P3",
+            "filename": "old.pdf",
+            "sha256": "abc123",
+            "file_size_bytes": 2048,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "page_count": 1,
+            "pages": [
+                {
+                    "page_number": 1,
+                    "width_pt": 600.0,
+                    "height_pt": 400.0,
+                    "width_px": 1200,
+                    "height_px": 800,
+                    "dpi": 144,
+                    "classification": "vector",
+                    "image_filename": "page_1.png",
+                }
+            ],
+        }
+    )
+    assert legacy.beam_candidates == []
+
+    pid = "TEST-P3-SNAP"
+    assert client.post("/api/projects", json=_make_sample_project(pid)).status_code == 200
+
+    # Minimal 1-page PDF
+    d = pymupdf.open()
+    pg = d.new_page(width=700, height=450)
+    pg.insert_text((30, 30), "GROUND FLOOR PLAN", fontsize=12)
+    pdf_bytes = d.tobytes()
+    d.close()
+
+    up = client.post(
+        f"/api/projects/{pid}/pdf-imports",
+        files={"file": ("snap_test.pdf", pdf_bytes, "application/pdf")},
+    )
+    assert up.status_code == 200, up.text
+    doc_id = up.json()["doc_id"]
+
+    # 2. Uncalibrated snap-and-clean -> 400
+    bad_snap = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/snap-and-clean",
+        json={"page_number": 1},
+    )
+    assert bad_snap.status_code == 400
+
+    # 3. Calibrate at 50 px/m (300 px = 6.0 m) and confirm
+    cal = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/pages/1/calibrate",
+        json={
+            "p1": {"x_px": 100.0, "y_px": 400.0},
+            "p2": {"x_px": 400.0, "y_px": 400.0},
+            "known_distance": 6.0,
+            "unit": "m",
+            "confirmed": True,
+        },
+    )
+    assert cal.status_code == 200, cal.text
+
+    # Add grids: X=100 (A), X=103 (A_dup, 60mm away), X=400 (B, 6m), X=1100 (C, 14m extreme bay), Y=400 (1), Y=150 (2, 5m)
+    for axis, label, coord_px in [
+        ("x", "A", 100.0),
+        ("x", "A_dup", 103.0),
+        ("x", "B", 400.0),
+        ("x", "C", 1100.0),
+        ("y", "1", 400.0),
+        ("y", "2", 150.0),
+    ]:
+        r = client.post(
+            f"/api/projects/{pid}/pdf-imports/{doc_id}/candidates/grids",
+            json={"page_number": 1, "axis": axis, "label": label, "coord_px": coord_px, "status": "approved"},
+        )
+        assert r.status_code == 200, r.text
+
+    # Add orphan column (240 mm off A-1, 180 mm off A_dup: 12 px at 50 px/m), plus two overlapping columns near B-2 (60 mm apart)
+    for col_id, x_px, y_px in [
+        ("C1", 112.0, 400.0),
+        ("C2", 400.0, 150.0),
+        ("C2_dup", 403.0, 150.0),
+    ]:
+        r = client.post(
+            f"/api/projects/{pid}/pdf-imports/{doc_id}/candidates/columns",
+            json={"page_number": 1, "column_id": col_id, "x_px": x_px, "y_px": y_px, "status": "approved"},
+        )
+        assert r.status_code == 200, r.text
+
+    # Add a disconnected diagonal beam (endpoints far from columns/intersections)
+    bm_res = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/candidates/beams",
+        json={
+            "page_number": 1,
+            "x1_px": 250.0,
+            "y1_px": 275.0,
+            "x2_px": 330.0,
+            "y2_px": 200.0,
+            "member_type": "secondary_beam",
+        },
+    )
+    assert bm_res.status_code == 200, bm_res.text
+
+    # 4. Pre-flight diagnostics detects all 5 geometric issues
+    diag = client.get(f"/api/projects/{pid}/pdf-imports/{doc_id}/pages/1/diagnostics")
+    assert diag.status_code == 200, diag.text
+    djson = diag.json()
+    codes = {iss["code"] for iss in djson["issues"]}
+    assert "duplicate_grids" in codes
+    assert "duplicate_columns" in codes
+    assert "orphan_columns" in codes
+    assert "extreme_bay_span" in codes
+    assert "disconnected_beam" in codes
+    assert djson["diagonal_beam_count"] == 1
+
+    # 5. Snap & Clean merges duplicates and snaps C1 onto A-1
+    sc = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/snap-and-clean",
+        json={
+            "page_number": 1,
+            "snap_tolerance_mm": 250.0,
+            "merge_grid_tolerance_mm": 100.0,
+            "merge_column_tolerance_mm": 150.0,
+            "snap_columns": True,
+            "merge_duplicates": True,
+        },
+    )
+    assert sc.status_code == 200, sc.text
+    st = sc.json()
+    x_grids = [g for g in st["grid_candidates"] if g["axis"] == "x"]
+    assert len(x_grids) == 3  # A_dup merged
+    assert len(st["column_candidates"]) == 2  # C2_dup merged
+    c1 = next(c for c in st["column_candidates"] if c["column_id"] == "C1")
+    assert c1["x_px"] == pytest.approx(100.0, abs=0.1)
+    assert c1["y_px"] == pytest.approx(400.0, abs=0.1)
+    assert c1["grid"] == "A-1"
+
+    # 6. PATCH /candidates/{id} position move updates x_m, y_m
+    mv = client.patch(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/candidates/{c1['id']}",
+        json={"x_px": 150.0, "y_px": 350.0},
+    )
+    assert mv.status_code == 200, mv.text
+    c1_moved = next(c for c in mv.json()["column_candidates"] if c["id"] == c1["id"])
+    assert c1_moved["x_m"] == pytest.approx(1.0, abs=0.01)
+    assert c1_moved["y_m"] == pytest.approx(1.0, abs=0.01)
+
+
+def test_p3_diagonal_beam_detection_manual_and_module03_transfer(isolated_env):
+    """
+    Verify diagonal beam auto-detection ignores orthogonal grids and opening X-crosses,
+    supports manual creation, transfers approved diagonal beams into
+    ProjectState.structural_model.manual_beams while preserving user-authored overrides,
+    and replays cleanly in Module 03 generate_structural_model().
+    """
+    client, _ = isolated_env
+    pid = "TEST-P3-DIAG"
+    proj_payload = _make_sample_project(pid)
+    # Seed a user-authored Module 03 manual beam override to verify it is preserved
+    proj_payload["structural_model"] = {
+        "manual_beams": [
+            {
+                "override_id": "user_custom_1",
+                "floor_level": "2F",
+                "start_xyz_m": [0.0, 3.0, 0.0],
+                "end_xyz_m": [6.0, 3.0, 0.0],
+                "member_type": "tie_beam",
+                "grid_ref": "USER",
+            }
+        ]
+    }
+    assert client.post("/api/projects", json=proj_payload).status_code == 200
+
+    # Build a 1-page vector PDF: 2x2 bay (A=120, B=360; 1=360, 2=180 pt -> 6m x 4.5m at 40 pt/m)
+    # + 4 shaded columns + 1 true diagonal framing beam (A-1 -> B-2)
+    # + 1 stairwell box with an internal X-cross (must NOT be detected as diagonal beams!)
+    doc = pymupdf.open()
+    pg = doc.new_page(width=540, height=460)
+    pg.insert_text((30, 28), "SECOND FLOOR PLAN", fontsize=12)
+    sh = pg.new_shape()
+    # Orthogonal grids
+    for x in (120.0, 360.0):
+        sh.draw_line(pymupdf.Point(x, 80.0), pymupdf.Point(x, 420.0))
+        sh.finish(color=(0.3, 0.3, 0.3), width=0.6)
+    for y in (180.0, 360.0):
+        sh.draw_line(pymupdf.Point(60.0, y), pymupdf.Point(440.0, y))
+        sh.finish(color=(0.3, 0.3, 0.3), width=0.6)
+    # 4 shaded columns
+    for cx, cy in [(120.0, 360.0), (360.0, 360.0), (120.0, 180.0), (360.0, 180.0)]:
+        sh.draw_rect(pymupdf.Rect(cx - 8, cy - 8, cx + 8, cy + 8))
+        sh.finish(color=(0.1, 0.1, 0.1), fill=(0.5, 0.5, 0.5), width=0.8)
+    # True diagonal beam from A-1 (120, 360) to B-2 (360, 180)
+    sh.draw_line(pymupdf.Point(120.0, 360.0), pymupdf.Point(360.0, 180.0))
+    sh.finish(color=(0.0, 0.0, 0.0), width=1.4)
+    # Stairwell opening X-cross inside [130..190, 190..250] (clear of diagonal beam midpoint (240, 270))
+    sh.draw_line(pymupdf.Point(135.0, 195.0), pymupdf.Point(185.0, 245.0))
+    sh.finish(color=(0.4, 0.4, 0.4), width=0.8)
+    sh.draw_line(pymupdf.Point(135.0, 245.0), pymupdf.Point(185.0, 195.0))
+    sh.finish(color=(0.4, 0.4, 0.4), width=0.8)
+    sh.commit()
+    pdf_bytes = doc.tobytes()
+    doc.close()
+
+    up = client.post(
+        f"/api/projects/{pid}/pdf-imports",
+        files={"file": ("diag_beam.pdf", pdf_bytes, "application/pdf")},
+    )
+    assert up.status_code == 200, up.text
+    st = up.json()
+    doc_id = st["doc_id"]
+    p1 = st["pages"][0]
+    sx = p1["width_px"] / p1["width_pt"]
+    sy = p1["height_px"] / p1["height_pt"]
+
+    # Calibrate at 40 pt/m (240 pt = 6.0 m)
+    cal = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/pages/1/calibrate",
+        json={
+            "p1": {"x_px": 120.0 * sx, "y_px": 360.0 * sy},
+            "p2": {"x_px": 360.0 * sx, "y_px": 360.0 * sy},
+            "known_distance": 6.0,
+            "unit": "m",
+            "confirmed": True,
+        },
+    )
+    assert cal.status_code == 200, cal.text
+
+    # Add grids A, B, 1, 2 and columns at the 4 intersections + stairwell opening
+    for axis, label, coord_px in [
+        ("x", "A", 120.0 * sx),
+        ("x", "B", 360.0 * sx),
+        ("y", "1", 360.0 * sy),
+        ("y", "2", 180.0 * sy),
+    ]:
+        assert (
+            client.post(
+                f"/api/projects/{pid}/pdf-imports/{doc_id}/candidates/grids",
+                json={"page_number": 1, "axis": axis, "label": label, "coord_px": coord_px, "status": "approved"},
+            ).status_code
+            == 200
+        )
+    for cid, gx, gy, gref in [
+        ("C1", 120.0, 360.0, "A-1"),
+        ("C2", 360.0, 360.0, "B-1"),
+        ("C3", 120.0, 180.0, "A-2"),
+        ("C4", 360.0, 180.0, "B-2"),
+    ]:
+        assert (
+            client.post(
+                f"/api/projects/{pid}/pdf-imports/{doc_id}/candidates/columns",
+                json={
+                    "page_number": 1,
+                    "column_id": cid,
+                    "grid": gref,
+                    "x_px": gx * sx,
+                    "y_px": gy * sy,
+                    "status": "approved",
+                },
+            ).status_code
+            == 200
+        )
+    assert (
+        client.post(
+            f"/api/projects/{pid}/pdf-imports/{doc_id}/openings",
+            json={
+                "page_number": 1,
+                "category": "stairwell",
+                "label": "STAIR-1",
+                "polygon_px": [
+                    {"x_px": 130.0 * sx, "y_px": 190.0 * sy},
+                    {"x_px": 190.0 * sx, "y_px": 190.0 * sy},
+                    {"x_px": 190.0 * sx, "y_px": 250.0 * sy},
+                    {"x_px": 130.0 * sx, "y_px": 250.0 * sy},
+                ],
+            },
+        ).status_code
+        == 200
+    )
+
+    # Extract diagonal beams only
+    ex = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/pages/1/extract",
+        json={
+            "method": "vector",
+            "options": {
+                "detect_grids": False,
+                "detect_columns": False,
+                "detect_diagonal_beams": True,
+            },
+        },
+    )
+    assert ex.status_code == 200, ex.text
+    beams = ex.json()["document"]["beam_candidates"]
+    # Exactly 1 diagonal beam (A-1 -> B-2); stairwell X-cross and orthogonal grids excluded
+    assert len(beams) == 1, f"Expected 1 diagonal beam, got {beams}"
+    db1 = beams[0]
+    assert db1["length_m"] == pytest.approx(7.5, abs=0.25)  # hypot(6.0, 4.5) = 7.5 m
+
+    # Approve the detected diagonal beam and update member_type
+    rev = client.patch(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/candidates/{db1['id']}",
+        json={"status": "approved", "member_type": "primary_beam"},
+    )
+    assert rev.status_code == 200, rev.text
+
+    # Transfer to project (replace_geometry mode must STILL preserve user_custom_1!)
+    tr = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/transfer",
+        json={"page_number": 1, "merge_mode": "replace_geometry"},
+    )
+    assert tr.status_code == 200, tr.text
+    proj_after = tr.json()["project"]
+    overrides = proj_after["structural_model"]["manual_beams"]
+    ov_ids = {o["override_id"] for o in overrides}
+    assert "user_custom_1" in ov_ids
+    imp_ovs = [o for o in overrides if o["override_id"].startswith("imp_beam_")]
+    assert len(imp_ovs) >= 1
+    assert any(
+        o["start_xyz_m"][0] == pytest.approx(0.0, abs=0.1)
+        and o["end_xyz_m"][0] == pytest.approx(6.0, abs=0.1)
+        and o["end_xyz_m"][2] == pytest.approx(4.5, abs=0.1)
+        for o in imp_ovs
+    )
+
+    # Module 03 generate_structural_model replays the diagonal beam into analytical members!
+    gen = client.post(f"/api/projects/{pid}/geometry/generate", json={})
+    assert gen.status_code == 200, gen.text
+    sm = gen.json().get("structural_model") or gen.json()
+    diag_members = [
+        m
+        for m in sm["members"]
+        if m["member_type"] == "primary_beam" and m["length_m"] == pytest.approx(7.5, abs=0.25)
+    ]
+    assert len(diag_members) >= 1, f"Expected transferred diagonal beam in Module 03 members: {sm['members']}"

@@ -27,6 +27,12 @@ const COLUMN_FILL_MODES = [
   { value: "gray_shaded_only", label: "Gray Shaded Only" },
   { value: "any_filled", label: "Any Filled" },
 ];
+const BEAM_MEMBER_TYPES = [
+  { value: "primary_beam", label: "Primary Beam" },
+  { value: "secondary_beam", label: "Secondary Beam" },
+  { value: "tie_beam", label: "Tie Beam" },
+  { value: "trimmer_beam", label: "Trimmer Beam" },
+];
 
 function openingColor(category) {
   const found = OPENING_CATEGORIES.find((c) => c.value === category);
@@ -133,6 +139,14 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
   const [minColFillPct, setMinColFillPct] = useState("35");
   const [maxColAspect, setMaxColAspect] = useState("2.5");
   const [requireNearGrid, setRequireNearGrid] = useState(false);
+  const [detectDiagonalBeams, setDetectDiagonalBeams] = useState(true);
+
+  // Diagonal beam drawing, Snap & Clean, and Pre-Flight Diagnostics
+  const [beamStartPt, setBeamStartPt] = useState(null);
+  const [newBeamType, setNewBeamType] = useState("primary_beam");
+  const [snapTolMm, setSnapTolMm] = useState("120");
+  const [diagnostics, setDiagnostics] = useState(null);
+  const [highlightedCandIds, setHighlightedCandIds] = useState([]);
 
   // Manual tracing & column/opening inputs
   const [nextGridXLabel, setNextGridXLabel] = useState("A");
@@ -247,6 +261,11 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
     [doc, pageNum]
   );
 
+  const pageBeams = useMemo(
+    () => (doc ? (doc.beam_candidates || []).filter((b) => b.page_number === pageNum) : []),
+    [doc, pageNum]
+  );
+
   const pageOpenings = useMemo(
     () => (doc ? (doc.openings || []).filter((o) => o.page_number === pageNum) : []),
     [doc, pageNum]
@@ -334,7 +353,7 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
   );
 
   const counts = useMemo(() => {
-    const all = [...pageGrids, ...pageCols];
+    const all = [...pageGrids, ...pageCols, ...pageBeams];
     return {
       total: all.length,
       pending: all.filter((x) => x.status === "pending").length,
@@ -342,9 +361,43 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
       rejected: all.filter((x) => x.status === "rejected").length,
       approvedGrids: pageGrids.filter((x) => x.status === "approved").length,
       approvedCols: pageCols.filter((x) => x.status === "approved").length,
+      approvedBeams: pageBeams.filter((x) => x.status === "approved" || x.engineer_approved).length,
       approvedOpenings: pageOpenings.filter((o) => o.engineer_approved || o.review_status === "approved").length,
     };
-  }, [pageGrids, pageCols, pageOpenings]);
+  }, [pageGrids, pageCols, pageBeams, pageOpenings]);
+
+  useEffect(() => {
+    if (!doc || !activePage || isElevationOrSection) {
+      setDiagnostics(null);
+      return;
+    }
+    if (activeRegion && (activeRegion.region_type || "plan") === "elevation") {
+      setDiagnostics(null);
+      return;
+    }
+    let cancelled = false;
+    const qs = activeRegionId ? `?region_id=${encodeURIComponent(activeRegionId)}` : "";
+    apiJson(
+      `/api/projects/${pid}/pdf-imports/${encodeURIComponent(doc.doc_id)}/pages/${activePage.page_number}/diagnostics${qs}`
+    )
+      .then((res) => {
+        if (!cancelled) setDiagnostics(res);
+      })
+      .catch(() => {
+        if (!cancelled) setDiagnostics(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    pid,
+    doc?.doc_id,
+    doc?.updated_at,
+    activePage?.page_number,
+    activeRegionId,
+    activeRegion?.region_type,
+    isElevationOrSection,
+  ]);
 
   const draftPixelDist = useMemo(() => {
     if (!calP1 || !calP2) return null;
@@ -456,6 +509,8 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
       if (e.key === "Escape") {
         setOpeningVertices([]);
         setRegionCorner1(null);
+        setBeamStartPt(null);
+        setHighlightedCandIds([]);
         setNotice("Cancelled active draft.");
       } else if (e.key === "Backspace" && mode === "trace_opening" && openingVertices.length > 0) {
         e.preventDefault();
@@ -521,16 +576,32 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
     };
   }
 
-  // Compute nearest grid intersection within 18 screen-px (unless Shift is held)
+  // Compute nearest grid intersection (or column center for diagonal beam drawing) within 18 screen-px (unless Shift is held)
   const snappedIntersection = useMemo(() => {
     if (!hoverPt || shiftPressed) return null;
-    if (mode !== "place_column" && mode !== "trace_opening" && mode !== "set_origin" && mode !== "stamp_master_grid") {
+    if (
+      mode !== "place_column" &&
+      mode !== "place_beam" &&
+      mode !== "trace_opening" &&
+      mode !== "set_origin" &&
+      mode !== "stamp_master_grid"
+    ) {
       return null;
     }
     const scale = hoverPt.screenScale || 1;
     const maxImgDist = 18 / Math.max(scale, 0.05);
     let best = null;
     let bestDist = Infinity;
+    if (mode === "place_beam") {
+      for (const col of pageCols) {
+        if (col.status === "rejected") continue;
+        const d = Math.hypot(hoverPt.x_px - col.x_px, hoverPt.y_px - col.y_px);
+        if (d <= maxImgDist && d < bestDist) {
+          bestDist = d;
+          best = { x_px: col.x_px, y_px: col.y_px, gridRef: col.grid || col.column_id };
+        }
+      }
+    }
     for (const inter of gridIntersections) {
       const d = Math.hypot(hoverPt.x_px - inter.x_px, hoverPt.y_px - inter.y_px);
       if (d <= maxImgDist && d < bestDist) {
@@ -539,7 +610,7 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
       }
     }
     return best;
-  }, [hoverPt, shiftPressed, mode, gridIntersections]);
+  }, [hoverPt, shiftPressed, mode, gridIntersections, pageCols]);
 
   // Live cursor readout in plan meters (if calibrated or master grid scale exists)
   const hoverMeters = useMemo(() => {
@@ -886,6 +957,58 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
           snappedIntersection
             ? `Placed column ${newest?.column_id || ""} snapped to ${gridRef}.`
             : `Placed off-grid column ${newest?.column_id || ""} at (${targetPt.x_px}, ${targetPt.y_px}) px.`
+        );
+      } catch (err) {
+        setError(err.message);
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+
+    if (mode === "place_beam") {
+      const clickPt = snappedIntersection
+        ? { x_px: snappedIntersection.x_px, y_px: snappedIntersection.y_px }
+        : { x_px: pt.x_px, y_px: pt.y_px };
+      setError("");
+      if (!beamStartPt) {
+        setBeamStartPt(clickPt);
+        setNotice(
+          snappedIntersection
+            ? `Beam start snapped to ${snappedIntersection.gridRef}. Click end point (column or grid intersection).`
+            : `Beam start set at (${clickPt.x_px}, ${clickPt.y_px}) px. Click end point.`
+        );
+        return;
+      }
+      if (Math.hypot(clickPt.x_px - beamStartPt.x_px, clickPt.y_px - beamStartPt.y_px) < 4) {
+        setError("Beam end point must be different from start point.");
+        return;
+      }
+      setBusy(true);
+      try {
+        const updated = await apiJson(
+          `/api/projects/${pid}/pdf-imports/${encodeURIComponent(doc.doc_id)}/candidates/beams`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              page_number: activePage.page_number,
+              region_id: activeRegionId || null,
+              x1_px: beamStartPt.x_px,
+              y1_px: beamStartPt.y_px,
+              x2_px: clickPt.x_px,
+              y2_px: clickPt.y_px,
+              member_type: newBeamType,
+              status: "approved",
+            }),
+          }
+        );
+        setDoc(updated);
+        const newest = updated.beam_candidates?.[updated.beam_candidates.length - 1];
+        setSelectedId(newest?.id || null);
+        setBeamStartPt(null);
+        setNotice(
+          `Added diagonal beam ${newest?.beam_id || ""} (${newest?.length_m != null ? `${newest.length_m.toFixed(2)} m` : `${newest?.angle_deg || 0}°`}).`
         );
       } catch (err) {
         setError(err.message);
@@ -1428,6 +1551,7 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
               require_grid_label: requireGridLabel,
               detect_grids: detectGrids,
               detect_columns: detectColumns,
+              detect_diagonal_beams: detectDiagonalBeams,
               column_fill_mode: columnFillMode,
               min_column_size_m: Number(minColVal.toFixed(3)),
               max_column_size_m: Number(maxColVal.toFixed(3)),
@@ -1636,7 +1760,7 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
 
   async function handleBulkReview(status) {
     if (!doc) return;
-    const ids = [...pageGrids, ...pageCols].map((x) => x.id);
+    const ids = [...pageGrids, ...pageCols, ...pageBeams].map((x) => x.id);
     if (ids.length === 0) return;
     setBusy(true);
     setError("");
@@ -1656,6 +1780,64 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
     } finally {
       setBusy(false);
     }
+  }
+
+  async function handleSnapAndClean({ snapColumns = true, mergeDuplicates = true } = {}) {
+    if (!doc || !activePage) return;
+    setBusy(true);
+    setError("");
+    try {
+      const tol = Math.min(2000, Math.max(10, parseFloat(snapTolMm) || 120));
+      const updated = await apiJson(
+        `/api/projects/${pid}/pdf-imports/${encodeURIComponent(doc.doc_id)}/snap-and-clean`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            page_number: activePage.page_number,
+            region_id: activeRegionId || null,
+            snap_tolerance_mm: tol,
+            merge_grid_tolerance_mm: Math.min(tol, 150),
+            merge_column_tolerance_mm: Math.min(tol, 200),
+            snap_columns: snapColumns,
+            merge_duplicates: mergeDuplicates,
+          }),
+        }
+      );
+      setDoc(updated);
+      setHighlightedCandIds([]);
+      setNotice(
+        snapColumns && mergeDuplicates
+          ? `Snapped columns & beams to grids and merged duplicates (tol ${tol} mm).`
+          : snapColumns
+          ? `Snapped columns & diagonal beam endpoints to grid intersections (tol ${tol} mm).`
+          : `Merged duplicate grids and overlapping columns (tol ${tol} mm).`
+      );
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleSnapSingleColumn(col) {
+    if (!doc || gridIntersections.length === 0) return;
+    let best = null;
+    let bestDist = Infinity;
+    for (const inter of gridIntersections) {
+      const d = Math.hypot(col.x_px - inter.x_px, col.y_px - inter.y_px);
+      if (d < bestDist) {
+        bestDist = d;
+        best = inter;
+      }
+    }
+    if (!best) return;
+    await handleReviewCandidate(col.id, {
+      x_px: best.x_px,
+      y_px: best.y_px,
+      grid: best.gridRef,
+    });
+    setNotice(`Snapped ${col.column_id} to grid intersection ${best.gridRef}.`);
   }
 
   async function handleTransfer() {
@@ -2041,9 +2223,24 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
                         setMode("place_column");
                         setRegionCorner1(null);
                         setOpeningVertices([]);
+                        setBeamStartPt(null);
                       }}
                     >
                       Place Column
+                    </button>
+                    <button
+                      className={`secondary ${mode === "place_beam" ? "active" : ""}`}
+                      onClick={() => {
+                        setMode("place_beam");
+                        setRegionCorner1(null);
+                        setOpeningVertices([]);
+                        setBeamStartPt(null);
+                        setNotice(
+                          "Draw Diagonal Beam: click start column/grid intersection, then click end point (Shift bypasses snap, Esc cancels)."
+                        );
+                      }}
+                    >
+                      Draw Diagonal Beam
                     </button>
                     <button
                       className={`secondary ${mode === "trace_opening" ? "active" : ""}`}
@@ -2159,6 +2356,40 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
                       <small className="pdf-hint">
                         Hover near any grid intersection to snap automatically. Hold{" "}
                         <strong>Shift</strong> to place off-grid.
+                      </small>
+                    </div>
+                  )}
+
+                  {mode === "place_beam" && (
+                    <div className="pdf-mode-subbar">
+                      <label className="pdf-field-chip">
+                        <span>Member Type</span>
+                        <select
+                          className="pdf-select"
+                          value={newBeamType}
+                          onChange={(e) => setNewBeamType(e.target.value)}
+                          aria-label="Diagonal beam member type"
+                        >
+                          {BEAM_MEMBER_TYPES.map((t) => (
+                            <option key={t.value} value={t.value}>
+                              {t.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      {beamStartPt && (
+                        <button
+                          type="button"
+                          className="mini-btn on-reject"
+                          onClick={() => setBeamStartPt(null)}
+                        >
+                          Cancel Start
+                        </button>
+                      )}
+                      <small className="pdf-hint">
+                        {beamStartPt
+                          ? "Start point set — click a second column or grid intersection to complete diagonal beam."
+                          : "Click 2 points to draw a diagonal / skewed beam. Snaps to columns & grid intersections (hold Shift for freehand)."}
                       </small>
                     </div>
                   )}
@@ -2684,6 +2915,46 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
                           Scan Columns Only
                         </button>
                       </div>
+                      <div
+                        className="pdf-inline-form"
+                        style={{ marginTop: "6px", flexWrap: "wrap", gap: "6px" }}
+                      >
+                        <label className="pdf-field-chip" title="Snap & merge tolerance in millimeters">
+                          <span>Snap Tol (mm)</span>
+                          <input
+                            type="number"
+                            min="10"
+                            max="2000"
+                            step="10"
+                            value={snapTolMm}
+                            onChange={(e) => setSnapTolMm(e.target.value)}
+                            aria-label="Snap tolerance (mm)"
+                            style={{ width: 68 }}
+                          />
+                        </label>
+                        <button
+                          type="button"
+                          className="mini-btn"
+                          disabled={busy || !activeCalibration?.confirmed}
+                          onClick={() =>
+                            handleSnapAndClean({ snapColumns: true, mergeDuplicates: false })
+                          }
+                          title="Snap columns and diagonal beam endpoints onto nearest grid intersections"
+                        >
+                          Snap Columns to Grids
+                        </button>
+                        <button
+                          type="button"
+                          className="mini-btn"
+                          disabled={busy || !activeCalibration?.confirmed}
+                          onClick={() =>
+                            handleSnapAndClean({ snapColumns: false, mergeDuplicates: true })
+                          }
+                          title="Merge duplicate same-axis grids and overlapping columns"
+                        >
+                          Merge Duplicates
+                        </button>
+                      </div>
                     </div>
                   </div>
 
@@ -2944,6 +3215,14 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
                             onChange={(e) => setRequireNearGrid(e.target.checked)}
                           />
                           <span>Near Grids Only</span>
+                        </label>
+                        <label className="pdf-check-chip">
+                          <input
+                            type="checkbox"
+                            checked={detectDiagonalBeams}
+                            onChange={(e) => setDetectDiagonalBeams(e.target.checked)}
+                          />
+                          <span>Detect Diagonal Beams</span>
                         </label>
                       </div>
                     )}
@@ -3242,7 +3521,8 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
 
                     {/* Grid Candidates */}
                     {pageGrids.map((g) => {
-                      const color = statusColor(g.status);
+                      const isHi = highlightedCandIds.includes(g.id);
+                      const color = isHi ? "#f59e0b" : statusColor(g.status);
                       const isSel = selectedId === g.id;
                       const strokeW = Math.max(activePage.width_px * 0.002, 1.5) * invZ;
                       const bubbleR = Math.max(activePage.width_px * 0.013, 11) * invZ;
@@ -3272,7 +3552,7 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
                             x2={g.x2_px}
                             y2={g.y2_px}
                             stroke={color}
-                            strokeWidth={isSel ? strokeW * 1.9 : strokeW}
+                            strokeWidth={isSel || isHi ? strokeW * 2.1 : strokeW}
                             strokeDasharray={`${strokeW * 5} ${strokeW * 3}`}
                           />
                           <circle
@@ -3297,9 +3577,84 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
                       );
                     })}
 
+                    {/* Diagonal / Skewed Beam Candidates */}
+                    {pageBeams.map((b) => {
+                      const isHi = highlightedCandIds.includes(b.id);
+                      const isSel = selectedId === b.id;
+                      const color = isHi
+                        ? "#f59e0b"
+                        : b.status === "approved"
+                        ? "#a855f7"
+                        : statusColor(b.status);
+                      const strokeW = Math.max(activePage.width_px * 0.0026, 2.2) * invZ;
+                      const fontSize = Math.max(activePage.width_px * 0.0105, 10) * invZ;
+                      const mx = (b.x1_px + b.x2_px) * 0.5;
+                      const my = (b.y1_px + b.y2_px) * 0.5;
+                      return (
+                        <g
+                          key={b.id}
+                          opacity={b.status === "rejected" ? 0.25 : 0.95}
+                          onClick={(ev) => {
+                            if (mode !== "inspect") return;
+                            ev.stopPropagation();
+                            setSelectedId(b.id);
+                          }}
+                        >
+                          <line
+                            x1={b.x1_px}
+                            y1={b.y1_px}
+                            x2={b.x2_px}
+                            y2={b.y2_px}
+                            stroke={color}
+                            strokeWidth={isSel || isHi ? strokeW * 1.9 : strokeW}
+                          />
+                          <circle cx={b.x1_px} cy={b.y1_px} r={strokeW * 1.4} fill={color} />
+                          <circle cx={b.x2_px} cy={b.y2_px} r={strokeW * 1.4} fill={color} />
+                          <text
+                            x={mx}
+                            y={my - 5 * invZ}
+                            textAnchor="middle"
+                            fill={color}
+                            fontSize={fontSize}
+                            fontWeight="800"
+                            stroke="#0b1220"
+                            strokeWidth={strokeW * 1.3}
+                            paintOrder="stroke"
+                          >
+                            {b.beam_id || "DB"}
+                            {b.length_m != null ? ` (${b.length_m.toFixed(1)}m)` : ""}
+                          </text>
+                        </g>
+                      );
+                    })}
+
+                    {/* Live Diagonal Beam Preview Line */}
+                    {mode === "place_beam" && beamStartPt && hoverPt && (
+                      <g pointerEvents="none">
+                        <line
+                          x1={beamStartPt.x_px}
+                          y1={beamStartPt.y_px}
+                          x2={(snappedIntersection || hoverPt).x_px}
+                          y2={(snappedIntersection || hoverPt).y_px}
+                          stroke="#c084fc"
+                          strokeWidth={Math.max(activePage.width_px * 0.0026, 2.2) * invZ}
+                          strokeDasharray={`${6 * invZ} ${4 * invZ}`}
+                        />
+                        <circle
+                          cx={beamStartPt.x_px}
+                          cy={beamStartPt.y_px}
+                          r={Math.max(activePage.width_px * 0.005, 5) * invZ}
+                          fill="#c084fc"
+                          stroke="#0b1220"
+                          strokeWidth={1.5 * invZ}
+                        />
+                      </g>
+                    )}
+
                     {/* Column Candidates: outlined rect matching detected width_px × height_px + center crosshair + grid label */}
                     {pageCols.map((c) => {
-                      const color = statusColor(c.status);
+                      const isHi = highlightedCandIds.includes(c.id);
+                      const color = isHi ? "#f59e0b" : statusColor(c.status);
                       const isSel = selectedId === c.id;
                       const rw = Math.max(c.width_px || 12, 4);
                       const rh = Math.max(c.height_px || 12, 4);
@@ -3316,15 +3671,26 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
                             setSelectedId(c.id);
                           }}
                         >
+                          {isHi && (
+                            <circle
+                              cx={c.x_px}
+                              cy={c.y_px}
+                              r={Math.max(rw, rh) * 0.95}
+                              fill="none"
+                              stroke="#f59e0b"
+                              strokeWidth={strokeW * 1.6}
+                              strokeDasharray={`${strokeW * 3} ${strokeW * 2}`}
+                            />
+                          )}
                           <rect
                             x={c.x_px - rw / 2}
                             y={c.y_px - rh / 2}
                             width={rw}
                             height={rh}
                             fill={color}
-                            fillOpacity={isSel ? 0.26 : 0.12}
+                            fillOpacity={isSel || isHi ? 0.28 : 0.12}
                             stroke={color}
-                            strokeWidth={isSel ? strokeW * 1.8 : strokeW}
+                            strokeWidth={isSel || isHi ? strokeW * 1.8 : strokeW}
                           />
                           <line
                             x1={c.x_px - crossLen}
@@ -3714,6 +4080,32 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
                             </small>
                           </div>
                           <div className="pdf-cand-actions">
+                            {selectedId === g.id && (
+                              <>
+                                <button
+                                  className="mini-btn"
+                                  disabled={busy}
+                                  title="Nudge grid -2 px"
+                                  onClick={(ev) => {
+                                    ev.stopPropagation();
+                                    handleReviewCandidate(g.id, { coord_px: g.coord_px - 2 });
+                                  }}
+                                >
+                                  ◀
+                                </button>
+                                <button
+                                  className="mini-btn"
+                                  disabled={busy}
+                                  title="Nudge grid +2 px"
+                                  onClick={(ev) => {
+                                    ev.stopPropagation();
+                                    handleReviewCandidate(g.id, { coord_px: g.coord_px + 2 });
+                                  }}
+                                >
+                                  ▶
+                                </button>
+                              </>
+                            )}
                             <button
                               className={`mini-btn ${g.status === "approved" ? "on-approve" : ""}`}
                               disabled={busy}
@@ -3776,6 +4168,19 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
                             </small>
                           </div>
                           <div className="pdf-cand-actions">
+                            {selectedId === c.id && gridIntersections.length > 0 && (
+                              <button
+                                className="mini-btn"
+                                disabled={busy}
+                                title="Snap column to nearest grid intersection"
+                                onClick={(ev) => {
+                                  ev.stopPropagation();
+                                  handleSnapSingleColumn(c);
+                                }}
+                              >
+                                ⌖
+                              </button>
+                            )}
                             <button
                               className={`mini-btn ${c.status === "approved" ? "on-approve" : ""}`}
                               disabled={busy}
@@ -3803,6 +4208,84 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
                               onClick={(ev) => {
                                 ev.stopPropagation();
                                 handleDeleteElement(c.id);
+                              }}
+                            >
+                              ×
+                            </button>
+                          </div>
+                        </div>
+                      ))
+                    )}
+
+                    <h4>Diagonal Beams ({pageBeams.length})</h4>
+                    {pageBeams.length === 0 ? (
+                      <p className="pdf-muted">
+                        No diagonal beams yet. Detect vector framing or use{" "}
+                        <strong>Draw Diagonal Beam</strong>.
+                      </p>
+                    ) : (
+                      pageBeams.map((b) => (
+                        <div
+                          key={b.id}
+                          className={`pdf-cand-row status-${b.status} ${selectedId === b.id ? "selected" : ""}`}
+                          style={{ borderLeftColor: "#a855f7" }}
+                          onClick={() => setSelectedId(b.id)}
+                        >
+                          <div className="pdf-cand-info">
+                            <strong>
+                              {b.beam_id || "DB"} {b.grid_ref ? `(${b.grid_ref})` : ""}
+                            </strong>
+                            <small>
+                              {b.length_m != null ? `${b.length_m.toFixed(2)} m · ` : ""}
+                              {b.angle_deg.toFixed(1)}° · {b.source}
+                              {b.transferred ? " · Transferred" : ""}
+                            </small>
+                          </div>
+                          <div className="pdf-cand-actions" style={{ flexWrap: "wrap" }}>
+                            <select
+                              className="region-level-select"
+                              value={b.member_type}
+                              disabled={busy}
+                              aria-label={`Member type for ${b.beam_id || b.id}`}
+                              onClick={(ev) => ev.stopPropagation()}
+                              onChange={(ev) => {
+                                ev.stopPropagation();
+                                handleReviewCandidate(b.id, { member_type: ev.target.value });
+                              }}
+                            >
+                              {BEAM_MEMBER_TYPES.map((t) => (
+                                <option key={t.value} value={t.value}>
+                                  {t.label}
+                                </option>
+                              ))}
+                            </select>
+                            <button
+                              className={`mini-btn ${b.status === "approved" ? "on-approve" : ""}`}
+                              disabled={busy}
+                              onClick={(ev) => {
+                                ev.stopPropagation();
+                                handleReviewCandidate(b.id, { status: "approved" });
+                              }}
+                            >
+                              ✓
+                            </button>
+                            <button
+                              className={`mini-btn ${b.status === "rejected" ? "on-reject" : ""}`}
+                              disabled={busy}
+                              onClick={(ev) => {
+                                ev.stopPropagation();
+                                handleReviewCandidate(b.id, { status: "rejected" });
+                              }}
+                            >
+                              −
+                            </button>
+                            <button
+                              className="mini-btn on-reject"
+                              disabled={busy}
+                              title="Delete diagonal beam"
+                              onClick={(ev) => {
+                                ev.stopPropagation();
+                                handleDeleteElement(b.id);
                               }}
                             >
                               ×
@@ -3847,6 +4330,93 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
                       ))
                     )}
                   </div>
+
+                  {diagnostics && (
+                    <div
+                      data-testid="preflight-diagnostics-card"
+                      style={{
+                        marginBottom: "8px",
+                        padding: "8px 10px",
+                        borderRadius: "8px",
+                        background: "rgba(15, 23, 42, 0.72)",
+                        border:
+                          diagnostics.issues && diagnostics.issues.length > 0
+                            ? "1px solid rgba(245, 158, 11, 0.5)"
+                            : "1px solid rgba(69, 201, 168, 0.4)",
+                        fontSize: "11px",
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: "6px",
+                      }}
+                    >
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                        <strong>Pre-Flight Diagnostics</strong>
+                        <span style={{ opacity: 0.85 }}>
+                          {diagnostics.x_grid_count}X × {diagnostics.y_grid_count}Y ·{" "}
+                          {diagnostics.approved_column_count}/{diagnostics.column_count}C
+                          {diagnostics.diagonal_beam_count > 0
+                            ? ` · ${diagnostics.approved_diagonal_beam_count}/${diagnostics.diagonal_beam_count}DB`
+                            : ""}
+                        </span>
+                      </div>
+                      {diagnostics.footprint_x_m != null && diagnostics.footprint_y_m != null && (
+                        <div style={{ opacity: 0.85 }}>
+                          Footprint: {diagnostics.footprint_x_m.toFixed(2)} ×{" "}
+                          {diagnostics.footprint_y_m.toFixed(2)} m
+                          {diagnostics.min_bay_m != null && diagnostics.max_bay_m != null
+                            ? ` · Bays ${diagnostics.min_bay_m.toFixed(2)}–${diagnostics.max_bay_m.toFixed(2)} m`
+                            : ""}
+                        </div>
+                      )}
+                      {diagnostics.issues && diagnostics.issues.length > 0 ? (
+                        <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                          {diagnostics.issues.map((iss, idx) => {
+                            const isActive =
+                              iss.candidate_ids.length > 0 &&
+                              iss.candidate_ids.every((cid) => highlightedCandIds.includes(cid));
+                            return (
+                              <button
+                                key={`${iss.code}-${idx}`}
+                                type="button"
+                                className="mini-btn"
+                                style={{
+                                  textAlign: "left",
+                                  whiteSpace: "normal",
+                                  lineHeight: 1.3,
+                                  background: isActive
+                                    ? "rgba(245, 158, 11, 0.28)"
+                                    : iss.severity === "info"
+                                    ? "rgba(56, 189, 248, 0.14)"
+                                    : "rgba(245, 158, 11, 0.14)",
+                                  borderColor:
+                                    iss.severity === "info"
+                                      ? "rgba(56, 189, 248, 0.45)"
+                                      : "rgba(245, 158, 11, 0.55)",
+                                  color: "#f8fafc",
+                                }}
+                                onClick={() => {
+                                  if (iss.candidate_ids.length === 0) return;
+                                  setHighlightedCandIds(isActive ? [] : iss.candidate_ids);
+                                }}
+                                title={
+                                  iss.candidate_ids.length > 0
+                                    ? "Click to highlight affected candidates on canvas"
+                                    : iss.message
+                                }
+                              >
+                                {iss.severity === "info" ? "ℹ " : "⚠ "}
+                                {iss.message}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <div style={{ color: "#45c9a8" }}>
+                          ✓ Ready for transfer — no geometric conflicts detected.
+                        </div>
+                      )}
+                    </div>
+                  )}
 
                   <div className="pdf-transfer-box">
                     <div className="pdf-inline-form">
@@ -3916,6 +4486,7 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
                       onClick={handleTransfer}
                     >
                       Transfer Approved to Project ({counts.approvedGrids}G · {counts.approvedCols}C
+                      {counts.approvedBeams > 0 ? ` · ${counts.approvedBeams}B` : ""}
                       {counts.approvedOpenings > 0 ? ` · ${counts.approvedOpenings}O` : ""})
                     </button>
                     <small className="pdf-hint">
