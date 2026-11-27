@@ -107,6 +107,13 @@ class GeometryCheckIssue(BaseModel):
     message: str
     floor_level: str = ""
     entity_ids: list[str] = Field(default_factory=list)
+    primary_node_id: int | None = None
+    duplicate_node_id: int | None = None
+    primary_member_id: int | None = None
+    duplicate_member_id: int | None = None
+    node_ids: list[int] = Field(default_factory=list)
+    member_ids: list[int] = Field(default_factory=list)
+    substructures: list[dict[str, list[int]]] = Field(default_factory=list)
 
 
 class GeometryGenerationOptions(BaseModel):

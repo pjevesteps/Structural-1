@@ -9,6 +9,7 @@ from ..models import (
     ProjectState,
     SupportReactionEnvelope,
 )
+from ..sizing.engine import ensure_all_members_sized
 
 PRIMARY_CASES = [
     "EX+",
@@ -345,6 +346,11 @@ def solve_frame_dsm(project: ProjectState) -> AnalysisResults:
     members = sorted(model.members, key=lambda m: m.member_id)
     node_by_id = {n.node_id: n for n in nodes}
     node_idx = {n.node_id: i for i, n in enumerate(nodes)}
+    sec_by_id = {s.section_id: s for s in sizing.sections}
+    asgn_by_mid = {a.member_id: a for a in sizing.member_assignments}
+
+    # Guarantee manually added beams/members always have a valid section before DSM assembly
+    ensure_all_members_sized(project)
     sec_by_id = {s.section_id: s for s in sizing.sections}
     asgn_by_mid = {a.member_id: a for a in sizing.member_assignments}
 
@@ -815,6 +821,11 @@ def compute_lateral_story_displacements(
     members = sorted(model.members, key=lambda m: m.member_id)
     node_by_id = {n.node_id: n for n in nodes}
     node_idx = {n.node_id: i for i, n in enumerate(nodes)}
+    sec_by_id = {s.section_id: s for s in sizing.sections}
+    asgn_by_mid = {a.member_id: a for a in sizing.member_assignments}
+
+    # Guarantee manually added beams/members always have a valid section before DSM assembly
+    ensure_all_members_sized(project)
     sec_by_id = {s.section_id: s for s in sizing.sections}
     asgn_by_mid = {a.member_id: a for a in sizing.member_assignments}
 

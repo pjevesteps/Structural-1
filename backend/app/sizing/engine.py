@@ -359,3 +359,155 @@ def auto_size_members(
     temp_project = project.model_copy(update={"member_sizing": sizing_state})
     sizing_state.validation_issues = validate_member_sizing(temp_project)
     return sizing_state
+
+
+def ensure_all_members_sized(project: ProjectState) -> bool:
+    """
+    Guarantee every analytical member in project.structural_model.members (including
+    beams added manually in Module 03 after running Module 04/05) has a valid section
+    definition and MemberPropertyAssignment in project.member_sizing.
+    Returns True if any missing assignment or default section was created.
+    """
+    model = project.structural_model
+    if not model.members:
+        return False
+
+    sizing = project.member_sizing
+    mat = sizing.material
+    if mat.ec_kn_m2 <= 0:
+        mat.ec_kn_m2 = compute_ec_kn_m2(mat.fc_mpa)
+    opts = sizing.options
+
+    sec_by_id = {s.section_id: s for s in sizing.sections}
+    asgn_by_mid = {a.member_id: a for a in sizing.member_assignments}
+    changed = False
+
+    def _find_or_create_default_section(member_type: str) -> str:
+        nonlocal changed
+        if member_type == "column":
+            existing = next((s for s in sizing.sections if s.category == "column"), None)
+            if existing is not None:
+                return existing.section_id
+            sid = "C-AUTO"
+            if sid not in sec_by_id:
+                dim = 350.0 if opts.seismic_smrf_zone4 else 300.0
+                sec = SectionDefinition(
+                    section_id=sid,
+                    label=f"{sid} ({int(dim)}x{int(dim)})",
+                    category="column",
+                    width_mm=dim,
+                    depth_mm=dim,
+                    material_name=mat.name,
+                    color_hex=COL_COLORS[0],
+                    cracked_ix=0.70,
+                    cracked_iy=0.70,
+                    cracked_iz=0.70,
+                )
+                sizing.sections.append(sec)
+                sec_by_id[sid] = sec
+                changed = True
+            return sid
+
+        if member_type == "tie_beam":
+            existing = next((s for s in sizing.sections if s.category == "tie_beam"), None)
+            if existing is not None:
+                return existing.section_id
+            sid = "TB-AUTO"
+            if sid not in sec_by_id:
+                b = 300.0 if opts.seismic_smrf_zone4 else 250.0
+                h = 400.0
+                sec = SectionDefinition(
+                    section_id=sid,
+                    label=f"{sid} ({int(b)}x{int(h)})",
+                    category="tie_beam",
+                    width_mm=b,
+                    depth_mm=h,
+                    material_name=mat.name,
+                    color_hex=TIE_BEAM_COLORS[0],
+                    cracked_ix=0.35,
+                    cracked_iy=0.35,
+                    cracked_iz=0.35,
+                )
+                sizing.sections.append(sec)
+                sec_by_id[sid] = sec
+                changed = True
+            return sid
+
+        if member_type in ("secondary_beam", "trimmer_beam"):
+            existing = next((s for s in sizing.sections if s.category == "secondary_beam"), None)
+            if existing is not None:
+                return existing.section_id
+            sid = "SB-AUTO"
+            if sid not in sec_by_id:
+                b = 250.0 if opts.seismic_smrf_zone4 else 200.0
+                h = 350.0
+                sec = SectionDefinition(
+                    section_id=sid,
+                    label=f"{sid} ({int(b)}x{int(h)})",
+                    category="secondary_beam",
+                    width_mm=b,
+                    depth_mm=h,
+                    material_name=mat.name,
+                    color_hex=SEC_BEAM_COLORS[0],
+                    cracked_ix=0.35,
+                    cracked_iy=0.35,
+                    cracked_iz=0.35,
+                )
+                sizing.sections.append(sec)
+                sec_by_id[sid] = sec
+                changed = True
+            return sid
+
+        # primary_beam (default)
+        existing = next((s for s in sizing.sections if s.category == "primary_beam"), None)
+        if existing is not None:
+            return existing.section_id
+        sid = "B-AUTO"
+        if sid not in sec_by_id:
+            b = 250.0 if opts.seismic_smrf_zone4 else 200.0
+            h = 400.0
+            sec = SectionDefinition(
+                section_id=sid,
+                label=f"{sid} ({int(b)}x{int(h)})",
+                category="primary_beam",
+                width_mm=b,
+                depth_mm=h,
+                material_name=mat.name,
+                color_hex=PRIMARY_BEAM_COLORS[0],
+                cracked_ix=0.35,
+                cracked_iy=0.35,
+                cracked_iz=0.35,
+            )
+            sizing.sections.append(sec)
+            sec_by_id[sid] = sec
+            changed = True
+        return sid
+
+    for m in model.members:
+        existing_asgn = asgn_by_mid.get(m.member_id)
+        if existing_asgn is not None and existing_asgn.section_id in sec_by_id:
+            continue
+        sec_id = _find_or_create_default_section(m.member_type)
+        is_sec = m.member_type in ("secondary_beam", "trimmer_beam")
+        new_asgn = MemberPropertyAssignment(
+            member_id=m.member_id,
+            section_id=sec_id,
+            beta_angle_deg=0.0,
+            release_start_moment=bool(is_sec and opts.pin_secondary_beams),
+            release_end_moment=bool(is_sec and opts.pin_secondary_beams),
+            manual_override=False,
+        )
+        if existing_asgn is not None:
+            sizing.member_assignments = [
+                new_asgn if a.member_id == m.member_id else a for a in sizing.member_assignments
+            ]
+        else:
+            sizing.member_assignments.append(new_asgn)
+        asgn_by_mid[m.member_id] = new_asgn
+        changed = True
+
+    if changed:
+        sizing.member_assignments.sort(key=lambda a: a.member_id)
+        if sizing.generated_at is None:
+            sizing.generated_at = _utc_now()
+    return changed

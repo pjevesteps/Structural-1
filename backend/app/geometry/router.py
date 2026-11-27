@@ -12,6 +12,7 @@ from ..models import (
     ManualBeamOverride,
     StructuralModelState,
 )
+from ..sizing.engine import ensure_all_members_sized
 from .generator import _is_roof_level_id, generate_structural_model, is_perimeter_beam_pair
 from .validator import validate_structural_model
 
@@ -39,6 +40,18 @@ class AddMemberRequest(BaseModel):
 class SupportUpdateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     support_type: Literal["NONE", "FIXED", "PINNED"]
+
+
+class DeleteDuplicateMemberRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    primary_member_id: int | None = Field(default=None, ge=1)
+    duplicate_member_id: int = Field(ge=1)
+
+
+class MergeDuplicateNodeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    primary_node_id: int = Field(ge=1)
+    duplicate_node_id: int = Field(ge=1)
 
 
 def _load_or_404(project_id: str):
@@ -285,6 +298,8 @@ def add_member(project_id: str, payload: AddMemberRequest):
 
     model.engineer_approved = False
     _revalidate_preserving_info(model)
+    if project.member_sizing.generated_at is not None or project.member_sizing.sections:
+        ensure_all_members_sized(project)
     storage.save_project(project)
     return model
 
@@ -315,6 +330,8 @@ def delete_member(project_id: str, member_id: int):
 
     model.engineer_approved = False
     _revalidate_preserving_info(model)
+    if project.member_sizing.generated_at is not None or project.member_sizing.sections:
+        ensure_all_members_sized(project)
     storage.save_project(project)
     return model
 
@@ -367,6 +384,182 @@ def clear_interior_roof_beams(
     if removed_ids:
         model.engineer_approved = False
     _revalidate_preserving_info(model)
+    if project.member_sizing.generated_at is not None or project.member_sizing.sections:
+        ensure_all_members_sized(project)
+    storage.save_project(project)
+    return model
+
+
+def _prune_stale_member_refs(project, removed_member_ids: set[int]) -> None:
+    if not removed_member_ids:
+        return
+    if project.member_sizing.member_assignments:
+        project.member_sizing.member_assignments = [
+            a for a in project.member_sizing.member_assignments if a.member_id not in removed_member_ids
+        ]
+    if project.load_generation.beam_loads:
+        project.load_generation.beam_loads = [
+            b for b in project.load_generation.beam_loads if b.member_id not in removed_member_ids
+        ]
+
+
+def _merge_duplicate_node_in_place(project, primary_nid: int, duplicate_nid: int) -> set[int]:
+    """
+    Merge duplicate_nid into primary_nid:
+      - Promote stronger support (FIXED > PINNED > NONE) onto primary_nid
+      - Rewire all members from duplicate_nid -> primary_nid
+      - Drop zero-length / self-loop members and any newly duplicated node-pair members
+      - Remove duplicate_nid from model.nodes
+    Returns the set of removed member_ids.
+    """
+    model = project.structural_model
+    node_by_id = {n.node_id: n for n in model.nodes}
+    primary = node_by_id.get(primary_nid)
+    duplicate = node_by_id.get(duplicate_nid)
+    if primary is None or duplicate is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Node N{primary_nid} or N{duplicate_nid} not found in structural model.",
+        )
+    if primary_nid == duplicate_nid:
+        raise HTTPException(status_code=400, detail="primary_node_id and duplicate_node_id must differ.")
+
+    rank = {"NONE": 0, "PINNED": 1, "FIXED": 2}
+    if rank.get(duplicate.support_type, 0) > rank.get(primary.support_type, 0):
+        primary.support_type = duplicate.support_type
+        primary.is_support = duplicate.support_type != "NONE"
+
+    # Rewire members and drop self-loops / zero-length / duplicate pairs
+    seen_pairs: set[tuple[int, int]] = set()
+    kept_members: list[AnalyticalMember] = []
+    removed_member_ids: set[int] = set()
+
+    for m in model.members:
+        if m.start_node == duplicate_nid:
+            m.start_node = primary_nid
+        if m.end_node == duplicate_nid:
+            m.end_node = primary_nid
+        if m.start_node == m.end_node:
+            removed_member_ids.add(m.member_id)
+            continue
+        na = node_by_id.get(m.start_node)
+        nb = node_by_id.get(m.end_node)
+        if na is None or nb is None:
+            removed_member_ids.add(m.member_id)
+            continue
+        new_len = _dist_3d(na, nb)
+        if new_len < 0.05:
+            removed_member_ids.add(m.member_id)
+            continue
+        pair = (min(m.start_node, m.end_node), max(m.start_node, m.end_node))
+        if pair in seen_pairs:
+            removed_member_ids.add(m.member_id)
+            continue
+        seen_pairs.add(pair)
+        m.length_m = new_len
+        kept_members.append(m)
+
+    model.members = kept_members
+    model.nodes = [n for n in model.nodes if n.node_id != duplicate_nid]
+    _prune_stale_member_refs(project, removed_member_ids)
+    return removed_member_ids
+
+
+@router.post("/delete-duplicate-member", response_model=StructuralModelState)
+def delete_duplicate_member(project_id: str, payload: DeleteDuplicateMemberRequest):
+    project = _load_or_404(project_id)
+    model = project.structural_model
+    dup_id = payload.duplicate_member_id
+    target = next((m for m in model.members if m.member_id == dup_id), None)
+    if target is None:
+        raise HTTPException(status_code=404, detail=f"Duplicate member M{dup_id} not found.")
+    if payload.primary_member_id is not None and payload.primary_member_id == dup_id:
+        raise HTTPException(status_code=400, detail="primary_member_id and duplicate_member_id must differ.")
+
+    model.members = [m for m in model.members if m.member_id != dup_id]
+    _prune_stale_member_refs(project, {dup_id})
+    model.engineer_approved = False
+    _revalidate_preserving_info(model)
+    storage.save_project(project)
+    return model
+
+
+@router.post("/merge-duplicate-node", response_model=StructuralModelState)
+def merge_duplicate_node(project_id: str, payload: MergeDuplicateNodeRequest):
+    project = _load_or_404(project_id)
+    model = project.structural_model
+    _merge_duplicate_node_in_place(project, payload.primary_node_id, payload.duplicate_node_id)
+    model.engineer_approved = False
+    _revalidate_preserving_info(model)
+    storage.save_project(project)
+    return model
+
+
+@router.post("/delete-orphan-nodes", response_model=StructuralModelState)
+def delete_orphan_nodes(project_id: str):
+    project = _load_or_404(project_id)
+    model = project.structural_model
+    connected: set[int] = set()
+    for m in model.members:
+        connected.add(m.start_node)
+        connected.add(m.end_node)
+    before = len(model.nodes)
+    model.nodes = [n for n in model.nodes if n.node_id in connected]
+    if len(model.nodes) != before:
+        model.engineer_approved = False
+    _revalidate_preserving_info(model)
+    storage.save_project(project)
+    return model
+
+
+@router.post("/clean-all-duplicates", response_model=StructuralModelState)
+def clean_all_duplicates(project_id: str):
+    """
+    Batch-resolve all duplicate coincident nodes (within snap tolerance) and all
+    duplicate members (order-independent {start_node, end_node}) in one safe pass.
+    """
+    project = _load_or_404(project_id)
+    model = project.structural_model
+    tol = max(min(model.options.snap_tolerance_m, 0.05), 1e-4)
+    changed = False
+
+    # 1. Merge duplicate nodes iteratively (always merging higher node_id into lower node_id)
+    while True:
+        nodes_sorted = sorted(model.nodes, key=lambda n: n.node_id)
+        found_pair: tuple[int, int] | None = None
+        for i in range(len(nodes_sorted)):
+            na = nodes_sorted[i]
+            for j in range(i + 1, len(nodes_sorted)):
+                nb = nodes_sorted[j]
+                if _dist_3d(na, nb) < tol:
+                    found_pair = (na.node_id, nb.node_id)
+                    break
+            if found_pair is not None:
+                break
+        if found_pair is None:
+            break
+        _merge_duplicate_node_in_place(project, found_pair[0], found_pair[1])
+        changed = True
+
+    # 2. Remove remaining duplicate members (order-independent {start_node, end_node})
+    seen_pairs: set[tuple[int, int]] = set()
+    kept_members: list[AnalyticalMember] = []
+    removed_mids: set[int] = set()
+    for m in sorted(model.members, key=lambda x: x.member_id):
+        pair = (min(m.start_node, m.end_node), max(m.start_node, m.end_node))
+        if pair in seen_pairs:
+            removed_mids.add(m.member_id)
+            changed = True
+        else:
+            seen_pairs.add(pair)
+            kept_members.append(m)
+    if removed_mids:
+        model.members = kept_members
+        _prune_stale_member_refs(project, removed_mids)
+
+    if changed:
+        model.engineer_approved = False
+    _revalidate_preserving_info(model)
     storage.save_project(project)
     return model
 
@@ -383,6 +576,8 @@ def update_node_support(project_id: str, node_id: int, payload: SupportUpdateReq
     target.is_support = payload.support_type != "NONE"
     model.engineer_approved = False
     _revalidate_preserving_info(model)
+    if project.member_sizing.generated_at is not None or project.member_sizing.sections:
+        ensure_all_members_sized(project)
     storage.save_project(project)
     return model
 

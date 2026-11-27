@@ -1,0 +1,314 @@
+from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+import pytest
+from fastapi.testclient import TestClient
+
+from backend.app import storage
+from backend.app.main import app
+from backend.app.models import AnalyticalMember, AnalyticalNode, ProjectState
+
+
+def _make_2x2_project(project_id: str) -> dict:
+    return {
+        "project_info": {
+            "project_id": project_id,
+            "project_name": "Geometry Cleanup & Manual Beam Test",
+            "location": "Manila",
+            "design_code": "NSCP 2015",
+            "materials": {
+                "fc_mpa": 28.0,
+                "fy_mpa": 415.0,
+                "concrete_density_kn_m3": 24.0,
+            },
+        },
+        "levels": [
+            {"id": "BASE", "elevation_m": 0.0},
+            {"id": "2F", "elevation_m": 3.5},
+        ],
+        "grids": {
+            "x_grids": [
+                {"label": "A", "coord_m": 0.0},
+                {"label": "B", "coord_m": 5.0},
+            ],
+            "y_grids": [
+                {"label": "1", "coord_m": 0.0},
+                {"label": "2", "coord_m": 4.0},
+            ],
+        },
+        "columns": [
+            {"id": "C1", "grid": "A-1", "x_m": 0.0, "y_m": 0.0, "width_mm": 350.0, "depth_mm": 350.0},
+            {"id": "C2", "grid": "B-1", "x_m": 5.0, "y_m": 0.0, "width_mm": 350.0, "depth_mm": 350.0},
+            {"id": "C3", "grid": "A-2", "x_m": 0.0, "y_m": 4.0, "width_mm": 350.0, "depth_mm": 350.0},
+            {"id": "C4", "grid": "B-2", "x_m": 5.0, "y_m": 4.0, "width_mm": 350.0, "depth_mm": 350.0},
+        ],
+        "beams": [],
+    }
+
+
+@pytest.fixture
+def isolated_env(tmp_path, monkeypatch):
+    data_dir = tmp_path / "data"
+    projects_dir = data_dir / "projects"
+    exports_dir = data_dir / "exports"
+    projects_dir.mkdir(parents=True, exist_ok=True)
+    exports_dir.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(storage, "DATA_DIR", projects_dir)
+    return TestClient(app)
+
+
+def test_geometry_integrity_diagnostics_and_cleanup_endpoints(isolated_env):
+    """
+    Verify structured detection and safe cleanup of:
+      - DISJOINTED_SUBSTRUCTURE
+      - ORPHAN_NODE
+      - DUPLICATE_NODE (with member rewiring onto primary_node_id)
+      - DUPLICATE_MEMBER (order-independent {start, end})
+      - Batch clean-all-duplicates
+    """
+    client = isolated_env
+    pid = "TEST-GEOM-CLEANUP"
+    storage.save_project(ProjectState.model_validate(_make_2x2_project(pid)))
+
+    gen = client.post(f"/api/projects/{pid}/geometry/generate", json={})
+    assert gen.status_code == 200, gen.text
+
+    # Inject duplicate node, duplicate member (reversed endpoints), orphan node, and disjointed substructure
+    proj = storage.load_project(pid)
+    model = proj.structural_model
+    top_nodes = [n for n in model.nodes if n.floor_level == "2F"]
+    assert len(top_nodes) == 4
+    n_a1 = next(n for n in top_nodes if abs(n.x_m - 0.0) < 0.01 and abs(n.z_m - 0.0) < 0.01)
+    n_b2 = next(n for n in top_nodes if abs(n.x_m - 5.0) < 0.01 and abs(n.z_m - 4.0) < 0.01)
+
+    max_nid = max(n.node_id for n in model.nodes)
+    max_mid = max(m.member_id for m in model.members)
+
+    # 1. Duplicate node within 0.02 m of n_a1, with a diagonal beam wired to it -> n_b2
+    dup_nid = max_nid + 1
+    model.nodes.append(
+        AnalyticalNode(
+            node_id=dup_nid,
+            x_m=n_a1.x_m + 0.01,
+            y_m=n_a1.y_m,
+            z_m=n_a1.z_m + 0.01,
+            floor_level="2F",
+            grid_ref="DUP",
+            is_support=False,
+            support_type="NONE",
+        )
+    )
+    rewired_mid = max_mid + 1
+    model.members.append(
+        AnalyticalMember(
+            member_id=rewired_mid,
+            start_node=dup_nid,
+            end_node=n_b2.node_id,
+            member_type="primary_beam",
+            floor_level="2F",
+            grid_ref="DIAG",
+            length_m=6.4,
+            manual_override=True,
+        )
+    )
+
+    # 2. Duplicate member overlapping an existing beam (reversed {end, start})
+    existing_beam = next(m for m in model.members if m.member_type != "column" and m.floor_level == "2F")
+    dup_mid = max_mid + 2
+    model.members.append(
+        AnalyticalMember(
+            member_id=dup_mid,
+            start_node=existing_beam.end_node,
+            end_node=existing_beam.start_node,
+            member_type="primary_beam",
+            floor_level="2F",
+            grid_ref="DUP-BEAM",
+            length_m=existing_beam.length_m,
+            manual_override=True,
+        )
+    )
+
+    # 3. Orphan node (zero connected members)
+    orphan_nid = max_nid + 2
+    model.nodes.append(
+        AnalyticalNode(
+            node_id=orphan_nid,
+            x_m=12.0,
+            y_m=3.5,
+            z_m=0.0,
+            floor_level="2F",
+            grid_ref="ORPHAN",
+            is_support=False,
+            support_type="NONE",
+        )
+    )
+
+    # 4. Disjointed 2-node substructure
+    sub_n1, sub_n2 = max_nid + 3, max_nid + 4
+    model.nodes.extend(
+        [
+            AnalyticalNode(
+                node_id=sub_n1, x_m=20.0, y_m=0.0, z_m=0.0, floor_level="BASE", is_support=True, support_type="FIXED"
+            ),
+            AnalyticalNode(
+                node_id=sub_n2, x_m=20.0, y_m=3.5, z_m=0.0, floor_level="2F", is_support=False, support_type="NONE"
+            ),
+        ]
+    )
+    sub_mid = max_mid + 3
+    model.members.append(
+        AnalyticalMember(
+            member_id=sub_mid,
+            start_node=sub_n1,
+            end_node=sub_n2,
+            member_type="column",
+            floor_level="BASE",
+            length_m=3.5,
+        )
+    )
+    storage.save_project(proj)
+
+    # Validate -> verify all 4 structured issue types
+    val = client.post(f"/api/projects/{pid}/geometry/validate")
+    assert val.status_code == 200, val.text
+    issues = val.json()["validation_issues"]
+
+    dup_node_iss = next((i for i in issues if i["code"] == "DUPLICATE_NODE"), None)
+    dup_mem_iss = next((i for i in issues if i["code"] == "DUPLICATE_MEMBER"), None)
+    orphan_iss = next((i for i in issues if i["code"] == "ORPHAN_NODE"), None)
+    disjoint_iss = next((i for i in issues if i["code"] == "DISJOINTED_SUBSTRUCTURE"), None)
+
+    assert dup_node_iss is not None
+    assert dup_node_iss["primary_node_id"] == n_a1.node_id
+    assert dup_node_iss["duplicate_node_id"] == dup_nid
+
+    assert dup_mem_iss is not None
+    assert dup_mem_iss["primary_member_id"] == existing_beam.member_id
+    assert dup_mem_iss["duplicate_member_id"] == dup_mid
+
+    assert orphan_iss is not None
+    assert orphan_nid in orphan_iss["node_ids"]
+
+    assert disjoint_iss is not None
+    assert len(disjoint_iss["substructures"]) >= 2
+    assert sub_n1 in disjoint_iss["node_ids"] and sub_mid in disjoint_iss["member_ids"]
+
+    # Step A: Delete duplicate member
+    res_dm = client.post(
+        f"/api/projects/{pid}/geometry/delete-duplicate-member",
+        json={"primary_member_id": existing_beam.member_id, "duplicate_member_id": dup_mid},
+    )
+    assert res_dm.status_code == 200, res_dm.text
+    mids_after_dm = {m["member_id"] for m in res_dm.json()["members"]}
+    assert existing_beam.member_id in mids_after_dm
+    assert dup_mid not in mids_after_dm
+    assert not any(i["code"] == "DUPLICATE_MEMBER" for i in res_dm.json()["validation_issues"])
+
+    # Step B: Merge duplicate node -> verify rewired_mid now starts at n_a1.node_id!
+    res_mn = client.post(
+        f"/api/projects/{pid}/geometry/merge-duplicate-node",
+        json={"primary_node_id": n_a1.node_id, "duplicate_node_id": dup_nid},
+    )
+    assert res_mn.status_code == 200, res_mn.text
+    nids_after_mn = {n["node_id"] for n in res_mn.json()["nodes"]}
+    assert n_a1.node_id in nids_after_mn
+    assert dup_nid not in nids_after_mn
+    rewired_m = next((m for m in res_mn.json()["members"] if m["member_id"] == rewired_mid), None)
+    assert rewired_m is not None
+    assert rewired_m["start_node"] == n_a1.node_id
+    assert rewired_m["end_node"] == n_b2.node_id
+    assert not any(i["code"] == "DUPLICATE_NODE" for i in res_mn.json()["validation_issues"])
+
+    # Step C: Delete orphan nodes
+    res_or = client.post(f"/api/projects/{pid}/geometry/delete-orphan-nodes")
+    assert res_or.status_code == 200, res_or.text
+    assert orphan_nid not in {n["node_id"] for n in res_or.json()["nodes"]}
+    assert not any(i["code"] == "ORPHAN_NODE" for i in res_or.json()["validation_issues"])
+
+    # Step D: Batch clean-all-duplicates
+    proj2 = storage.load_project(pid)
+    m2 = proj2.structural_model
+    m2.nodes.append(
+        AnalyticalNode(
+            node_id=900, x_m=n_b2.x_m + 0.005, y_m=n_b2.y_m, z_m=n_b2.z_m, floor_level="2F", is_support=False, support_type="NONE"
+        )
+    )
+    m2.members.append(
+        AnalyticalMember(
+            member_id=901,
+            start_node=existing_beam.start_node,
+            end_node=existing_beam.end_node,
+            member_type="primary_beam",
+            floor_level="2F",
+            length_m=existing_beam.length_m,
+        )
+    )
+    storage.save_project(proj2)
+
+    res_all = client.post(f"/api/projects/{pid}/geometry/clean-all-duplicates")
+    assert res_all.status_code == 200, res_all.text
+    assert not any(i["code"] in ("DUPLICATE_NODE", "DUPLICATE_MEMBER") for i in res_all.json()["validation_issues"])
+
+
+def test_manually_added_beam_included_in_dsm_analysis_and_rc_design(isolated_env):
+    """
+    Verify a beam added manually in Module 03 AFTER Module 04 sizing and Module 05 load
+    generation automatically gets a valid section, enters the 3D DSM solver with self-weight,
+    and appears in Module 06's beam_designs with non-zero forces.
+    """
+    client = isolated_env
+    pid = "TEST-MANUAL-BEAM-DSM"
+    storage.save_project(ProjectState.model_validate(_make_2x2_project(pid)))
+
+    # 1. Run Module 03 -> Module 04 -> Module 05
+    r_geo = client.post(f"/api/projects/{pid}/geometry/generate", json={})
+    assert r_geo.status_code == 200, r_geo.text
+    r_size = client.post(f"/api/projects/{pid}/sizing/auto-size", json={})
+    assert r_size.status_code == 200, r_size.text
+    r_load = client.post(f"/api/projects/{pid}/loads/generate", json={})
+    assert r_load.status_code == 200, r_load.text
+
+    # 2. Go back to Module 03 and manually add a diagonal beam on 2F (A-1 to B-2)
+    nodes_2f = [n for n in r_geo.json()["nodes"] if n["floor_level"] == "2F"]
+    n_a1 = next(n for n in nodes_2f if abs(n["x_m"] - 0.0) < 0.01 and abs(n["z_m"] - 0.0) < 0.01)
+    n_b2 = next(n for n in nodes_2f if abs(n["x_m"] - 5.0) < 0.01 and abs(n["z_m"] - 4.0) < 0.01)
+
+    r_add = client.post(
+        f"/api/projects/{pid}/geometry/members",
+        json={
+            "start_node": n_a1["node_id"],
+            "end_node": n_b2["node_id"],
+            "member_type": "secondary_beam",
+            "floor_level": "2F",
+            "grid_ref": "DIAG-MAN",
+        },
+    )
+    assert r_add.status_code == 200, r_add.text
+    manual_beam = next(
+        (m for m in r_add.json()["members"] if m["grid_ref"] == "DIAG-MAN"),
+        None,
+    )
+    assert manual_beam is not None
+    manual_mid = manual_beam["member_id"]
+
+    # Also test jumping straight into Module 06 even if a beam's assignment was never created in Module 04
+    proj = storage.load_project(pid)
+    proj.member_sizing.member_assignments = [
+        a for a in proj.member_sizing.member_assignments if a.member_id != manual_mid
+    ]
+    storage.save_project(proj)
+
+    # 3. Run Module 06 Analysis & RC Design directly
+    r_des = client.post(f"/api/projects/{pid}/design/run", json={})
+    assert r_des.status_code == 200, r_des.text
+    beam_designs = r_des.json()["beam_designs"]
+    man_design = next((b for b in beam_designs if b["member_id"] == manual_mid), None)
+    assert man_design is not None, f"Manual beam M{manual_mid} missing from Module 06 beam_designs!"
+    assert man_design["vu_max_kn"] > 0.0
+    assert (man_design["mu_pos_mid_knm"] > 0.0) or (man_design["mu_neg_start_knm"] > 0.0)
+    assert man_design["width_mm"] > 0.0 and man_design["depth_mm"] > 0.0

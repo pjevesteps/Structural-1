@@ -69,6 +69,7 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
   const [replicateAllFloors, setReplicateAllFloors] = useState(false);
   const [beamStartNodeId, setBeamStartNodeId] = useState(null);
   const [selectedEntity, setSelectedEntity] = useState(null);
+  const [selectedIssueIdx, setSelectedIssueIdx] = useState(null);
 
   // 3D Orbit camera state
   const [yaw, setYaw] = useState(-0.68);
@@ -104,6 +105,15 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
             : (sortedLvls[1]?.id || sortedLvls[0].id)
         );
       }
+      // Run fresh structured integrity validation on load when geometry exists
+      if (sm?.nodes?.length > 0) {
+        try {
+          const validated = await apiJson(`/api/projects/${pid}/geometry/validate`, { method: "POST" });
+          setFullProject((prev) => (prev ? { ...prev, structural_model: validated } : prev));
+        } catch {
+          // Non-fatal; keep loaded model
+        }
+      }
     } catch (e) {
       setError(e.message);
     }
@@ -131,6 +141,66 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
     for (const n of model.nodes || []) m.set(n.node_id, n);
     return m;
   }, [model.nodes]);
+
+  const memberMap = useMemo(() => {
+    const m = new Map();
+    for (const mem of model.members || []) m.set(mem.member_id, mem);
+    return m;
+  }, [model.members]);
+
+  const selectedIssue =
+    selectedIssueIdx !== null ? (model.validation_issues || [])[selectedIssueIdx] || null : null;
+
+  const hasDuplicateIssues = useMemo(
+    () =>
+      (model.validation_issues || []).some(
+        (iss) => iss.code === "DUPLICATE_NODE" || iss.code === "DUPLICATE_MEMBER"
+      ),
+    [model.validation_issues]
+  );
+
+  const issueHighlight = useMemo(() => {
+    const primaryNodes = new Set();
+    const duplicateNodes = new Set();
+    const warnNodes = new Set();
+    const primaryMembers = new Set();
+    const duplicateMembers = new Set();
+    const warnMembers = new Set();
+
+    if (!selectedIssue) {
+      return { primaryNodes, duplicateNodes, warnNodes, primaryMembers, duplicateMembers, warnMembers };
+    }
+
+    if (selectedIssue.primary_node_id != null) primaryNodes.add(selectedIssue.primary_node_id);
+    if (selectedIssue.duplicate_node_id != null) duplicateNodes.add(selectedIssue.duplicate_node_id);
+    if (selectedIssue.primary_member_id != null) primaryMembers.add(selectedIssue.primary_member_id);
+    if (selectedIssue.duplicate_member_id != null) duplicateMembers.add(selectedIssue.duplicate_member_id);
+
+    for (const nid of selectedIssue.node_ids || []) {
+      if (!primaryNodes.has(nid) && !duplicateNodes.has(nid)) warnNodes.add(nid);
+    }
+    for (const mid of selectedIssue.member_ids || []) {
+      if (!primaryMembers.has(mid) && !duplicateMembers.has(mid)) warnMembers.add(mid);
+    }
+
+    // Fallback parse from entity_ids (e.g. "N12", "M7")
+    for (const eid of selectedIssue.entity_ids || []) {
+      if (typeof eid !== "string") continue;
+      if (eid.startsWith("N")) {
+        const nid = parseInt(eid.slice(1), 10);
+        if (Number.isFinite(nid) && !primaryNodes.has(nid) && !duplicateNodes.has(nid)) {
+          warnNodes.add(nid);
+        }
+      } else if (eid.startsWith("M")) {
+        const mid = parseInt(eid.slice(1), 10);
+        if (Number.isFinite(mid) && !primaryMembers.has(mid) && !duplicateMembers.has(mid)) {
+          warnMembers.add(mid);
+        }
+      }
+    }
+
+    return { primaryNodes, duplicateNodes, warnNodes, primaryMembers, duplicateMembers, warnMembers };
+  }, [selectedIssue]);
 
   const stats = useMemo(() => {
     const nodes = model.nodes || [];
@@ -189,9 +259,116 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
     setError("");
     try {
       const updated = await apiJson(`/api/projects/${pid}/geometry/validate`, { method: "POST" });
+      setSelectedIssueIdx(null);
       await applyModelUpdate(
         updated,
         `Integrity check complete: ${updated.validation_issues.filter((i) => i.severity === "error").length} error(s), ${updated.validation_issues.filter((i) => i.severity === "warning").length} warning(s).`
+      );
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function handleSelectIssue(iss, idx) {
+    if (selectedIssueIdx === idx) {
+      setSelectedIssueIdx(null);
+      return;
+    }
+    setSelectedIssueIdx(idx);
+    // Auto-switch 2D Floor Framing Editor to the relevant floor level
+    let targetFloor = iss.floor_level || "";
+    if (!targetFloor && (iss.node_ids || []).length > 0) {
+      targetFloor = nodeMap.get(iss.node_ids[0])?.floor_level || "";
+    }
+    if (!targetFloor && (iss.member_ids || []).length > 0) {
+      targetFloor = memberMap.get(iss.member_ids[0])?.floor_level || "";
+    }
+    if (targetFloor && sortedLevels.some((lv) => lv.id === targetFloor)) {
+      setActiveFloor(targetFloor);
+    }
+  }
+
+  async function handleDeleteDuplicateMember(primaryId, duplicateId) {
+    setBusy(true);
+    setError("");
+    try {
+      const updated = await apiJson(`/api/projects/${pid}/geometry/delete-duplicate-member`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          primary_member_id: primaryId || null,
+          duplicate_member_id: duplicateId,
+        }),
+      });
+      setSelectedIssueIdx(null);
+      setStdPreview(null);
+      await applyModelUpdate(
+        updated,
+        `Deleted duplicate member M${duplicateId}${primaryId ? ` (kept primary M${primaryId})` : ""}.`
+      );
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleMergeDuplicateNode(primaryId, duplicateId) {
+    setBusy(true);
+    setError("");
+    try {
+      const updated = await apiJson(`/api/projects/${pid}/geometry/merge-duplicate-node`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          primary_node_id: primaryId,
+          duplicate_node_id: duplicateId,
+        }),
+      });
+      setSelectedIssueIdx(null);
+      setStdPreview(null);
+      await applyModelUpdate(
+        updated,
+        `Merged duplicate node N${duplicateId} into primary node N${primaryId} and rewired connected members.`
+      );
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleDeleteOrphanNodes() {
+    setBusy(true);
+    setError("");
+    try {
+      const updated = await apiJson(`/api/projects/${pid}/geometry/delete-orphan-nodes`, {
+        method: "POST",
+      });
+      setSelectedIssueIdx(null);
+      setStdPreview(null);
+      await applyModelUpdate(updated, "Removed orphan / unconnected nodes and re-validated.");
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleCleanAllDuplicates() {
+    setBusy(true);
+    setError("");
+    try {
+      const updated = await apiJson(`/api/projects/${pid}/geometry/clean-all-duplicates`, {
+        method: "POST",
+      });
+      setSelectedIssueIdx(null);
+      setStdPreview(null);
+      await applyModelUpdate(
+        updated,
+        `Cleaned all duplicate nodes and members (${updated.nodes.length} nodes, ${updated.members.length} members remaining).`
       );
     } catch (e) {
       setError(e.message);
@@ -481,18 +658,31 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
 
     for (const item of projectedMembers) {
       const { member, pa, pb } = item;
-      ctx.strokeStyle = member.is_pedestal
-        ? "#6366f1"
-        : member.manual_override
-          ? "#c084fc"
-          : MEMBER_COLORS[member.member_type] || "#45c9a8";
-      ctx.lineWidth = member.is_pedestal
-        ? 3.4
-        : member.manual_override
-          ? 2.9
-          : member.member_type === "column"
-            ? 2.8
-            : 2.1;
+      const isDupMem = issueHighlight.duplicateMembers.has(member.member_id);
+      const isPrimMem = issueHighlight.primaryMembers.has(member.member_id);
+      const isWarnMem = issueHighlight.warnMembers.has(member.member_id);
+      ctx.strokeStyle = isDupMem
+        ? "#f43f5e"
+        : isPrimMem
+          ? "#10b981"
+          : isWarnMem
+            ? "#f59e0b"
+            : member.is_pedestal
+              ? "#6366f1"
+              : member.manual_override
+                ? "#c084fc"
+                : MEMBER_COLORS[member.member_type] || "#45c9a8";
+      ctx.lineWidth = isDupMem
+        ? 5.0
+        : isPrimMem || isWarnMem
+          ? 4.4
+          : member.is_pedestal
+            ? 3.4
+            : member.manual_override
+              ? 2.9
+              : member.member_type === "column"
+                ? 2.8
+                : 2.1;
       ctx.beginPath();
       ctx.moveTo(pa.sx, pa.sy);
       ctx.lineTo(pb.sx, pb.sy);
@@ -522,9 +712,36 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
         if (n.support_type === "FIXED") ctx.fill();
         else ctx.stroke();
       }
-      ctx.fillStyle = n.is_support ? "#fca5a5" : "#eaf0f6";
+      const isDupNode = issueHighlight.duplicateNodes.has(n.node_id);
+      const isPrimNode = issueHighlight.primaryNodes.has(n.node_id);
+      const isWarnNode = issueHighlight.warnNodes.has(n.node_id);
+      if (isDupNode || isPrimNode || isWarnNode) {
+        const ringCol = isDupNode ? "#f43f5e" : isPrimNode ? "#10b981" : "#f59e0b";
+        ctx.strokeStyle = ringCol;
+        ctx.lineWidth = 2.6;
+        ctx.beginPath();
+        ctx.arc(p.sx, p.sy, 8.5, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.fillStyle = ringCol;
+        ctx.font = "bold 10px Inter, system-ui, sans-serif";
+        ctx.textAlign = "left";
+        ctx.fillText(
+          `N${n.node_id}${isDupNode ? " DUP" : isPrimNode ? " PRIM" : ""}`,
+          p.sx + 10,
+          p.sy - 4
+        );
+      }
+      ctx.fillStyle = isDupNode
+        ? "#f43f5e"
+        : isPrimNode
+          ? "#10b981"
+          : isWarnNode
+            ? "#f59e0b"
+            : n.is_support
+              ? "#fca5a5"
+              : "#eaf0f6";
       ctx.beginPath();
-      ctx.arc(p.sx, p.sy, 3.2, 0, Math.PI * 2);
+      ctx.arc(p.sx, p.sy, isDupNode || isPrimNode || isWarnNode ? 4.8 : 3.2, 0, Math.PI * 2);
       ctx.fill();
     }
 
@@ -552,7 +769,7 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
       ctx.textAlign = "left";
       ctx.fillText(ax.label, ex + 3, ey + 3);
     }
-  }, [model, fullProject?.openings, sortedLevels, nodeMap, yaw, pitch, zoom3d, storyFilter, viewLayout]);
+  }, [model, fullProject?.openings, sortedLevels, nodeMap, yaw, pitch, zoom3d, storyFilter, viewLayout, issueHighlight]);
 
   // 2D Floor Framing data for activeFloor
   const floorData = useMemo(() => {
@@ -1044,6 +1261,18 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
                     ? "#c084fc"
                     : MEMBER_COLORS[m.member_type] || "#45c9a8";
                   const isSel = selectedEntity?.type === "member" && selectedEntity.data.member_id === m.member_id;
+                  const isDupMem = issueHighlight.duplicateMembers.has(m.member_id);
+                  const isPrimMem = issueHighlight.primaryMembers.has(m.member_id);
+                  const isWarnMem = issueHighlight.warnMembers.has(m.member_id);
+                  const strokeCol = isDupMem
+                    ? "#f43f5e"
+                    : isPrimMem
+                      ? "#10b981"
+                      : isWarnMem
+                        ? "#f59e0b"
+                        : editorMode === "delete_member"
+                          ? "#f87171"
+                          : col;
                   return (
                     <g
                       key={m.member_id}
@@ -1051,22 +1280,35 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
                       onClick={() => handleBeam2DClick(m)}
                     >
                       <line x1={pa.x} y1={pa.y} x2={pb.x} y2={pb.y} stroke="transparent" strokeWidth="12" />
+                      {(isDupMem || isPrimMem || isWarnMem) && (
+                        <line
+                          x1={pa.x}
+                          y1={pa.y}
+                          x2={pb.x}
+                          y2={pb.y}
+                          stroke={strokeCol}
+                          strokeOpacity={0.35}
+                          strokeWidth="10"
+                        />
+                      )}
                       <line
                         x1={pa.x}
                         y1={pa.y}
                         x2={pb.x}
                         y2={pb.y}
-                        stroke={editorMode === "delete_member" ? "#f87171" : col}
-                        strokeWidth={isSel ? 4.5 : m.manual_override ? 3.3 : 2.8}
+                        stroke={strokeCol}
+                        strokeWidth={isDupMem || isPrimMem || isWarnMem ? 5.2 : isSel ? 4.5 : m.manual_override ? 3.3 : 2.8}
                       />
                       <text
                         x={(pa.x + pb.x) * 0.5}
                         y={(pa.y + pb.y) * 0.5 - 5}
                         textAnchor="middle"
-                        fill="#cbd5e1"
+                        fill={isDupMem ? "#fda4af" : isPrimMem ? "#6ee7b7" : isWarnMem ? "#fcd34d" : "#cbd5e1"}
                         fontSize="9"
+                        fontWeight={isDupMem || isPrimMem || isWarnMem ? "800" : "400"}
                       >
                         {m.length_m.toFixed(2)}m
+                        {isDupMem ? " [DUP]" : isPrimMem ? " [PRIM]" : ""}
                       </text>
                     </g>
                   );
@@ -1076,12 +1318,27 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
                 {floorData.nodes.map((n) => {
                   const p = toSvg2D(n.x_m, n.z_m);
                   const isStart = beamStartNodeId === n.node_id;
+                  const isDupNode = issueHighlight.duplicateNodes.has(n.node_id);
+                  const isPrimNode = issueHighlight.primaryNodes.has(n.node_id);
+                  const isWarnNode = issueHighlight.warnNodes.has(n.node_id);
+                  const hiCol = isDupNode ? "#f43f5e" : isPrimNode ? "#10b981" : isWarnNode ? "#f59e0b" : null;
                   return (
                     <g
                       key={n.node_id}
                       className="geom-clickable"
                       onClick={() => handleNode2DClick(n)}
                     >
+                      {hiCol && (
+                        <circle
+                          cx={p.x}
+                          cy={p.y}
+                          r={12}
+                          fill={hiCol}
+                          fillOpacity={0.2}
+                          stroke={hiCol}
+                          strokeWidth="2.4"
+                        />
+                      )}
                       {n.is_support && n.support_type !== "NONE" && (
                         <polygon
                           points={`${p.x},${p.y + 3} ${p.x - 7},${p.y + 14} ${p.x + 7},${p.y + 14}`}
@@ -1093,14 +1350,21 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
                       <circle
                         cx={p.x}
                         cy={p.y}
-                        r={isStart ? 7 : 5.5}
-                        fill={isStart ? "#45c9a8" : n.is_support ? "#fca5a5" : "#38bdf8"}
+                        r={hiCol ? 7 : isStart ? 7 : 5.5}
+                        fill={hiCol || (isStart ? "#45c9a8" : n.is_support ? "#fca5a5" : "#38bdf8")}
                         stroke="#0b1220"
                         strokeWidth="1.8"
                       />
-                      <text x={p.x + 8} y={p.y - 6} fill="#eaf0f6" fontSize="9.5" fontWeight="700">
+                      <text
+                        x={p.x + 8}
+                        y={p.y - 6}
+                        fill={hiCol || "#eaf0f6"}
+                        fontSize="9.5"
+                        fontWeight="700"
+                      >
                         N{n.node_id}
                         {n.grid_ref ? ` (${n.grid_ref})` : ""}
+                        {isDupNode ? " [DUP]" : isPrimNode ? " [PRIM]" : ""}
                       </text>
                     </g>
                   );
@@ -1177,9 +1441,22 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
 
           <div className="geom-checks-head">
             <h4>Geometry Integrity Check ({(model.validation_issues || []).length})</h4>
-            <button className="mini-btn" disabled={busy} onClick={handleValidate}>
-              Re-Validate
-            </button>
+            <div style={{ display: "flex", gap: 6 }}>
+              {hasDuplicateIssues && (
+                <button
+                  type="button"
+                  className="mini-btn on-reject"
+                  disabled={busy}
+                  onClick={handleCleanAllDuplicates}
+                  title="Batch-merge all duplicate nodes and delete all duplicate members"
+                >
+                  Clean All Duplicates
+                </button>
+              )}
+              <button className="mini-btn" disabled={busy} onClick={handleValidate}>
+                Re-Validate
+              </button>
+            </div>
           </div>
 
           <div className="pdf-review-list">
@@ -1190,18 +1467,84 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
                   : "Generate the 3D frame to run structural integrity checks."}
               </p>
             ) : (
-              model.validation_issues.map((iss, idx) => (
-                <div key={`${iss.code}-${idx}`} className={`geom-issue sev-${iss.severity}`}>
-                  <div className="geom-issue-top">
-                    <span className={`geom-sev-badge sev-${iss.severity}`}>
-                      {iss.severity.toUpperCase()}
-                    </span>
-                    <code>{iss.code}</code>
-                    {iss.floor_level && <small>{iss.floor_level}</small>}
+              model.validation_issues.map((iss, idx) => {
+                const isSelected = selectedIssueIdx === idx;
+                return (
+                  <div
+                    key={`${iss.code}-${idx}`}
+                    className={`geom-issue sev-${iss.severity}`}
+                    onClick={() => handleSelectIssue(iss, idx)}
+                    style={{
+                      cursor: "pointer",
+                      outline: isSelected ? "2px solid #38bdf8" : "none",
+                      background: isSelected ? "rgba(56, 189, 248, 0.1)" : undefined,
+                    }}
+                    title="Click to highlight affected nodes/members in 2D and 3D views"
+                  >
+                    <div className="geom-issue-top">
+                      <span className={`geom-sev-badge sev-${iss.severity}`}>
+                        {iss.severity.toUpperCase()}
+                      </span>
+                      <code>{iss.code}</code>
+                      {iss.floor_level && <small>{iss.floor_level}</small>}
+                    </div>
+                    <p>{iss.message}</p>
+                    {iss.code === "DUPLICATE_MEMBER" && iss.duplicate_member_id != null && (
+                      <div style={{ marginTop: 6, display: "flex", gap: 6, alignItems: "center" }}>
+                        <button
+                          type="button"
+                          className="mini-btn on-reject"
+                          disabled={busy}
+                          onClick={(ev) => {
+                            ev.stopPropagation();
+                            handleDeleteDuplicateMember(iss.primary_member_id, iss.duplicate_member_id);
+                          }}
+                        >
+                          Delete Duplicate
+                        </button>
+                        <small className="pdf-hint">
+                          Keeps M{iss.primary_member_id}, removes M{iss.duplicate_member_id}
+                        </small>
+                      </div>
+                    )}
+                    {iss.code === "DUPLICATE_NODE" &&
+                      iss.primary_node_id != null &&
+                      iss.duplicate_node_id != null && (
+                        <div style={{ marginTop: 6, display: "flex", gap: 6, alignItems: "center" }}>
+                          <button
+                            type="button"
+                            className="mini-btn on-reject"
+                            disabled={busy}
+                            onClick={(ev) => {
+                              ev.stopPropagation();
+                              handleMergeDuplicateNode(iss.primary_node_id, iss.duplicate_node_id);
+                            }}
+                          >
+                            Delete Duplicate
+                          </button>
+                          <small className="pdf-hint">
+                            Merges N{iss.duplicate_node_id} → N{iss.primary_node_id}
+                          </small>
+                        </div>
+                      )}
+                    {iss.code === "ORPHAN_NODE" && (
+                      <div style={{ marginTop: 6 }}>
+                        <button
+                          type="button"
+                          className="mini-btn on-reject"
+                          disabled={busy}
+                          onClick={(ev) => {
+                            ev.stopPropagation();
+                            handleDeleteOrphanNodes();
+                          }}
+                        >
+                          Delete Orphan Nodes
+                        </button>
+                      </div>
+                    )}
                   </div>
-                  <p>{iss.message}</p>
-                </div>
-              ))
+                );
+              })
             )}
           </div>
         </aside>

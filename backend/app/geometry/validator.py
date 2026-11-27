@@ -36,16 +36,21 @@ def validate_structural_model(model: StructuralModelState) -> list[GeometryCheck
         for j in range(i + 1, len(nodes_list)):
             nb = nodes_list[j]
             if _dist_3d(na, nb) < tol:
+                prim_id = min(na.node_id, nb.node_id)
+                dup_id = max(na.node_id, nb.node_id)
                 issues.append(
                     GeometryCheckIssue(
                         severity="error",
                         code="DUPLICATE_NODE",
                         message=(
-                            f"Coincident nodes N{na.node_id} and N{nb.node_id} at "
+                            f"Coincident nodes N{prim_id} and N{dup_id} at "
                             f"({na.x_m:.2f}, {na.y_m:.2f}, {na.z_m:.2f}) m."
                         ),
                         floor_level=na.floor_level,
-                        entity_ids=[f"N{na.node_id}", f"N{nb.node_id}"],
+                        entity_ids=[f"N{prim_id}", f"N{dup_id}"],
+                        primary_node_id=prim_id,
+                        duplicate_node_id=dup_id,
+                        node_ids=[prim_id, dup_id],
                     )
                 )
 
@@ -88,16 +93,22 @@ def validate_structural_model(model: StructuralModelState) -> list[GeometryCheck
 
         pair = (min(m.start_node, m.end_node), max(m.start_node, m.end_node))
         if pair in seen_pairs:
+            prim_mid = seen_pairs[pair]
+            dup_mid = m.member_id
             issues.append(
                 GeometryCheckIssue(
                     severity="error",
                     code="DUPLICATE_MEMBER",
                     message=(
-                        f"Duplicate members M{seen_pairs[pair]} and M{m.member_id} "
+                        f"Duplicate members M{prim_mid} and M{dup_mid} "
                         f"share nodes N{pair[0]}-N{pair[1]}."
                     ),
                     floor_level=m.floor_level,
-                    entity_ids=[f"M{seen_pairs[pair]}", f"M{m.member_id}"],
+                    entity_ids=[f"M{prim_mid}", f"M{dup_mid}"],
+                    primary_member_id=prim_mid,
+                    duplicate_member_id=dup_mid,
+                    member_ids=[prim_mid, dup_mid],
+                    node_ids=[pair[0], pair[1]],
                 )
             )
         else:
@@ -168,6 +179,7 @@ def validate_structural_model(model: StructuralModelState) -> list[GeometryCheck
                     message=f"Node N{n.node_id} on {n.floor_level} is not connected to any member.",
                     floor_level=n.floor_level,
                     entity_ids=[f"N{n.node_id}"],
+                    node_ids=[n.node_id],
                 )
             )
 
@@ -197,6 +209,16 @@ def validate_structural_model(model: StructuralModelState) -> list[GeometryCheck
 
     if len(components) > 1:
         components.sort(key=len, reverse=True)
+        substructures_payload: list[dict[str, list[int]]] = []
+        for comp in components:
+            c_nodes = sorted(comp)
+            c_members = sorted(
+                m.member_id
+                for m in model.members
+                if m.start_node in comp or m.end_node in comp
+            )
+            substructures_payload.append({"node_ids": c_nodes, "member_ids": c_members})
+
         detached_nodes = sorted(nid for comp in components[1:] for nid in comp)
         detached_node_set = set(detached_nodes)
         detached_members = sorted(
@@ -204,6 +226,11 @@ def validate_structural_model(model: StructuralModelState) -> list[GeometryCheck
             for m in model.members
             if m.start_node in detached_node_set or m.end_node in detached_node_set
         )
+        first_det_floor = ""
+        if detached_nodes:
+            first_n = node_by_id.get(detached_nodes[0])
+            if first_n is not None:
+                first_det_floor = first_n.floor_level
         node_preview = ", ".join(f"N{nid}" for nid in detached_nodes[:10])
         if len(detached_nodes) > 10:
             node_preview += f" (+{len(detached_nodes) - 10} more)"
@@ -220,8 +247,12 @@ def validate_structural_model(model: StructuralModelState) -> list[GeometryCheck
                     + (f"; detached member(s): {mem_preview}" if mem_preview else "")
                     + ". Tie detached columns/nodes with beams in Module 03's 2D Framing Editor."
                 ),
+                floor_level=first_det_floor,
                 entity_ids=[f"N{nid}" for nid in detached_nodes[:12]]
                 + [f"M{mid}" for mid in detached_members[:12]],
+                node_ids=detached_nodes,
+                member_ids=detached_members,
+                substructures=substructures_payload,
             )
         )
 

@@ -17,6 +17,7 @@ from ..models import (
     SupportReactionEnvelope,
 )
 from ..reports.bom_engine import parse_bar_callout, parse_spacing_callout
+from ..sizing.engine import ensure_all_members_sized
 from .anl_parser import parse_staad_anl
 from .foundation_suite import (
     compute_footing_coverage_ratio,
@@ -201,6 +202,7 @@ def design_beams(
     params: DesignParameters,
 ) -> list[BeamDesignResult]:
     """Design all beam/tie/trimmer members per NSCP 2015 / ACI 318 flexure & shear."""
+    ensure_all_members_sized(project)
     model = project.structural_model
     sizing = project.member_sizing
     mat = sizing.material
