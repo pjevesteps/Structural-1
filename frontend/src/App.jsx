@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import ProjectManagement from "./ProjectManagement.jsx";
 import PdfImporter from "./PdfImporter.jsx";
 import GeometryBuilder from "./GeometryBuilder.jsx";
 import MemberSizing from "./MemberSizing.jsx";
@@ -19,12 +20,21 @@ const MODULES = [
 ];
 
 const PHASE_KEYS = ["01", "02", "03", "04", "05", "06", "07", "08"];
+const ACTIVE_PROJECT_STORAGE_KEY = "structural_ai_active_project_id";
 
 export default function App() {
   const [health, setHealth] = useState("Checking");
   const [projects, setProjects] = useState([]);
+  const [activeProjectId, setActiveProjectId] = useState(() => {
+    try {
+      return window.localStorage.getItem(ACTIVE_PROJECT_STORAGE_KEY) || "";
+    } catch {
+      return "";
+    }
+  });
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
+  const [showModule01, setShowModule01] = useState(false);
   const [importProject, setImportProject] = useState(null);
   const [geometryProject, setGeometryProject] = useState(null);
   const [sizingProject, setSizingProject] = useState(null);
@@ -105,13 +115,41 @@ export default function App() {
     }
   }
 
+  function persistActiveProjectId(pid) {
+    setActiveProjectId(pid || "");
+    try {
+      if (pid) window.localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, pid);
+      else window.localStorage.removeItem(ACTIVE_PROJECT_STORAGE_KEY);
+    } catch {
+      // Ignore storage errors in restricted environments
+    }
+  }
+
   async function refresh() {
     try {
       const h = await fetch("/api/health").then((r) => r.json());
       setHealth(h.status === "ok" ? "Connected" : "Unavailable");
-      setProjects(await fetch("/api/projects").then((r) => r.json()));
+      const list = await fetch("/api/projects").then((r) => r.json());
+      const safeList = Array.isArray(list) ? list : [];
+      setProjects(safeList);
+
+      // Reconcile persisted activeProjectId so missing/deleted/corrupted IDs never cause 404s
+      const validProjects = safeList.filter((p) => !p.corrupted);
+      setActiveProjectId((prevId) => {
+        const stillValid = prevId && validProjects.some((p) => p.project_id === prevId);
+        const nextId = stillValid ? prevId : (validProjects[0]?.project_id || "");
+        try {
+          if (nextId) window.localStorage.setItem(ACTIVE_PROJECT_STORAGE_KEY, nextId);
+          else window.localStorage.removeItem(ACTIVE_PROJECT_STORAGE_KEY);
+        } catch {
+          // ignore
+        }
+        return nextId;
+      });
+      return safeList;
     } catch {
       setHealth("Backend unavailable");
+      return [];
     }
   }
 
@@ -131,13 +169,52 @@ export default function App() {
       });
       const b = await r.json();
       if (!r.ok) throw Error(b.detail || "Save failed");
+      if (b.project_id) persistActiveProjectId(b.project_id);
       setMessage("Demonstration project saved.");
       await refresh();
     } catch (e) {
       setMessage(e.message);
+      throw e;
     } finally {
       setBusy(false);
     }
+  }
+
+  async function createProjectByFields(name, location) {
+    const trimmed = name.trim();
+    if (!trimmed) return null;
+    const slug =
+      trimmed
+        .toUpperCase()
+        .replace(/[^A-Z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "")
+        .slice(0, 24) || "PROJ";
+    const pid = `${slug}-01`;
+    const payload = {
+      project_info: {
+        project_id: pid,
+        project_name: trimmed,
+        location: (location || "").trim() || "Philippines",
+        design_code: "NSCP 2015",
+        materials: {
+          fc_mpa: 28.0,
+          fy_mpa: 415.0,
+          concrete_density_kn_m3: 23.54,
+        },
+      },
+      levels: [{ id: "BASE", elevation_m: 0.0 }],
+      columns: [],
+    };
+    const r = await fetch("/api/projects", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const b = await r.json();
+    if (!r.ok) throw Error(b.detail || "Create failed");
+    persistActiveProjectId(pid);
+    await refresh();
+    return pid;
   }
 
   async function createNewProject(e) {
@@ -147,43 +224,31 @@ export default function App() {
     setBusy(true);
     setMessage("");
     try {
-      const slug =
-        trimmed
-          .toUpperCase()
-          .replace(/[^A-Z0-9]+/g, "-")
-          .replace(/^-+|-+$/g, "")
-          .slice(0, 24) || "PROJ";
-      const pid = `${slug}-01`;
-      const payload = {
-        project_info: {
-          project_id: pid,
-          project_name: trimmed,
-          location: newLocation.trim() || "Philippines",
-          design_code: "NSCP 2015",
-          materials: {
-            fc_mpa: 28.0,
-            fy_mpa: 415.0,
-            concrete_density_kn_m3: 23.54,
-          },
-        },
-        levels: [{ id: "BASE", elevation_m: 0.0 }],
-        columns: [],
-      };
-      const r = await fetch("/api/projects", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-      const b = await r.json();
-      if (!r.ok) throw Error(b.detail || "Create failed");
+      const pid = await createProjectByFields(trimmed, newLocation);
       setNewName("");
       setShowNewForm(false);
       setMessage(`Created project ${trimmed} (${pid}).`);
-      await refresh();
     } catch (err) {
       setMessage(err.message);
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function handleDeletedProject(deletedId) {
+    if (importProject?.project_id === deletedId) setImportProject(null);
+    if (geometryProject?.project_id === deletedId) setGeometryProject(null);
+    if (sizingProject?.project_id === deletedId) setSizingProject(null);
+    if (loadsProject?.project_id === deletedId) setLoadsProject(null);
+    if (designProject?.project_id === deletedId) setDesignProject(null);
+    if (cadProject?.project_id === deletedId) setCadProject(null);
+    if (reportProject?.project_id === deletedId) setReportProject(null);
+    if (revProject?.project_info?.project_id === deletedId) setRevProject(null);
+
+    const updatedList = await refresh();
+    if (activeProjectId === deletedId) {
+      const nextValid = updatedList.find((p) => !p.corrupted && p.project_id !== deletedId);
+      persistActiveProjectId(nextValid ? nextValid.project_id : "");
     }
   }
 
@@ -209,6 +274,7 @@ export default function App() {
   }
 
   const activeWorkspace =
+    showModule01 ||
     importProject ||
     geometryProject ||
     sizingProject ||
@@ -217,11 +283,19 @@ export default function App() {
     cadProject ||
     reportProject;
 
-  const activeLeadProject = projects[0] || null;
+  const validProjects = projects.filter((p) => !p.corrupted);
+  const activeLeadProject =
+    validProjects.find((p) => p.project_id === activeProjectId) || validProjects[0] || null;
   const activePhases = activeLeadProject?.phases_done || {};
 
   function openModuleForProject(n, proj) {
-    if (!proj) return;
+    if (n === "01") {
+      setShowModule01(true);
+      return;
+    }
+    if (!proj || proj.corrupted) return;
+    setShowModule01(false);
+    persistActiveProjectId(proj.project_id);
     if (n === "02") setImportProject(proj);
     if (n === "03") setGeometryProject(proj);
     if (n === "04") setSizingProject(proj);
@@ -258,7 +332,19 @@ export default function App() {
         </div>
       </header>
 
-      {importProject ? (
+      {showModule01 ? (
+        <ProjectManagement
+          projects={projects}
+          activeProject={activeLeadProject}
+          onSelectProject={(p) => persistActiveProjectId(p.project_id)}
+          onDeletedProject={handleDeletedProject}
+          onRefreshProjects={refresh}
+          onLoadSample={loadSample}
+          onCreateProject={createProjectByFields}
+          onOpenModule={(modNum, proj) => openModuleForProject(modNum, proj)}
+          onClose={() => setShowModule01(false)}
+        />
+      ) : importProject ? (
         <PdfImporter
           project={importProject}
           onClose={() => setImportProject(null)}
@@ -360,7 +446,7 @@ export default function App() {
           <section className="grid">
             {MODULES.map(([n, t, d]) => {
               const done = Boolean(activePhases[n]);
-              const clickable = n !== "01" && projects.length > 0;
+              const clickable = n === "01" || Boolean(activeLeadProject);
               return (
                 <article
                   key={n}
@@ -428,83 +514,95 @@ export default function App() {
                     </div>
 
                     <nav>
-                      <button
-                        className="secondary pdf-launch-btn"
-                        disabled={busy}
-                        onClick={() => setImportProject(p)}
-                      >
-                        Import PDF
-                      </button>
-                      <button
-                        className="secondary geom-launch-btn"
-                        disabled={busy}
-                        onClick={() => setGeometryProject(p)}
-                      >
-                        3D Geometry
-                      </button>
-                      <button
-                        className="secondary sizing-launch-btn"
-                        disabled={busy}
-                        onClick={() => setSizingProject(p)}
-                      >
-                        Member Sizing
-                      </button>
-                      <button
-                        className="secondary loads-launch-btn"
-                        disabled={busy}
-                        onClick={() => setLoadsProject(p)}
-                      >
-                        NSCP Loads
-                      </button>
-                      <button
-                        className="secondary design-launch-btn"
-                        disabled={busy}
-                        onClick={() => setDesignProject(p)}
-                      >
-                        Analysis &amp; Design
-                      </button>
-                      <button
-                        className="secondary cad-launch-btn"
-                        disabled={busy}
-                        onClick={() => setCadProject(p)}
-                      >
-                        CAD / DXF
-                      </button>
-                      <button
-                        className="secondary report-launch-btn"
-                        disabled={busy}
-                        onClick={() => setReportProject(p)}
-                      >
-                        Reports &amp; BOM
-                      </button>
-                      <button
-                        className="secondary rev-launch-btn"
-                        disabled={busy}
-                        onClick={() => openRevisions(p)}
-                      >
-                        Revisions ({p.revision_count || 0})
-                      </button>
-                      <button
-                        className="secondary"
-                        disabled={busy}
-                        onClick={() => action(p.project_id, "validate")}
-                      >
-                        Validate
-                      </button>
-                      <button
-                        className="secondary"
-                        disabled={busy}
-                        onClick={() => action(p.project_id, "staad-preview")}
-                      >
-                        STAAD preview
-                      </button>
-                      <button
-                        className="secondary"
-                        disabled={busy}
-                        onClick={() => action(p.project_id, "simulate")}
-                      >
-                        Simulation status
-                      </button>
+                      {p.corrupted ? (
+                        <button
+                          className="secondary"
+                          onClick={() => setShowModule01(true)}
+                          title={p.error || "Corrupted project file — manage in Module 01"}
+                        >
+                          Manage Corrupted in Module 01
+                        </button>
+                      ) : (
+                        <>
+                          <button
+                            className="secondary pdf-launch-btn"
+                            disabled={busy}
+                            onClick={() => openModuleForProject("02", p)}
+                          >
+                            Import PDF
+                          </button>
+                          <button
+                            className="secondary geom-launch-btn"
+                            disabled={busy}
+                            onClick={() => openModuleForProject("03", p)}
+                          >
+                            3D Geometry
+                          </button>
+                          <button
+                            className="secondary sizing-launch-btn"
+                            disabled={busy}
+                            onClick={() => openModuleForProject("04", p)}
+                          >
+                            Member Sizing
+                          </button>
+                          <button
+                            className="secondary loads-launch-btn"
+                            disabled={busy}
+                            onClick={() => openModuleForProject("05", p)}
+                          >
+                            NSCP Loads
+                          </button>
+                          <button
+                            className="secondary design-launch-btn"
+                            disabled={busy}
+                            onClick={() => openModuleForProject("06", p)}
+                          >
+                            Analysis &amp; Design
+                          </button>
+                          <button
+                            className="secondary cad-launch-btn"
+                            disabled={busy}
+                            onClick={() => openModuleForProject("07", p)}
+                          >
+                            CAD / DXF
+                          </button>
+                          <button
+                            className="secondary report-launch-btn"
+                            disabled={busy}
+                            onClick={() => openModuleForProject("08", p)}
+                          >
+                            Reports &amp; BOM
+                          </button>
+                          <button
+                            className="secondary rev-launch-btn"
+                            disabled={busy}
+                            onClick={() => openRevisions(p)}
+                          >
+                            Revisions ({p.revision_count || 0})
+                          </button>
+                          <button
+                            className="secondary"
+                            disabled={busy}
+                            onClick={() => action(p.project_id, "validate")}
+                          >
+                            Validate
+                          </button>
+                          <button
+                            className="secondary"
+                            disabled={busy}
+                            onClick={() => action(p.project_id, "staad-preview")}
+                          >
+                            STAAD preview
+                          </button>
+                          <button
+                            className="secondary"
+                            disabled={busy}
+                            onClick={() => action(p.project_id, "simulate")}
+                          >
+                            Simulation status
+                          </button>
+                        </>
+                      )}
                     </nav>
                   </article>
                 );

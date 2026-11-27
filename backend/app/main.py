@@ -3,7 +3,7 @@ from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field
 from .models import ProjectRevisionSnapshot, ProjectState
-from .storage import save_project, load_project, list_projects, get_exports_dir
+from .storage import save_project, load_project, list_projects, delete_project, get_exports_dir
 from .staad import write_staad_preview, simulate_placeholder
 from .pdf_importer import router as pdf_importer_router
 from .pdf_importer import cad_importer as pdf_cad_importer
@@ -52,6 +52,16 @@ def create_project(project: ProjectState):
 def get_project(project_id: str):
     try:
         return load_project(project_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Project not found.")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.delete("/api/projects/{project_id}")
+def remove_project(project_id: str):
+    try:
+        return delete_project(project_id)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Project not found.")
     except ValueError as exc:
