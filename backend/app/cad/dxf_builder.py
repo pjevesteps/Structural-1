@@ -334,6 +334,52 @@ def _add_text(
     return ent
 
 
+def _draw_dim_tick(msp, x: float, y: float, k: float, layer: str = "S-DIM") -> None:
+    """Draw a crisp 45-degree architectural slash tick at a dimension intersection."""
+    d = 1.05 * k
+    msp.add_line((x - d, y - d), (x + d, y + d), dxfattribs={"layer": layer})
+
+
+def _draw_callout_title(
+    msp,
+    x0: float,
+    y0: float,
+    x1: float,
+    k: float,
+    detail_no: int,
+    sheet_no: str,
+    title: str,
+    scale_text: str,
+) -> None:
+    """
+    Draw a Philippine structural CAD circular callout bubble (e.g. 1 / S|1)
+    with bold title bar above and SCALE: 1:100M / NTS below.
+    """
+    r = 4.2 * k
+    bcx = x0 + r + 2.0 * k
+    bcy = y0 + r + 1.2 * k
+    msp.add_circle((bcx, bcy), radius=r, dxfattribs={"layer": "S-TITLEBLK"})
+    msp.add_line((bcx - r, bcy), (bcx + r, bcy), dxfattribs={"layer": "S-TITLEBLK"})
+    msp.add_line((bcx, bcy), (bcx, bcy - r), dxfattribs={"layer": "S-TITLEBLK"})
+
+    # Parse sheet prefix & number (e.g. "S-1" -> "S", "1")
+    parts = sheet_no.split("-", 1)
+    s_pref = parts[0][:2]
+    s_num = parts[1][:3] if len(parts) > 1 else ""
+    _add_text(msp, str(detail_no), bcx, bcy + r * 0.46, 2.3 * k, "S-TITLEBLK", TextEntityAlignment.MIDDLE_CENTER)
+    _add_text(msp, s_pref, bcx - r * 0.42, bcy - r * 0.44, 1.9 * k, "S-TITLEBLK", TextEntityAlignment.MIDDLE_CENTER)
+    _add_text(msp, s_num or "1", bcx + r * 0.42, bcy - r * 0.44, 1.9 * k, "S-TITLEBLK", TextEntityAlignment.MIDDLE_CENTER)
+
+    rule_x0 = bcx + r
+    rule_x1 = max(rule_x0 + 20.0 * k, x1 - 2.0 * k)
+    msp.add_line((rule_x0, bcy), (rule_x1, bcy), dxfattribs={"layer": "S-TITLEBLK"})
+    msp.add_line((rule_x0, bcy - 0.55 * k), (rule_x1, bcy - 0.55 * k), dxfattribs={"layer": "S-TITLEBLK"})
+
+    _add_text(msp, title, rule_x0 + 2.5 * k, bcy + 1.35 * k, 2.85 * k, "S-TITLEBLK", TextEntityAlignment.BOTTOM_LEFT)
+    _add_text(msp, "SCALE:", rule_x0 + 2.5 * k, bcy - 1.55 * k, 1.75 * k, "S-TEXT", TextEntityAlignment.TOP_LEFT)
+    _add_text(msp, scale_text, rule_x1 - 1.5 * k, bcy - 1.55 * k, 1.85 * k, "S-TITLEBLK", TextEntityAlignment.TOP_RIGHT)
+
+
 def _draw_title_block(
     msp,
     ox: float,
@@ -345,6 +391,8 @@ def _draw_title_block(
     sheet_title: str,
     scale_label: str,
     profile: EngineerProfile | None = None,
+    sheet_index: int = 1,
+    total_sheets: int = 1,
 ) -> tuple[float, float, float, float]:
     """
     Draw outer border, inner frame, and right-hand NBCP title block.
@@ -431,8 +479,17 @@ def _draw_title_block(
     _add_text(msp, f"DATE: {date_str}", tx, box_y(0.112), 2.0 * k, "S-TEXT")
     _add_text(msp, rev[:34], tx, box_y(0.088), 1.8 * k, "S-TEXT")
 
-    _add_text(msp, "SHEET NO.", tx, box_y(0.058), 2.0 * k, "S-TEXT")
-    _add_text(msp, sheet_no, tcx, box_y(0.032), 7.5 * k, "S-TITLEBLK", TextEntityAlignment.MIDDLE_CENTER)
+    _add_text(msp, "SHEET NO.", tx, box_y(0.064), 1.9 * k, "S-TEXT")
+    _add_text(msp, sheet_no, tcx, box_y(0.038), 7.0 * k, "S-TITLEBLK", TextEntityAlignment.MIDDLE_CENTER)
+    _add_text(
+        msp,
+        f"SHEET {sheet_index} OF {max(total_sheets, 1)}",
+        tcx,
+        box_y(0.012),
+        1.75 * k,
+        "S-TEXT",
+        TextEntityAlignment.MIDDLE_CENTER,
+    )
 
     return (ox + left_m + 6.0 * k, margin + 6.0 * k, tb_x0 - 6.0 * k, h - margin - 6.0 * k)
 
@@ -507,6 +564,8 @@ def _draw_plan_in_box(
     floor_level: str | None = None,
     floor_elev_m: float | None = None,
     warnings: list[str] | None = None,
+    sheet_no: str = "S-1",
+    detail_no: int = 1,
 ) -> bool:
     """
     Render a scaled Foundation Plan or Floor Framing Plan inside `box` (mm).
@@ -543,9 +602,9 @@ def _draw_plan_in_box(
     mid_x = 0.5 * (min_x + max_x)
     mid_z = 0.5 * (min_z + max_z)
 
-    title_h = 13.0 * k
-    pad_x = 24.0 * k
-    pad_y = 24.0 * k
+    title_h = 14.5 * k
+    pad_x = 29.0 * k
+    pad_y = 27.0 * k
     avail_w = max(vw - 2.0 * pad_x, 16.0)
     avail_h = max(vh - title_h - 2.0 * pad_y, 16.0)
 
@@ -570,36 +629,33 @@ def _draw_plan_in_box(
     def to_xy(xm: float, zm: float) -> tuple[float, float]:
         return (cx + (xm - mid_x) * eff_mm_per_m, cy + (zm - mid_z) * eff_mm_per_m)
 
-    # Elevation tag in title bar
+    # Elevation tag in title callout bar
     elev_tag = ""
     if mode == "foundation":
         if ad.footing_designs:
             min_tof = min(f.base_elevation_m for f in ad.footing_designs)
-            elev_tag = f"  [TOF EL. {min_tof:+.2f}m]"
+            elev_tag = f" [TOF EL. {min_tof:+.2f}m]"
     elif floor_elev_m is not None:
-        elev_tag = f"  [EL. {floor_elev_m:+.2f}m]"
+        elev_tag = f" [EL. {floor_elev_m:+.2f}m]"
 
-    _add_text(
+    _draw_callout_title(
         msp,
-        f"{title}{elev_tag}   (SCALE 1:{eff_scale})",
-        cx,
-        vy0 + 4.5 * k,
-        3.0 * k,
-        "S-TITLEBLK",
-        TextEntityAlignment.MIDDLE_CENTER,
-    )
-    msp.add_line(
-        (cx - min(vw * 0.40, 68.0 * k), vy0 + 2.0 * k),
-        (cx + min(vw * 0.40, 68.0 * k), vy0 + 2.0 * k),
-        dxfattribs={"layer": "S-TITLEBLK"},
+        vx0,
+        vy0,
+        vx1,
+        k,
+        detail_no=detail_no,
+        sheet_no=sheet_no,
+        title=f"{title}{elev_tag}",
+        scale_text=f"1:{eff_scale}M",
     )
 
     # Graphic scale bar & North arrow
     _draw_scale_bar_and_north(msp, box, eff_mm_per_m, k)
 
-    # 1. Anti-Collision Gridlines (S-GRID), Staggered Bubbles (S-GRID-BUBB), & Dimensions (S-DIM)
-    ext = 8.5 * k
-    bub_r = 3.0 * k
+    # 1. Anti-Collision Gridlines (S-GRID), Staggered Bubbles (S-GRID-BUBB), & Stacked Dimensions (S-DIM)
+    ext = 12.0 * k
+    bub_r = 2.9 * k
     bub_d = 2.0 * bub_r
     stagger_shift = 1.35 * bub_d
     px0, py0 = to_xy(min_x, min_z)
@@ -630,7 +686,7 @@ def _draw_plan_in_box(
                 bx_c = gx
                 by = edge_y + sign_y * bub_r
             msp.add_circle((bx_c, by), radius=bub_r, dxfattribs={"layer": "S-GRID-BUBB"})
-            _add_text(msp, lbl, bx_c, by, 2.1 * k, "S-GRID-BUBB", TextEntityAlignment.MIDDLE_CENTER)
+            _add_text(msp, lbl, bx_c, by, 2.0 * k, "S-GRID-BUBB", TextEntityAlignment.MIDDLE_CENTER)
 
     # Z gridlines (horizontal) with anti-collision bubble staggering
     prev_gz: float | None = None
@@ -657,51 +713,210 @@ def _draw_plan_in_box(
                 bx = edge_x + sign_x * bub_r
                 by_c = gz
             msp.add_circle((bx, by_c), radius=bub_r, dxfattribs={"layer": "S-GRID-BUBB"})
-            _add_text(msp, lbl, bx, by_c, 2.1 * k, "S-GRID-BUBB", TextEntityAlignment.MIDDLE_CENTER)
+            _add_text(msp, lbl, bx, by_c, 2.0 * k, "S-GRID-BUBB", TextEntityAlignment.MIDDLE_CENTER)
 
-    # Bay dimensions along top (X) and left (Z)
+    # Stacked Dimension Chains along Top (X): inner bay-to-bay + outer overall span with 45-deg slash ticks
     if len(x_axes) >= 2:
-        dim_y = py1 + ext * 0.55
-        msp.add_line((px0, dim_y), (px1, dim_y), dxfattribs={"layer": "S-DIM"})
+        dim_y_in = py1 + ext * 0.38
+        dim_y_out = py1 + ext * 0.78
+        gx_first, _ = to_xy(x_axes[0][1], min_z)
+        gx_last, _ = to_xy(x_axes[-1][1], min_z)
+        # Inner bay-to-bay chain
+        msp.add_line((gx_first, dim_y_in), (gx_last, dim_y_in), dxfattribs={"layer": "S-DIM"})
         for (_, xa), (_, xb) in zip(x_axes, x_axes[1:]):
             gxa, _ = to_xy(xa, min_z)
             gxb, _ = to_xy(xb, min_z)
-            msp.add_line((gxa, dim_y - 1.2 * k), (gxa, dim_y + 1.2 * k), dxfattribs={"layer": "S-DIM"})
-            msp.add_line((gxb, dim_y - 1.2 * k), (gxb, dim_y + 1.2 * k), dxfattribs={"layer": "S-DIM"})
-            if abs(gxb - gxa) >= 6.0 * k:
+            _draw_dim_tick(msp, gxa, dim_y_in, k)
+            _draw_dim_tick(msp, gxb, dim_y_in, k)
+            if abs(gxb - gxa) >= 5.5 * k:
                 _add_text(
                     msp,
-                    f"{abs(xb - xa):.2f}m",
+                    f"{abs(xb - xa):.2f}",
                     0.5 * (gxa + gxb),
-                    dim_y + 1.6 * k,
-                    1.8 * k,
+                    dim_y_in + 1.0 * k,
+                    1.7 * k,
                     "S-DIM",
                     TextEntityAlignment.BOTTOM_CENTER,
                 )
+        # Outer overall span chain
+        msp.add_line((gx_first, dim_y_out), (gx_last, dim_y_out), dxfattribs={"layer": "S-DIM"})
+        _draw_dim_tick(msp, gx_first, dim_y_out, k)
+        _draw_dim_tick(msp, gx_last, dim_y_out, k)
+        total_x = abs(x_axes[-1][1] - x_axes[0][1])
+        if total_x > 0.01:
+            _add_text(
+                msp,
+                f"{total_x:.2f}",
+                0.5 * (gx_first + gx_last),
+                dim_y_out + 1.0 * k,
+                1.85 * k,
+                "S-DIM",
+                TextEntityAlignment.BOTTOM_CENTER,
+            )
 
+    # Stacked Dimension Chains along Left (Z): inner bay-to-bay + outer overall span with 45-deg slash ticks
     if len(z_axes) >= 2:
-        dim_x = px0 - ext * 0.55
-        msp.add_line((dim_x, py0), (dim_x, py1), dxfattribs={"layer": "S-DIM"})
+        dim_x_in = px0 - ext * 0.38
+        dim_x_out = px0 - ext * 0.78
+        _, gz_first = to_xy(min_x, z_axes[0][1])
+        _, gz_last = to_xy(min_x, z_axes[-1][1])
+        # Inner bay-to-bay chain
+        msp.add_line((dim_x_in, gz_first), (dim_x_in, gz_last), dxfattribs={"layer": "S-DIM"})
         for (_, za), (_, zb) in zip(z_axes, z_axes[1:]):
             _, gza = to_xy(min_x, za)
             _, gzb = to_xy(min_x, zb)
-            msp.add_line((dim_x - 1.2 * k, gza), (dim_x + 1.2 * k, gza), dxfattribs={"layer": "S-DIM"})
-            msp.add_line((dim_x - 1.2 * k, gzb), (dim_x + 1.2 * k, gzb), dxfattribs={"layer": "S-DIM"})
-            if abs(gzb - gza) >= 6.0 * k:
+            _draw_dim_tick(msp, dim_x_in, gza, k)
+            _draw_dim_tick(msp, dim_x_in, gzb, k)
+            if abs(gzb - gza) >= 5.5 * k:
                 _add_text(
                     msp,
-                    f"{abs(zb - za):.2f}m",
-                    dim_x - 1.6 * k,
+                    f"{abs(zb - za):.2f}",
+                    dim_x_in - 1.0 * k,
                     0.5 * (gza + gzb),
-                    1.8 * k,
+                    1.7 * k,
                     "S-DIM",
                     TextEntityAlignment.BOTTOM_CENTER,
                     rotation=90.0,
                 )
+        # Outer overall span chain
+        msp.add_line((dim_x_out, gz_first), (dim_x_out, gz_last), dxfattribs={"layer": "S-DIM"})
+        _draw_dim_tick(msp, dim_x_out, gz_first, k)
+        _draw_dim_tick(msp, dim_x_out, gz_last, k)
+        total_z = abs(z_axes[-1][1] - z_axes[0][1])
+        if total_z > 0.01:
+            _add_text(
+                msp,
+                f"{total_z:.2f}",
+                dim_x_out - 1.0 * k,
+                0.5 * (gz_first + gz_last),
+                1.85 * k,
+                "S-DIM",
+                TextEntityAlignment.BOTTOM_CENTER,
+                rotation=90.0,
+            )
+
+    # Helper to overlay spatial retaining walls on a plan
+    def _draw_retaining_wall_overlays(target_fl: str | None) -> None:
+        rw_list = ad.retaining_wall_inputs or []
+        for rw in rw_list:
+            if not rw.start_xyz_m or not rw.end_xyz_m:
+                continue
+            if target_fl is not None and rw.floor_level and rw.floor_level != target_fl:
+                continue
+            x1w, _, z1w = rw.start_xyz_m
+            x2w, _, z2w = rw.end_xyz_m
+            axw, ayw = to_xy(x1w, z1w)
+            bxw, byw = to_xy(x2w, z2w)
+            seg_l = math.hypot(bxw - axw, byw - ayw)
+            if seg_l < 1e-3:
+                continue
+            hw_rw = max(0.5 * (rw.stem_thickness_mm / 1000.0) * eff_mm_per_m, 0.85 * k)
+            nxw = -(byw - ayw) / seg_l
+            nyw = (bxw - axw) / seg_l
+            poly = [
+                (axw + nxw * hw_rw, ayw + nyw * hw_rw),
+                (bxw + nxw * hw_rw, byw + nyw * hw_rw),
+                (bxw - nxw * hw_rw, byw - nyw * hw_rw),
+                (axw - nxw * hw_rw, ayw - nyw * hw_rw),
+            ]
+            msp.add_lwpolyline(poly, close=True, dxfattribs={"layer": "S-COL"})
+            rw_h = msp.add_hatch(dxfattribs={"layer": "S-COL-HATCH"})
+            rw_h.set_solid_fill(color=8)
+            rw_h.paths.add_polyline_path(poly, is_closed=True)
+            ang_w = math.degrees(math.atan2(byw - ayw, bxw - axw))
+            if ang_w > 90.0:
+                ang_w -= 180.0
+            elif ang_w < -90.0:
+                ang_w += 180.0
+            _add_text(
+                msp,
+                f"RW ({rw.wall_id})",
+                0.5 * (axw + bxw) + nxw * (hw_rw + 1.8 * k),
+                0.5 * (ayw + byw) + nyw * (hw_rw + 1.8 * k),
+                1.7 * k,
+                "S-COL",
+                TextEntityAlignment.MIDDLE_CENTER,
+                rotation=ang_w,
+            )
 
     # 2. Foundation Mode
     if mode == "foundation":
+        support_nids = {n.node_id for n in sm.nodes if n.is_support}
+        # Map support node_id -> column section tag (e.g. C1) for combined C1-F1 tags
+        col_tag_by_nid: dict[int, str] = {}
+        for m in sm.members:
+            if m.member_type != "column":
+                continue
+            asgn = asgn_by_mid.get(m.member_id)
+            sec = sec_by_id.get(asgn.section_id) if asgn else None
+            ctag = sec.section_id if sec else "C1"
+            if m.start_node in support_nids:
+                col_tag_by_nid[m.start_node] = ctag
+            if m.end_node in support_nids:
+                col_tag_by_nid[m.end_node] = ctag
+
+        # Mat / raft foundation outline (if designed)
+        if ad.mat_foundation_design is not None:
+            mf = ad.mat_foundation_design
+            sup_pts = [node_by_id[nid] for nid in support_nids if nid in node_by_id]
+            if sup_pts:
+                mcx = 0.5 * (min(n.x_m for n in sup_pts) + max(n.x_m for n in sup_pts))
+                mcz = 0.5 * (min(n.z_m for n in sup_pts) + max(n.z_m for n in sup_pts))
+                mx0, my0 = to_xy(mcx - 0.5 * mf.width_bx_m, mcz - 0.5 * mf.length_lz_m)
+                mx1, my1 = to_xy(mcx + 0.5 * mf.width_bx_m, mcz + 0.5 * mf.length_lz_m)
+                _add_rect(msp, mx0, my0, mx1, my1, "S-FTG")
+                _add_rect(msp, mx0 + 1.5 * k, my0 + 1.5 * k, mx1 - 1.5 * k, my1 - 1.5 * k, "S-FTG", linetype="DASHED")
+                _add_text(
+                    msp,
+                    f"{mf.mat_id} ({mf.width_bx_m:.2f}x{mf.length_lz_m:.2f}m t={mf.thickness_mm:.0f}mm)",
+                    0.5 * (mx0 + mx1),
+                    my1 + 1.8 * k,
+                    1.9 * k,
+                    "S-FTG",
+                    TextEntityAlignment.BOTTOM_CENTER,
+                )
+
+        # Combined footings (multi-column pads)
+        combined_node_ids: set[int] = set()
+        for cf in ad.combined_footing_designs:
+            cf_nids = list(cf.merged_node_ids or [])
+            pts_cf = [node_by_id[nid] for nid in cf_nids if nid in node_by_id]
+            combined_node_ids.update(cf_nids)
+            if pts_cf:
+                xs_cf = [n.x_m for n in pts_cf]
+                zs_cf = [n.z_m for n in pts_cf]
+                ccx = 0.5 * (min(xs_cf) + max(xs_cf))
+                ccz = 0.5 * (min(zs_cf) + max(zs_cf))
+                span_x_cf = max(xs_cf) - min(xs_cf)
+                span_z_cf = max(zs_cf) - min(zs_cf)
+                if span_x_cf >= span_z_cf:
+                    dim_x_m, dim_z_m = cf.length_l_m, cf.width_b_m
+                else:
+                    dim_x_m, dim_z_m = cf.width_b_m, cf.length_l_m
+            else:
+                ccx, ccz = cf.center_x_m, cf.center_z_m
+                dim_x_m, dim_z_m = cf.length_l_m, cf.width_b_m
+            fx, fy = to_xy(ccx, ccz)
+            hw = 0.5 * dim_x_m * eff_mm_per_m
+            hl = 0.5 * dim_z_m * eff_mm_per_m
+            _add_rect(msp, fx - hw, fy - hl, fx + hw, fy + hl, "S-FTG")
+            _add_rect(msp, fx - hw * 0.90, fy - hl * 0.90, fx + hw * 0.90, fy + hl * 0.90, "S-FTG", linetype="DASHED")
+            ctag = col_tag_by_nid.get(cf_nids[0], "C1") if cf_nids else "C1"
+            _add_text(msp, f"{ctag}-{cf.combined_id}", fx + hw + 1.1 * k, fy + hl * 0.45, 2.0 * k, "S-FTG", TextEntityAlignment.LEFT)
+            _add_text(
+                msp,
+                f"{cf.length_l_m:.2f}x{cf.width_b_m:.2f}m",
+                fx + hw + 1.1 * k,
+                fy - hl * 0.35,
+                1.5 * k,
+                "S-TEXT",
+                TextEntityAlignment.LEFT,
+            )
+
+        # Isolated footings
         for f in ad.footing_designs:
+            if f.node_id in combined_node_ids:
+                continue
             nd = node_by_id.get(f.node_id)
             if nd is None:
                 continue
@@ -718,22 +933,68 @@ def _draw_plan_in_box(
                 "S-FTG",
                 linetype="DASHED",
             )
-            _add_text(msp, f.footing_tag, fx + hw + 1.1 * k, fy + hl * 0.5, 2.1 * k, "S-FTG", TextEntityAlignment.LEFT)
+            ctag = col_tag_by_nid.get(f.node_id, "C1")
+            _add_text(msp, f"{ctag}-{f.footing_tag}", fx + hw + 1.1 * k, fy + hl * 0.55, 2.0 * k, "S-FTG", TextEntityAlignment.LEFT)
             _add_text(
                 msp,
-                f"TOF EL.{f.base_elevation_m:+.2f}m",
+                f"{f.b_m:.2f}x{f.l_m:.2f}m TOF {f.base_elevation_m:+.2f}",
                 fx + hw + 1.1 * k,
                 fy - hl * 0.35,
-                1.55 * k,
+                1.45 * k,
                 "S-TEXT",
                 TextEntityAlignment.LEFT,
             )
 
+        # Strap footings (connecting beam between exterior & interior pads)
+        for sf in ad.strap_footing_designs:
+            na_s = node_by_id.get(sf.exterior_node_id)
+            nb_s = node_by_id.get(sf.interior_node_id)
+            if na_s is None or nb_s is None:
+                continue
+            ax_s, ay_s = to_xy(na_s.x_m, na_s.z_m)
+            bx_s, by_s = to_xy(nb_s.x_m, nb_s.z_m)
+            sl = math.hypot(bx_s - ax_s, by_s - ay_s)
+            if sl < 1e-3:
+                continue
+            hw_s = max(0.5 * (sf.strap_b_mm / 1000.0) * eff_mm_per_m, 0.8 * k)
+            nxs = -(by_s - ay_s) / sl
+            nys = (bx_s - ax_s) / sl
+            msp.add_line((ax_s + nxs * hw_s, ay_s + nys * hw_s), (bx_s + nxs * hw_s, by_s + nys * hw_s), dxfattribs={"layer": "S-FTG"})
+            msp.add_line((ax_s - nxs * hw_s, ay_s - nys * hw_s), (bx_s - nxs * hw_s, by_s - nys * hw_s), dxfattribs={"layer": "S-FTG"})
+            _add_text(
+                msp,
+                f"{sf.strap_id} (STRAP)",
+                0.5 * (ax_s + bx_s) + nxs * (hw_s + 1.5 * k),
+                0.5 * (ay_s + by_s) + nys * (hw_s + 1.5 * k),
+                1.65 * k,
+                "S-FTG",
+                TextEntityAlignment.MIDDLE_CENTER,
+            )
+
+        # Light diagonal crossing lines + SOG labels in bounded ground grid bays
+        if len(x_axes) >= 2 and len(z_axes) >= 2:
+            for (_, xa), (_, xb) in zip(x_axes, x_axes[1:]):
+                for (_, za), (_, zb) in zip(z_axes, z_axes[1:]):
+                    if abs(xb - xa) < 1.2 or abs(zb - za) < 1.2:
+                        continue
+                    bx0_s, by0_s = to_xy(xa, za)
+                    bx1_s, by1_s = to_xy(xb, zb)
+                    msp.add_line((bx0_s, by0_s), (bx1_s, by1_s), dxfattribs={"layer": "S-SLAB", "linetype": "DASHED"})
+                    msp.add_line((bx0_s, by1_s), (bx1_s, by0_s), dxfattribs={"layer": "S-SLAB", "linetype": "DASHED"})
+                    _add_text(
+                        msp,
+                        "SOG",
+                        0.5 * (bx0_s + bx1_s),
+                        0.5 * (by0_s + by1_s),
+                        1.75 * k,
+                        "S-SLAB",
+                        TextEntityAlignment.MIDDLE_CENTER,
+                    )
+
         for m in sm.members:
             if m.member_type == "tie_beam":
-                _draw_beam_entity(msp, m, node_by_id, sec_by_id, asgn_by_mid, to_xy, eff_mm_per_m, k)
+                _draw_beam_entity(msp, m, node_by_id, sec_by_id, asgn_by_mid, to_xy, eff_mm_per_m, k, label_override="GB")
 
-        support_nids = {n.node_id for n in sm.nodes if n.is_support}
         drawn_col_xy: set[tuple[int, int]] = set()
         for m in sm.members:
             if m.member_type != "column":
@@ -748,6 +1009,9 @@ def _draw_plan_in_box(
                 continue
             drawn_col_xy.add(key)
             _draw_column_entity(msp, m, nd, sec_by_id, asgn_by_mid, to_xy, eff_mm_per_m, k)
+
+        base_lv_id = sorted(project.levels, key=lambda lv: lv.elevation_m)[0].id if project.levels else None
+        _draw_retaining_wall_overlays(base_lv_id)
         return overflowed
 
     # 3. Framing Plan Mode
@@ -793,12 +1057,17 @@ def _draw_plan_in_box(
         drawn_col_xy.add(key)
         _draw_column_entity(msp, m, na, sec_by_id, asgn_by_mid, to_xy, eff_mm_per_m, k)
 
-    # Slab tags (suppress on very tiny slivers < 1.8 m2)
+    # Slab panels: light diagonal crossing lines + slab tag/thickness
     for panel in sm.slab_panels:
         if panel.floor_level != floor_level or panel.slab_action == "void":
             continue
         if panel.net_area_sqm < 1.8 or not panel.polygon_m:
             continue
+        pts_p = [to_xy(p[0], p[1]) for p in panel.polygon_m]
+        xs_p = [p[0] for p in pts_p]
+        ys_p = [p[1] for p in pts_p]
+        msp.add_line((min(xs_p), min(ys_p)), (max(xs_p), max(ys_p)), dxfattribs={"layer": "S-SLAB", "linetype": "DASHED"})
+        msp.add_line((min(xs_p), max(ys_p)), (max(xs_p), min(ys_p)), dxfattribs={"layer": "S-SLAB", "linetype": "DASHED"})
         cx_m = sum(p[0] for p in panel.polygon_m) / len(panel.polygon_m)
         cz_m = sum(p[1] for p in panel.polygon_m) / len(panel.polygon_m)
         sx, sy = to_xy(cx_m, cz_m)
@@ -806,6 +1075,9 @@ def _draw_plan_in_box(
         t_mm = sa.thickness_mm if sa else 125.0
         tag = sa.slab_tag if sa else "S1"
         _add_text(msp, f"{tag}-{t_mm:.0f}mm", sx, sy, 1.85 * k, "S-SLAB", TextEntityAlignment.MIDDLE_CENTER)
+
+    # Spatial retaining walls on this floor level
+    _draw_retaining_wall_overlays(floor_level)
 
     # Floor openings
     for op in project.openings:
@@ -860,7 +1132,17 @@ def _draw_column_entity(msp, member, node, sec_by_id, asgn_by_mid, to_xy, eff_mm
     )
 
 
-def _draw_beam_entity(msp, member, node_by_id, sec_by_id, asgn_by_mid, to_xy, eff_mm_per_m: float, k: float):
+def _draw_beam_entity(
+    msp,
+    member,
+    node_by_id,
+    sec_by_id,
+    asgn_by_mid,
+    to_xy,
+    eff_mm_per_m: float,
+    k: float,
+    label_override: str | None = None,
+):
     na = node_by_id.get(member.start_node)
     nb = node_by_id.get(member.end_node)
     if na is None or nb is None:
@@ -876,7 +1158,17 @@ def _draw_beam_entity(msp, member, node_by_id, sec_by_id, asgn_by_mid, to_xy, ef
     asgn = asgn_by_mid.get(member.member_id)
     sec = sec_by_id.get(asgn.section_id) if asgn else None
     w_m = (sec.width_mm / 1000.0) if sec else 0.30
-    sec_tag = sec.section_id if sec else ("TB1" if member.member_type == "tie_beam" else "B1")
+    if label_override:
+        sec_tag = f"{label_override} ({sec.section_id})" if sec else label_override
+    elif sec:
+        if member.member_type in ("edge_beam", "cantilever_beam"):
+            sec_tag = f"EB/{sec.section_id}"
+        elif member.member_type in ("secondary_beam", "trimmer_beam"):
+            sec_tag = f"JB/{sec.section_id}"
+        else:
+            sec_tag = sec.section_id
+    else:
+        sec_tag = "GB" if member.member_type == "tie_beam" else ("EB" if member.member_type in ("edge_beam", "cantilever_beam") else "B1")
 
     half_w = max(0.5 * w_m * eff_mm_per_m, 0.7 * k)
     nx = -dy / seg_len
@@ -1210,52 +1502,233 @@ def _draw_detail_item(
         return
 
     if key == "detail_footing_section":
-        rep_ftg = ad.footing_designs[0] if ad.footing_designs else None
         rep_col = ad.column_designs[0] if ad.column_designs else None
         cb_mm = rep_col.width_mm if rep_col else 400.0
-        fb_mm = (rep_ftg.b_m * 1000.0) if rep_ftg else 1800.0
-        ft_mm = rep_ftg.thickness_mm if rep_ftg else 400.0
-        df_mm = max(dp.footing_embedment_m * 1000.0, ft_mm + 400.0)
 
-        f_cx_plan = x0 + w * 0.27
-        f_cx_sec = x0 + w * 0.74
-        f_scale = min(mm_per_mm_real, (w * 0.36) / max(fb_mm, 1000.0), (h * 0.44) / max(df_mm, fb_mm))
-        fw_d = fb_mm * f_scale
-        ft_d = max(ft_mm * f_scale, 4.0 * k)
-        df_d = min(df_mm * f_scale, h * 0.50)
-        ped_d = max(cb_mm * f_scale, 4.0 * k)
+        # Collect unique isolated footing types (F1, F2, ...) + combined footings (CF1, ...)
+        ftg_entries: list[dict] = []
+        seen_tags: set[str] = set()
+        for f in ad.footing_designs:
+            if f.footing_tag in seen_tags:
+                continue
+            seen_tags.add(f.footing_tag)
+            idx_num = len(ftg_entries) + 1
+            ftg_entries.append(
+                {
+                    "tag": f.footing_tag,
+                    "title": f"FOOTING {idx_num} ({f.footing_tag})",
+                    "b_m": max(f.b_m, 0.8),
+                    "l_m": max(f.l_m, 0.8),
+                    "t_mm": max(f.thickness_mm, 250.0),
+                    "bars_x": f.bottom_bars_x or "16mm @ 200mm o.c.",
+                    "bars_z": f.bottom_bars_z or f.bottom_bars_x or "16mm @ 200mm o.c.",
+                    "is_combined": False,
+                }
+            )
+        for cf in ad.combined_footing_designs:
+            idx_num = len(ftg_entries) + 1
+            ftg_entries.append(
+                {
+                    "tag": cf.combined_id,
+                    "title": f"FOOTING {idx_num} ({cf.combined_id} COMBINED)",
+                    "b_m": max(cf.width_b_m, 0.8),
+                    "l_m": max(cf.length_l_m, 1.5),
+                    "t_mm": max(cf.thickness_mm, 300.0),
+                    "bars_x": cf.bot_long_bars or "16mm @ 175mm o.c.",
+                    "bars_z": cf.bot_trans_bars or "16mm @ 200mm o.c.",
+                    "is_combined": True,
+                }
+            )
+        if not ftg_entries:
+            ftg_entries.append(
+                {
+                    "tag": "F1",
+                    "title": "FOOTING 1 (F1)",
+                    "b_m": 1.8,
+                    "l_m": 1.8,
+                    "t_mm": 400.0,
+                    "bars_x": "9-16mm @ 175mm o.c.",
+                    "bars_z": "9-16mm @ 175mm o.c.",
+                    "is_combined": False,
+                }
+            )
 
-        _add_rect(msp, f_cx_plan - fw_d / 2, cy - fw_d / 2, f_cx_plan + fw_d / 2, cy + fw_d / 2, "S-FTG")
-        _add_rect(msp, f_cx_plan - ped_d / 2, cy - ped_d / 2, f_cx_plan + ped_d / 2, cy + ped_d / 2, "S-COL")
-        fcov = max(dp.clear_cover_footing_mm * f_scale, 1.4 * k)
-        for i in range(5):
-            frac = i / 4.0
-            pos_x = (f_cx_plan - fw_d / 2 + fcov) + frac * (fw_d - 2 * fcov)
-            pos_y = (cy - fw_d / 2 + fcov) + frac * (fw_d - 2 * fcov)
-            msp.add_line((pos_x, cy - fw_d / 2 + fcov), (pos_x, cy + fw_d / 2 - fcov), dxfattribs={"layer": "S-REBAR"})
-            msp.add_line((f_cx_plan - fw_d / 2 + fcov, pos_y), (f_cx_plan + fw_d / 2 - fcov, pos_y), dxfattribs={"layer": "S-REBAR"})
-        _add_text(msp, "PLAN", f_cx_plan, cy - fw_d / 2 - 4.0 * k, 1.75 * k, "S-TEXT", TextEntityAlignment.TOP_CENTER)
+        # Adaptively limit rows so each band stays legible in both full-sheet & shared S-3 cells
+        is_large_box = (h >= 160.0 * k) or (w >= 260.0 * k)
+        max_rows = 4 if is_large_box else 2
+        shown = ftg_entries[:max_rows]
+        n_rows = len(shown)
 
-        sec_bot = cy - df_d * 0.45
-        sec_ftg_top = sec_bot + ft_d
-        sec_ngl = sec_bot + df_d
-        _add_rect(msp, f_cx_sec - fw_d / 2, sec_bot, f_cx_sec + fw_d / 2, sec_ftg_top, "S-FTG")
-        _add_rect(msp, f_cx_sec - ped_d / 2, sec_ftg_top, f_cx_sec + ped_d / 2, sec_ngl + 2.5 * k, "S-COL")
-        msp.add_line((f_cx_sec - fw_d * 0.62, sec_ngl), (f_cx_sec + fw_d * 0.62, sec_ngl), dxfattribs={"layer": "S-DIM", "linetype": "DASHED"})
-        _add_text(msp, "NGL/FFL", f_cx_sec + fw_d * 0.64, sec_ngl, 1.5 * k, "S-DIM", TextEntityAlignment.MIDDLE_LEFT)
-        ry = sec_bot + max(fcov, 1.4 * k)
-        msp.add_lwpolyline(
-            [
-                (f_cx_sec - fw_d / 2 + fcov, sec_ftg_top - fcov * 0.5),
-                (f_cx_sec - fw_d / 2 + fcov, ry),
-                (f_cx_sec + fw_d / 2 - fcov, ry),
-                (f_cx_sec + fw_d / 2 - fcov, sec_ftg_top - fcov * 0.5),
-            ],
-            dxfattribs={"layer": "S-REBAR"},
-        )
-        _add_text(msp, f"Df={dp.footing_embedment_m:.2f}m | t={ft_mm:.0f}mm", f_cx_sec, sec_bot - 4.0 * k, 1.7 * k, "S-DIM", TextEntityAlignment.TOP_CENTER)
-        _add_text(msp, f"BOT: {rep_ftg.bottom_bars_x if rep_ftg else '9-16mm @ 175mm'} B.W.", cx, sec_ngl + 4.5 * k, 1.7 * k, "S-REBAR", TextEntityAlignment.BOTTOM_CENTER)
-        _add_text(msp, f"TYPICAL ISOLATED FOOTING ({rep_ftg.footing_tag if rep_ftg else 'F1'}) (1:{detail_scale})", cx, y0 + 3.5 * k, 2.1 * k, "S-TITLEBLK", TextEntityAlignment.MIDDLE_CENTER)
+        footer_h = 9.0 * k
+        usable_h = max(h - footer_h, 24.0 * k)
+        row_h = usable_h / n_rows
+        sf_txt = 1.0 if n_rows == 1 else (0.86 if n_rows == 2 else 0.78)
+        tk = k * sf_txt
+
+        for r_idx, entry in enumerate(shown):
+            ry1 = y1 - r_idx * row_h
+            ry0 = ry1 - row_h
+            if r_idx > 0:
+                msp.add_line((x0 + 2.0 * k, ry1), (x1 - 2.0 * k, ry1), dxfattribs={"layer": "S-SCHED"})
+
+            # Sub-band geometry
+            b_mm = entry["b_m"] * 1000.0
+            l_mm = entry["l_m"] * 1000.0
+            ft_mm = entry["t_mm"]
+            df_mm = max(dp.footing_embedment_m * 1000.0, ft_mm + 500.0)
+            gravel_mm = 100.0
+
+            plan_cx = x0 + w * 0.30
+            sec_cx = x0 + w * 0.74
+            band_cy = ry0 + row_h * 0.52
+
+            # Scale to fit true B x L plan and Df + t section cleanly inside sub-band
+            f_scale = min(
+                mm_per_mm_real,
+                (w * 0.30) / max(l_mm, 1000.0),
+                (row_h * 0.46) / max(b_mm, 1000.0),
+                (row_h * 0.48) / max(df_mm + gravel_mm, 1200.0),
+            )
+            fw_d = max(l_mm * f_scale, 12.0 * tk)  # horizontal span (L)
+            fl_d = max(b_mm * f_scale, 10.0 * tk)  # vertical span (B)
+            ft_d = max(ft_mm * f_scale, 3.2 * tk)
+            grv_d = max(gravel_mm * f_scale, 1.3 * tk)
+            df_d = min(df_mm * f_scale, row_h * 0.44)
+            ped_d = max(cb_mm * f_scale, 3.2 * tk)
+            fcov = max(dp.clear_cover_footing_mm * f_scale, 1.1 * tk)
+
+            # --- LEFT: PLAN VIEW (true B x L proportions + hooked rebar grid + dims) ---
+            px0_f, px1_f = plan_cx - fw_d * 0.5, plan_cx + fw_d * 0.5
+            py0_f, py1_f = band_cy - fl_d * 0.5, band_cy + fl_d * 0.5
+            _add_rect(msp, px0_f, py0_f, px1_f, py1_f, "S-FTG")
+
+            # Column footprint(s) + starter bars
+            col_xs = [plan_cx - fw_d * 0.28, plan_cx + fw_d * 0.28] if entry["is_combined"] else [plan_cx]
+            for ccx in col_xs:
+                _add_rect(msp, ccx - ped_d * 0.5, band_cy - ped_d * 0.5, ccx + ped_d * 0.5, band_cy + ped_d * 0.5, "S-COL")
+                for sx_c in (-0.3, 0.3):
+                    for sy_c in (-0.3, 0.3):
+                        msp.add_circle((ccx + sx_c * ped_d, band_cy + sy_c * ped_d), radius=max(0.45 * tk, 0.35), dxfattribs={"layer": "S-REBAR"})
+
+            # Hooked bottom rebar grid both ways on S-REBAR
+            n_bx = 6 if entry["is_combined"] else 5
+            n_by = 5
+            hook_l = max(1.1 * tk, fcov * 0.8)
+            for i in range(n_bx):
+                frac = i / max(n_bx - 1, 1)
+                rx = (px0_f + fcov) + frac * max(fw_d - 2 * fcov, 0.5)
+                msp.add_lwpolyline(
+                    [(rx - hook_l * 0.5, py0_f + fcov), (rx, py0_f + fcov), (rx, py1_f - fcov), (rx + hook_l * 0.5, py1_f - fcov)],
+                    dxfattribs={"layer": "S-REBAR"},
+                )
+            for j in range(n_by):
+                frac = j / max(n_by - 1, 1)
+                ry = (py0_f + fcov) + frac * max(fl_d - 2 * fcov, 0.5)
+                msp.add_lwpolyline(
+                    [(px0_f + fcov, ry - hook_l * 0.5), (px0_f + fcov, ry), (px1_f - fcov, ry), (px1_f - fcov, ry + hook_l * 0.5)],
+                    dxfattribs={"layer": "S-REBAR"},
+                )
+
+            # Plan outer L (top) & B (left) dimensions with 45-deg ticks
+            dy_top = py1_f + 3.2 * tk
+            msp.add_line((px0_f, dy_top), (px1_f, dy_top), dxfattribs={"layer": "S-DIM"})
+            _draw_dim_tick(msp, px0_f, dy_top, tk)
+            _draw_dim_tick(msp, px1_f, dy_top, tk)
+            _add_text(msp, f"{entry['l_m']:.2f}", plan_cx, dy_top + 0.9 * tk, 1.55 * tk, "S-DIM", TextEntityAlignment.BOTTOM_CENTER)
+
+            dx_left = px0_f - 3.2 * tk
+            msp.add_line((dx_left, py0_f), (dx_left, py1_f), dxfattribs={"layer": "S-DIM"})
+            _draw_dim_tick(msp, dx_left, py0_f, tk)
+            _draw_dim_tick(msp, dx_left, py1_f, tk)
+            _add_text(msp, f"{entry['b_m']:.2f}", dx_left - 0.9 * tk, band_cy, 1.55 * tk, "S-DIM", TextEntityAlignment.BOTTOM_CENTER, rotation=90.0)
+
+            # Rebar leader callout (left of plan)
+            ldr_x = max(x0 + 2.5 * k, px0_f - 10.0 * tk)
+            _add_text(
+                msp,
+                f"{entry['bars_x']} B.W.",
+                ldr_x,
+                py1_f - 1.2 * tk,
+                1.4 * tk,
+                "S-REBAR",
+                TextEntityAlignment.TOP_RIGHT if ldr_x > x0 + 18.0 * k else TextEntityAlignment.TOP_LEFT,
+            )
+            _add_text(msp, "PLAN", plan_cx, py0_f - 2.6 * tk, 1.7 * tk, "S-TITLEBLK", TextEntityAlignment.TOP_CENTER)
+
+            # --- RIGHT: SECTION VIEW (Df, t, 0.10m gravel bedding, NAT GRADE LN., hooked bars & ties) ---
+            sec_grv_bot = band_cy - df_d * 0.45 - grv_d
+            sec_bot = sec_grv_bot + grv_d
+            sec_ftg_top = sec_bot + ft_d
+            sec_ngl = sec_bot + df_d
+            sx0_f, sx1_f = sec_cx - fw_d * 0.5, sec_cx + fw_d * 0.5
+
+            # 0.10m Gravel bedding base layer + EARTH label
+            _add_rect(msp, sx0_f - 1.5 * tk, sec_grv_bot, sx1_f + 1.5 * tk, sec_bot, "S-DIM")
+            n_grv = max(4, int((fw_d + 3.0 * tk) / max(2.2 * tk, 1.0)))
+            for gi in range(n_grv):
+                gx_t = (sx0_f - 1.5 * tk) + (gi + 0.5) * ((fw_d + 3.0 * tk) / n_grv)
+                msp.add_line((gx_t - 0.6 * tk, sec_grv_bot), (gx_t + 0.6 * tk, sec_bot), dxfattribs={"layer": "S-DIM"})
+            _add_text(msp, "EARTH", sec_cx, sec_grv_bot - 1.0 * tk, 1.35 * tk, "S-TEXT", TextEntityAlignment.TOP_CENTER)
+
+            # Footing concrete & column pedestal(s)
+            _add_rect(msp, sx0_f, sec_bot, sx1_f, sec_ftg_top, "S-FTG")
+            sec_col_xs = [sec_cx - fw_d * 0.28, sec_cx + fw_d * 0.28] if entry["is_combined"] else [sec_cx]
+            for sccx in sec_col_xs:
+                _add_rect(msp, sccx - ped_d * 0.5, sec_ftg_top, sccx + ped_d * 0.5, sec_ngl + 4.2 * tk, "S-COL")
+                # Column dowels hooked into footing
+                dcov = ped_d * 0.20
+                msp.add_lwpolyline(
+                    [(sccx - ped_d * 0.5 - 2.0 * tk, sec_bot + fcov), (sccx - ped_d * 0.5 + dcov, sec_bot + fcov), (sccx - ped_d * 0.5 + dcov, sec_ngl + 4.0 * tk)],
+                    dxfattribs={"layer": "S-REBAR"},
+                )
+                msp.add_lwpolyline(
+                    [(sccx + ped_d * 0.5 + 2.0 * tk, sec_bot + fcov), (sccx + ped_d * 0.5 - dcov, sec_bot + fcov), (sccx + ped_d * 0.5 - dcov, sec_ngl + 4.0 * tk)],
+                    dxfattribs={"layer": "S-REBAR"},
+                )
+                # Column ties along shaft
+                for ti in range(5):
+                    ty_c = sec_ftg_top + (ti + 0.6) * ((sec_ngl + 3.0 * tk - sec_ftg_top) / 5.5)
+                    msp.add_line((sccx - ped_d * 0.5 + dcov, ty_c), (sccx + ped_d * 0.5 - dcov, ty_c), dxfattribs={"layer": "S-REBAR"})
+
+            # NAT GRADE LN. dashed line
+            msp.add_line((sx0_f - 4.5 * tk, sec_ngl), (sx1_f + 4.5 * tk, sec_ngl), dxfattribs={"layer": "S-DIM", "linetype": "DASHED"})
+            _add_text(msp, "NAT GRADE LN.", sx0_f - 4.8 * tk, sec_ngl + 0.6 * tk, 1.35 * tk, "S-DIM", TextEntityAlignment.BOTTOM_RIGHT)
+
+            # Hooked bottom bars + transverse bar circles in section
+            ry_s = sec_bot + max(fcov, 1.1 * tk)
+            msp.add_lwpolyline(
+                [(sx0_f + fcov, sec_ftg_top - fcov * 0.5), (sx0_f + fcov, ry_s), (sx1_f - fcov, ry_s), (sx1_f - fcov, sec_ftg_top - fcov * 0.5)],
+                dxfattribs={"layer": "S-REBAR"},
+            )
+            for bi in range(n_bx):
+                frac = bi / max(n_bx - 1, 1)
+                bx_dot = (sx0_f + fcov + 0.7 * tk) + frac * max(fw_d - 2 * fcov - 1.4 * tk, 0.5)
+                msp.add_circle((bx_dot, ry_s + 0.7 * tk), radius=max(0.45 * tk, 0.35), dxfattribs={"layer": "S-REBAR"})
+
+            # Section vertical dimension chain (Df, t, 0.10) with ticks
+            sdim_x = sx0_f - 3.0 * tk
+            msp.add_line((sdim_x, sec_grv_bot), (sdim_x, sec_ngl), dxfattribs={"layer": "S-DIM"})
+            for sy_tk in (sec_grv_bot, sec_bot, sec_ftg_top, sec_ngl):
+                _draw_dim_tick(msp, sdim_x, sy_tk, tk)
+            _add_text(msp, f"Df={dp.footing_embedment_m:.2f}", sdim_x - 1.0 * tk, 0.5 * (sec_ftg_top + sec_ngl), 1.35 * tk, "S-DIM", TextEntityAlignment.BOTTOM_CENTER, rotation=90.0)
+            _add_text(msp, f"t={ft_mm:.0f}", sdim_x - 1.0 * tk, 0.5 * (sec_bot + sec_ftg_top), 1.3 * tk, "S-DIM", TextEntityAlignment.BOTTOM_CENTER, rotation=90.0)
+
+            # Tie spacing note & SECTION label
+            _add_text(
+                msp,
+                "10mm DIA. TIES: 3-50, 5-100, 7-150, REST @ 200 O.C.",
+                sec_cx,
+                sec_ngl + 5.0 * tk,
+                1.35 * tk,
+                "S-TEXT",
+                TextEntityAlignment.BOTTOM_CENTER,
+            )
+            _add_text(msp, "SECTION", sec_cx, sec_grv_bot - 3.6 * tk, 1.7 * tk, "S-TITLEBLK", TextEntityAlignment.TOP_CENTER)
+
+            # Footing band title (FOOTING 1 (F1), FOOTING 2 (F2), ...)
+            _add_text(msp, entry["title"], cx, ry0 + 1.8 * tk, 2.0 * tk, "S-TITLEBLK", TextEntityAlignment.BOTTOM_CENTER)
+
+        _add_text(msp, f"FOOTING DETAILS (1:{detail_scale} / NTS)", cx, y0 + 3.2 * k, 2.1 * k, "S-TITLEBLK", TextEntityAlignment.MIDDLE_CENTER)
         return
 
     if key == "detail_beam_longitudinal":
@@ -1521,9 +1994,18 @@ def _compose_sheet_items(
             by0 = by1 - cell_h
 
             if pkey == "foundation_plan":
-                ptitle = "FOUNDATION & TIE-BEAM PLAN"
+                ptitle = "FOUNDATION AND FRAMING PLAN"
                 ov = _draw_plan_in_box(
-                    msp, project, (bx0, by0, bx1, by1), k, eff_plan_scale, ptitle, mode="foundation", warnings=warnings
+                    msp,
+                    project,
+                    (bx0, by0, bx1, by1),
+                    k,
+                    eff_plan_scale,
+                    ptitle,
+                    mode="foundation",
+                    warnings=warnings,
+                    sheet_no=sheet_cfg.sheet_no,
+                    detail_no=i + 1,
                 )
                 overflow = overflow or ov
                 contents.append("Foundation & Tie-Beam Plan")
@@ -1533,8 +2015,18 @@ def _compose_sheet_items(
                 elev = lv.elevation_m if lv is not None else None
                 ptitle = f"{lvl_id} FRAMING PLAN"
                 ov = _draw_plan_in_box(
-                    msp, project, (bx0, by0, bx1, by1), k, eff_plan_scale, ptitle,
-                    mode="framing", floor_level=lvl_id, floor_elev_m=elev, warnings=warnings,
+                    msp,
+                    project,
+                    (bx0, by0, bx1, by1),
+                    k,
+                    eff_plan_scale,
+                    ptitle,
+                    mode="framing",
+                    floor_level=lvl_id,
+                    floor_elev_m=elev,
+                    warnings=warnings,
+                    sheet_no=sheet_cfg.sheet_no,
+                    detail_no=i + 1,
                 )
                 overflow = overflow or ov
                 contents.append(f"{lvl_id} Framing Plan")
@@ -1612,6 +2104,7 @@ def _build_dxf_for_sheet_configs(
     sheet_bounds: dict[str, tuple[float, float, float, float]] = {}
     warnings: list[str] = []
 
+    total_sheets = len(sheet_configs)
     for idx, scfg in enumerate(sheet_configs):
         ox = idx * (w + SHEET_GAP_MM)
         before_count = len(msp)
@@ -1619,16 +2112,27 @@ def _build_dxf_for_sheet_configs(
         has_plans = any(it == "foundation_plan" or it.startswith("floor_plan:") for it in scfg.items)
         has_dets = any(it in DETAIL_KEYS for it in scfg.items)
         if has_plans and has_dets:
-            scale_lbl = f"1:{eff_plan_scale} / 1:{opts.detail_scale}"
+            scale_lbl = f"1:{eff_plan_scale}M / 1:{opts.detail_scale}"
         elif has_plans:
-            scale_lbl = f"1:{eff_plan_scale}"
+            scale_lbl = f"1:{eff_plan_scale}M"
         elif has_dets:
             scale_lbl = f"1:{opts.detail_scale} / NTS"
         else:
             scale_lbl = "NTS"
 
         content_box = _draw_title_block(
-            msp, ox, w, h, k, project, scfg.sheet_no, scfg.title, scale_lbl, profile=profile
+            msp,
+            ox,
+            w,
+            h,
+            k,
+            project,
+            scfg.sheet_no,
+            scfg.title,
+            scale_lbl,
+            profile=profile,
+            sheet_index=idx + 1,
+            total_sheets=total_sheets,
         )
         sheet_bounds[scfg.sheet_no] = (ox, 0.0, ox + w, h)
 

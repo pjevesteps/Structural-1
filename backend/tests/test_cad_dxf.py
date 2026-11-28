@@ -374,3 +374,148 @@ def test_dwg_status_and_binary_dwg_export_mocked_and_503_fallback(cad_client, mo
     assert ok_res.headers["content-type"].startswith("application/acad")
     assert ok_res.content == fake_dwg_payload
     assert ok_res.content.startswith(b"AC1027")
+
+
+def test_philippine_cad_standards_stacked_dims_sog_multi_footing_and_title_block(cad_client):
+    """
+    Verify Philippine structural CAD drafting upgrades:
+      1. Stacked inner bay-to-bay + outer overall dimension chains
+      2. Foundation plan combined column-footing tags (C1-F1), SOG ground bays, GB labels, & spatial RW overlay
+      3. Multi-footing (F1, F2, CF1 combined) PLAN + SECTION details with NAT GRADE LN., EARTH, and tie spacing
+      4. Metric scale formatting (1:100M) and SHEET X OF N in DXF, SVG preview, and PDF
+    """
+    from backend.app.models import CombinedFootingDesign, RetainingWallInput
+
+    client, _ = cad_client
+    pid = "CAD-PH-STD-01"
+    p = _make_cad_project(pid)
+    # Use a 3x2 grid (0, 3.0, 5.5 m in X; 0, 4.0 m in Z) so overall X = 5.50 != bay spans (3.00, 2.50)
+    p.columns = [
+        Column(id="C-A1", grid="A-1", floor_level="1F", x_m=0.0, y_m=0.0, width_mm=400, depth_mm=400),
+        Column(id="C-B1", grid="B-1", floor_level="1F", x_m=3.0, y_m=0.0, width_mm=400, depth_mm=400),
+        Column(id="C-C1", grid="C-1", floor_level="1F", x_m=5.5, y_m=0.0, width_mm=400, depth_mm=400),
+        Column(id="C-A2", grid="A-2", floor_level="1F", x_m=0.0, y_m=4.0, width_mm=400, depth_mm=400),
+        Column(id="C-B2", grid="B-2", floor_level="1F", x_m=3.0, y_m=4.0, width_mm=400, depth_mm=400),
+        Column(id="C-C2", grid="C-2", floor_level="1F", x_m=5.5, y_m=4.0, width_mm=400, depth_mm=400),
+    ]
+    assert client.post("/api/projects", json=p.model_dump()).status_code == 200
+    assert (
+        client.post(
+            f"/api/projects/{pid}/geometry/generate",
+            json={"default_support_type": "FIXED", "include_base_tie_beams": True, "footing_depth_m": 1.5},
+        ).status_code
+        == 200
+    )
+    assert client.post(f"/api/projects/{pid}/sizing/auto-size").status_code == 200
+    assert client.post(f"/api/projects/{pid}/loads/generate").status_code == 200
+    assert client.post(f"/api/projects/{pid}/design/run").status_code == 200
+
+    # Inject a distinct F2 isolated footing, a CF1 combined footing, and a spatial retaining wall
+    proj = storage_mod.load_project(pid)
+    assert len(proj.analysis_design.footing_designs) >= 4
+    proj.analysis_design.footing_designs[0].footing_tag = "F1"
+    proj.analysis_design.footing_designs[1].footing_tag = "F2"
+    proj.analysis_design.footing_designs[1].b_m = 2.0
+    proj.analysis_design.footing_designs[1].l_m = 2.4
+    cf_nodes = [proj.analysis_design.footing_designs[2].node_id, proj.analysis_design.footing_designs[3].node_id]
+    proj.analysis_design.combined_footing_designs = [
+        CombinedFootingDesign(
+            combined_id="CF1",
+            merged_node_ids=cf_nodes,
+            merged_footing_marks=["F1", "F1"],
+            center_x_m=1.5,
+            center_z_m=4.0,
+            y_m=-1.5,
+            length_l_m=4.2,
+            width_b_m=1.6,
+            thickness_mm=450.0,
+            total_ps_kn=650.0,
+            total_pu_kn=920.0,
+            q_max_kpa=120.0,
+            q_net_allow_kpa=200.0,
+            bearing_dcr=0.60,
+            one_way_shear_dcr=0.45,
+            punching_shear_dcr=0.55,
+            top_long_bars="16mm @ 175mm o.c.",
+            bot_long_bars="16mm @ 175mm o.c.",
+            bot_trans_bars="16mm @ 200mm o.c.",
+            status="PASS",
+        )
+    ]
+    proj.analysis_design.retaining_wall_inputs = [
+        RetainingWallInput(
+            wall_id="RW-1",
+            retained_height_m=2.8,
+            total_length_m=5.5,
+            floor_level="1F",
+            start_xyz_m=[0.0, 0.0, 4.0],
+            end_xyz_m=[5.5, 0.0, 4.0],
+        )
+    ]
+    storage_mod.save_project(proj)
+
+    # Generate 2 sheets: S-1 (Foundation + 1F), S-2 (Dedicated Footing Detail sheet)
+    gen = client.post(
+        f"/api/projects/{pid}/cad/generate",
+        json={
+            "options": {
+                "sheet_size": "A1",
+                "plan_scale": 100,
+                "detail_scale": 25,
+                "preset": "custom",
+                "sheets": [
+                    {"sheet_no": "S-1", "title": "FOUNDATION AND FRAMING PLAN", "items": ["foundation_plan", "floor_plan:1F"]},
+                    {"sheet_no": "S-2", "title": "FOOTING DETAILS", "items": ["detail_footing_section"]},
+                ],
+            }
+        },
+    )
+    assert gen.status_code == 200, gen.text
+
+    # 1. DXF audit & entity text verification
+    dxf_res = client.get(f"/api/projects/{pid}/cad/download/dxf")
+    assert dxf_res.status_code == 200
+    doc = ezdxf.read(io.StringIO(dxf_res.content.decode("utf-8")))
+    assert doc.audit().errors == []
+    dxf_texts = "\n".join(e.dxf.text for e in doc.modelspace() if e.dxftype() == "TEXT")
+
+    # Stacked dims: inner bay-to-bay (3.00, 2.50) + outer overall (5.50)
+    assert "3.00" in dxf_texts
+    assert "2.50" in dxf_texts
+    assert "5.50" in dxf_texts
+    # Foundation & framing detailing
+    assert "SOG" in dxf_texts
+    assert "GB" in dxf_texts
+    assert "C1-F1" in dxf_texts
+    assert "CF1" in dxf_texts
+    assert "RW (RW-1)" in dxf_texts
+    # Multi-footing PLAN + SECTION details
+    assert "FOOTING 1 (F1)" in dxf_texts
+    assert "FOOTING 2 (F2)" in dxf_texts
+    assert "CF1 COMBINED" in dxf_texts
+    assert "PLAN" in dxf_texts
+    assert "SECTION" in dxf_texts
+    assert "NAT GRADE LN." in dxf_texts
+    assert "EARTH" in dxf_texts
+    assert "10mm DIA. TIES" in dxf_texts
+    # Metric scale & sheet index
+    assert "1:100M" in dxf_texts
+    assert "SHEET 1 OF 2" in dxf_texts
+    assert "SHEET 2 OF 2" in dxf_texts
+
+    # 2. SVG preview parity on S-1 and S-2
+    svg1 = client.get(f"/api/projects/{pid}/cad/preview-svg", params={"sheet_no": "S-1"}).json()["svg"]
+    svg2 = client.get(f"/api/projects/{pid}/cad/preview-svg", params={"sheet_no": "S-2"}).json()["svg"]
+    assert "SOG" in svg1 and "5.50" in svg1 and "1:100M" in svg1
+    assert "FOOTING 1 (F1)" in svg2 and "FOOTING 2 (F2)" in svg2 and "NAT GRADE LN." in svg2
+
+    # 3. Vector PDF verification
+    pdf_res = client.get(f"/api/projects/{pid}/cad/download/pdf")
+    assert pdf_res.status_code == 200
+    pdf_doc = pymupdf.open(stream=pdf_res.content, filetype="pdf")
+    assert pdf_doc.page_count == 2
+    p0_txt = pdf_doc[0].get_text()
+    p1_txt = pdf_doc[1].get_text()
+    pdf_doc.close()
+    assert "SOG" in p0_txt and "5.50" in p0_txt and "SHEET 1 OF 2" in p0_txt
+    assert "FOOTING 1 (F1)" in p1_txt and "NAT GRADE LN." in p1_txt and "SHEET 2 OF 2" in p1_txt
