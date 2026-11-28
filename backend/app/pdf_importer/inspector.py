@@ -105,8 +105,45 @@ COMPOUND_REPLACEMENTS = {
 
 FLOOR_TITLE_RE = re.compile(
     r"\b((?:BASEMENT|GROUND|FIRST|SECOND|THIRD|FOURTH|FIFTH|SIXTH|MEZZANINE|TYPICAL|UPPER|LOWER|ROOF\s+DECK)"
-    r"(?:\s+[A-Z0-9\-]{1,12}){0,2}\s*(?:FLOOR\s+PLAN|PLAN)|[A-Z0-9\-]{1,12}\s+FLOOR\s+PLAN|ROOF\s+DECK\s+PLAN)\b",
+    r"(?:\s+[A-Z0-9\-]{1,12}){0,2}\s*(?:FLOOR\s+PLAN|PLAN)|[A-Z0-9\-]{1,12}\s+FLOOR\s+PLAN|ROOF\s+DECK\s+PLAN|ROOF\s+PLAN)\b",
     re.IGNORECASE,
+)
+
+# Cross-reference phrases inside callouts/notes that should never be treated as standalone plan titles
+_CROSS_REF_PHRASES = (
+    "SEE ",
+    "REFER TO",
+    "UP TO ",
+    "DOWN TO ",
+    "OPEN TO BELOW",
+    "OPEN BELOW",
+    "ABOVE",
+    "BELOW",
+)
+
+# Canonical level matching rules (ordered specifically: ROOF DECK before ROOF)
+_CANONICAL_LEVEL_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("ROOF DECK", ("RD", "ROOF DECK", "ROOFDECK")),
+    ("ROOF BEAM", ("RB", "ROOF BEAM", "ROOF")),
+    ("ROOF LINE", ("ROOF", "RL", "RB")),
+    ("ROOF PLAN", ("ROOF", "RB", "RL")),
+    ("ROOF", ("ROOF", "RB", "RL")),
+    ("PENTHOUSE", ("PH", "PENTHOUSE")),
+    ("MEZZANINE", ("MEZZ", "MZ", "MEZZANINE")),
+    ("BASEMENT", ("B1", "BASEMENT", "BSMT")),
+    ("GROUND", ("GF", "G/F", "GROUND", "1F")),
+    ("FIRST", ("1F", "GF")),
+    ("1ST", ("1F", "GF")),
+    ("SECOND", ("2F", "2ND")),
+    ("2ND", ("2F", "2ND")),
+    ("THIRD", ("3F", "3RD")),
+    ("3RD", ("3F", "3RD")),
+    ("FOURTH", ("4F", "4TH")),
+    ("4TH", ("4F", "4TH")),
+    ("FIFTH", ("5F", "5TH")),
+    ("5TH", ("5F", "5TH")),
+    ("SIXTH", ("6F", "6TH")),
+    ("6TH", ("6F", "6TH")),
 )
 
 GENERAL_TITLE_RE = re.compile(
@@ -500,6 +537,102 @@ def _detect_center_viewport_divider_x_raster(png_path: Path) -> float | None:
     return None
 
 
+def _is_cross_ref_or_note_block(norm_text: str) -> bool:
+    """Return True if a normalized text block is a cross-reference callout or long note paragraph."""
+    if not norm_text:
+        return True
+    if any(phrase in norm_text for phrase in _CROSS_REF_PHRASES):
+        return True
+    if len(norm_text) > 90 or norm_text.count(".") >= 2:
+        return True
+    return False
+
+
+def match_title_to_project_level(title: str, project_levels: list | None) -> str:
+    """
+    Deterministically map a region name or sheet title (e.g. 'GROUND FLOOR PLAN', '2ND FLOOR PLAN',
+    'ROOF DECK PLAN', 'ROOF PLAN') to a matching level.id in project_levels.
+    Returns '' when no confident match exists.
+    """
+    if not title or not project_levels:
+        return ""
+    norm = normalize_spaced_text(title)
+    if not norm:
+        return ""
+
+    upper_to_id: dict[str, str] = {}
+    for lv in project_levels:
+        lid = lv.id if hasattr(lv, "id") else (lv.get("id", "") if isinstance(lv, dict) else str(lv))
+        lid = str(lid).strip()
+        if lid:
+            upper_to_id[lid.upper()] = lid
+    if not upper_to_id:
+        return ""
+
+    # 1. Canonical keyword rules (ROOF DECK is checked strictly before ROOF and stops fallthrough)
+    for kw, candidates in _CANONICAL_LEVEL_RULES:
+        if kw in norm:
+            for cand in candidates:
+                if cand in upper_to_id:
+                    return upper_to_id[cand]
+            # Avoid falling through from ROOF DECK to generic ROOF
+            if kw == "ROOF DECK":
+                return ""
+
+    # 2. Numeric floor / basement patterns (e.g., "7TH FLOOR PLAN", "LEVEL 7", "B2 PLAN")
+    m_fl = re.search(r"\b(\d+)(?:ST|ND|RD|TH)?\s*(?:FLOOR|FLR|LEVEL|LVL)\b", norm)
+    if m_fl:
+        cand = f"{m_fl.group(1)}F"
+        if cand in upper_to_id:
+            return upper_to_id[cand]
+    m_bsmt = re.search(r"\b(?:BASEMENT\s*(\d+)|B(\d+))\b", norm)
+    if m_bsmt:
+        num = m_bsmt.group(1) or m_bsmt.group(2)
+        cand = f"B{num}"
+        if cand in upper_to_id:
+            return upper_to_id[cand]
+
+    # 3. Whole-word exact ID match (e.g. "GF", "2F", "RD", "ROOF", "MEZZ")
+    for lid_upper, lid in sorted(upper_to_id.items(), key=lambda kv: -len(kv[0])):
+        if len(lid_upper) >= 2 and re.search(rf"\b{re.escape(lid_upper)}\b", norm):
+            return lid
+
+    return ""
+
+
+def auto_assign_region_floor_levels(
+    pages: list[PageInfo],
+    regions: list[PlanRegion],
+    project_levels: list | None,
+) -> int:
+    """
+    Auto-populate PlanRegion.floor_level from region name (or parent page sheet_title for single-region pages)
+    against project_levels without ever overwriting a non-empty user-assigned floor_level.
+    """
+    if not project_levels or not regions:
+        return 0
+
+    page_by_num = {p.page_number: p for p in pages}
+    plan_count_by_page: dict[int, int] = {}
+    for r in regions:
+        if r.region_type == "plan":
+            plan_count_by_page[r.page_number] = plan_count_by_page.get(r.page_number, 0) + 1
+
+    mapped = 0
+    for reg in regions:
+        if reg.region_type != "plan" or reg.floor_level.strip():
+            continue
+        matched = match_title_to_project_level(reg.name, project_levels)
+        if not matched and plan_count_by_page.get(reg.page_number, 0) == 1:
+            pg = page_by_num.get(reg.page_number)
+            if pg is not None and pg.sheet_title:
+                matched = match_title_to_project_level(pg.sheet_title, project_levels)
+        if matched:
+            reg.floor_level = matched
+            mapped += 1
+    return mapped
+
+
 def build_floor_plan_regions(
     page: pymupdf.Page,
     png_path: Path,
@@ -520,26 +653,65 @@ def build_floor_plan_regions(
         divider_x = _detect_center_viewport_divider_x_vector(page, width_px, height_px)
     split_x = divider_x if divider_x is not None else (width_px * 0.5)
 
-    left_titles: list[str] = []
-    right_titles: list[str] = []
-    all_titles: list[tuple[float, str]] = []
+    # Collect candidate plan titles, filtering out cross-reference callouts & long note paragraphs
+    raw_matches: list[dict] = []
     for blk in blocks:
         if blk["cy"] > usable_bottom + height_px * 0.04:
             continue
-        for m in FLOOR_TITLE_RE.finditer(blk["norm"]):
+        if _is_cross_ref_or_note_block(blk["norm"]):
+            continue
+        norm_txt = blk["norm"]
+        norm_len = max(len(norm_txt), 1)
+        bx0 = float(blk.get("x0", blk["cx"]))
+        bx1 = float(blk.get("x1", blk["cx"]))
+        bw = max(bx1 - bx0, 0.0)
+        for m in FLOOR_TITLE_RE.finditer(norm_txt):
             title = re.sub(r"\s+", " ", m.group(1)).strip(" -:/|")
             if not title:
                 continue
-            all_titles.append((blk["cx"], title))
-            if blk["cx"] < split_x:
-                if title not in left_titles:
-                    left_titles.append(title)
-            else:
-                if title not in right_titles:
-                    right_titles.append(title)
+            mx0 = bx0 + (m.start() / norm_len) * bw
+            mx1 = bx0 + (m.end() / norm_len) * bw
+            mcx = (mx0 + mx1) * 0.5
+            raw_matches.append(
+                {
+                    "title": title,
+                    "cx": mcx,
+                    "x0": mx0,
+                    "x1": mx1,
+                    "font_size": float(blk.get("font_size", 0.0) or 0.0),
+                }
+            )
 
-    distinct_titles = list(dict.fromkeys(t for _, t in sorted(all_titles, key=lambda x: x[0])))
-    is_dual = (divider_x is not None) or (len(distinct_titles) >= 2) or (bool(left_titles) and bool(right_titles))
+    # Prefer prominent/title-sized headings over small annotation text when font_size is available
+    max_font = max((item["font_size"] for item in raw_matches), default=0.0)
+    if max_font > 0.0:
+        prominent_matches = [item for item in raw_matches if item["font_size"] >= max_font * 0.72]
+    else:
+        prominent_matches = raw_matches
+
+    distinct_titles = list(
+        dict.fromkeys(item["title"] for item in sorted(prominent_matches, key=lambda x: x["cx"]))
+    )
+
+    # Suppress a false center divider if a single prominent plan title spans across divider_x
+    if divider_x is not None and len(distinct_titles) == 1:
+        if any(item["x0"] < divider_x < item["x1"] for item in prominent_matches):
+            divider_x = None
+            split_x = width_px * 0.5
+
+    left_titles: list[str] = []
+    right_titles: list[str] = []
+    for item in sorted(prominent_matches, key=lambda x: x["cx"]):
+        title = item["title"]
+        if item["cx"] < split_x:
+            if title not in left_titles:
+                left_titles.append(title)
+        else:
+            if title not in right_titles:
+                right_titles.append(title)
+
+    has_opposite_distinct = bool(left_titles) and bool(right_titles) and (set(left_titles) != set(right_titles))
+    is_dual = (divider_x is not None) or has_opposite_distinct
 
     if is_dual:
         sx_round = round(split_x, 2)
@@ -600,6 +772,7 @@ def inspect_and_render_pdf(
     pages_dir: Path,
     dpi: int = DEFAULT_RENDER_DPI,
     start_page_index: int = 0,
+    project_levels: list | None = None,
 ) -> tuple[list[PageInfo], list[PlanRegion]]:
     """
     Inspect pages of a PDF starting at 0-based start_page_index, render PNG previews into pages_dir,
@@ -640,7 +813,7 @@ def inspect_and_render_pdf(
             sheet_title = _extract_sheet_title(blocks, sheet_type, full_norm)
 
             viewport_count = 1
-            if sheet_type in ("floor_plan", "structural_plan"):
+            if sheet_type in ("floor_plan", "structural_plan", "roof_plan"):
                 viewport_count, page_regions = build_floor_plan_regions(
                     page,
                     png_path,
@@ -672,6 +845,8 @@ def inspect_and_render_pdf(
                     viewport_count=viewport_count,
                 )
             )
+        if project_levels:
+            auto_assign_region_floor_levels(pages, regions, project_levels)
         return pages, regions
     finally:
         doc.close()

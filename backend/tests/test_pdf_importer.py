@@ -2969,3 +2969,175 @@ def test_structural_plan_classification_region_autobuild_and_merge_column_dedup(
     assert c1_after["width_mm"] == 450.0
     assert any(c["id"] == "S_C2" for c in cols_after)
 
+
+def test_single_plan_callout_no_false_split_dual_plan_typical_and_roof_plan(isolated_env):
+    """
+    1. Single-plan page ('GROUND FLOOR PLAN') with stair cross-reference ('UP TO SECOND FLOOR PLAN')
+       produces 1 PlanRegion (not falsely split into Left/Right).
+    2. True dual-plan page ('GROUND FLOOR PLAN' left + 'SECOND FLOOR PLAN' right) produces 2 regions.
+    3. 'TYPICAL FLOOR PLAN' is preserved as a valid title (not filtered out).
+    4. Dedicated 'ROOF PLAN' sheet auto-creates a full-page PlanRegion.
+    """
+    client = TestClient(app)
+    pid = "SINGLE-DUAL-ROOF"
+    storage.save_project(ProjectState.model_validate(_make_sample_project(pid)))
+
+    doc = pymupdf.open()
+    # Page 1: Single-plan Ground Floor with stair callout referencing Second Floor
+    p1 = doc.new_page(width=800, height=560)
+    p1.insert_text((310, 45), "GROUND FLOOR PLAN", fontsize=16)
+    p1.insert_text((520, 260), "UP TO SECOND FLOOR PLAN", fontsize=8)
+    p1.draw_rect(pymupdf.Rect(80, 90, 720, 460), color=(0, 0, 0), width=1.0)
+
+    # Page 2: True dual-plan sheet with distinct prominent titles on opposite halves
+    p2 = doc.new_page(width=800, height=560)
+    p2.insert_text((110, 45), "GROUND FLOOR PLAN", fontsize=14)
+    p2.insert_text((500, 45), "SECOND FLOOR PLAN", fontsize=14)
+    p2.draw_rect(pymupdf.Rect(50, 80, 360, 450), color=(0, 0, 0), width=1.0)
+    p2.draw_rect(pymupdf.Rect(430, 80, 750, 450), color=(0, 0, 0), width=1.0)
+
+    # Page 3: Single-plan Typical Floor Plan
+    p3 = doc.new_page(width=800, height=560)
+    p3.insert_text((280, 45), "TYPICAL FLOOR PLAN", fontsize=16)
+    p3.draw_rect(pymupdf.Rect(90, 90, 710, 460), color=(0, 0, 0), width=1.0)
+
+    # Page 4: Dedicated Roof Plan sheet
+    p4 = doc.new_page(width=800, height=560)
+    p4.insert_text((330, 45), "ROOF PLAN", fontsize=16)
+    p4.draw_rect(pymupdf.Rect(90, 90, 710, 460), color=(0, 0, 0), width=1.0)
+
+    pdf_bytes = doc.tobytes()
+    doc.close()
+
+    up = client.post(
+        f"/api/projects/{pid}/pdf-imports",
+        files={"file": ("single_dual_roof.pdf", pdf_bytes, "application/pdf")},
+    )
+    assert up.status_code == 200, up.text
+    st = up.json()
+
+    p1_regs = [r for r in st["regions"] if r["page_number"] == 1]
+    p2_regs = [r for r in st["regions"] if r["page_number"] == 2]
+    p3_regs = [r for r in st["regions"] if r["page_number"] == 3]
+    p4_regs = [r for r in st["regions"] if r["page_number"] == 4]
+
+    assert len(p1_regs) == 1, f"Expected 1 region on Page 1, got {p1_regs}"
+    assert "GROUND FLOOR PLAN" in p1_regs[0]["name"].upper()
+
+    assert len(p2_regs) == 2, f"Expected 2 regions on Page 2, got {p2_regs}"
+    p2_names = [r["name"].upper() for r in p2_regs]
+    assert any("GROUND" in n for n in p2_names)
+    assert any("SECOND" in n for n in p2_names)
+
+    assert len(p3_regs) == 1, f"Expected 1 region on Page 3, got {p3_regs}"
+    assert "TYPICAL FLOOR PLAN" in p3_regs[0]["name"].upper()
+
+    p4_page = next(p for p in st["pages"] if p["page_number"] == 4)
+    assert p4_page["sheet_type"] == "roof_plan"
+    assert len(p4_regs) == 1, f"Expected 1 auto-created region on Roof Plan Page 4, got {p4_regs}"
+    assert "ROOF PLAN" in p4_regs[0]["name"].upper()
+
+
+def test_auto_map_region_floor_levels_on_inspection_and_level_transfer(isolated_env):
+    """
+    Verify deterministic floor_level auto-mapping from region/page titles against project.levels:
+    - Distinguishes 'ROOF DECK PLAN' -> RD vs 'ROOF PLAN' -> ROOF.
+    - Works both on initial PDF upload (when project.levels already exist) and after elevation
+      level transfer (backfilling unassigned regions while preserving manually assigned levels).
+    """
+    client = TestClient(app)
+    pid = "AUTO-LEVEL-MAP"
+    proj_payload = _make_sample_project(pid)
+    # Start with no levels so initial upload leaves floor_level empty, then transfer elevation levels
+    proj_payload["levels"] = []
+    proj_payload["columns"] = []
+    proj_payload["beams"] = []
+    storage.save_project(ProjectState.model_validate(proj_payload))
+
+    doc = pymupdf.open()
+    p1 = doc.new_page(width=800, height=560)
+    p1.insert_text((290, 45), "GROUND FLOOR PLAN", fontsize=16)
+    p1.draw_rect(pymupdf.Rect(80, 90, 720, 460), color=(0, 0, 0), width=1.0)
+
+    p2 = doc.new_page(width=800, height=560)
+    p2.insert_text((290, 45), "ROOF DECK PLAN", fontsize=16)
+    p2.draw_rect(pymupdf.Rect(80, 90, 720, 460), color=(0, 0, 0), width=1.0)
+
+    p3 = doc.new_page(width=800, height=560)
+    p3.insert_text((320, 45), "ROOF PLAN", fontsize=16)
+    p3.draw_rect(pymupdf.Rect(80, 90, 720, 460), color=(0, 0, 0), width=1.0)
+
+    p4 = doc.new_page(width=800, height=560)
+    p4.insert_text((300, 45), "2ND FLOOR PLAN", fontsize=16)
+    p4.draw_rect(pymupdf.Rect(80, 90, 720, 460), color=(0, 0, 0), width=1.0)
+
+    p5 = doc.new_page(width=800, height=560)
+    p5.insert_text((300, 45), "FRONT ELEVATION", fontsize=16)
+    p5.draw_line((80, 420), (700, 420), color=(0, 0, 0), width=0.8)
+
+    pdf_bytes = doc.tobytes()
+    doc.close()
+
+    up = client.post(
+        f"/api/projects/{pid}/pdf-imports",
+        files={"file": ("multi_level_plans.pdf", pdf_bytes, "application/pdf")},
+    )
+    assert up.status_code == 200, up.text
+    st = up.json()
+    doc_id = st["doc_id"]
+
+    # Manually assign Page 4's region to 'ALL' before level transfer -> must NOT be overwritten
+    p4_reg = next(r for r in st["regions"] if r["page_number"] == 4)
+    upd = client.patch(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/regions/{p4_reg['region_id']}",
+        json={"floor_level": "ALL"},
+    )
+    assert upd.status_code == 200, upd.text
+
+    # Add & approve elevation levels on Page 5: GF, 2F, RD, ROOF
+    for name, elev, y_px in [
+        ("GROUND FLOOR LINE", 0.0, 420.0),
+        ("2ND FLOOR LINE", 3.2, 320.0),
+        ("ROOF DECK LINE", 6.4, 220.0),
+        ("ROOF LINE", 9.0, 120.0),
+    ]:
+        cr = client.post(
+            f"/api/projects/{pid}/pdf-imports/{doc_id}/levels",
+            json={"page_number": 5, "name": name, "elevation_m": elev, "y_px": y_px},
+        )
+        assert cr.status_code == 200, cr.text
+        lvl_id = cr.json()["detected_levels"][-1]["level_id"]
+        ap = client.patch(
+            f"/api/projects/{pid}/pdf-imports/{doc_id}/levels/{lvl_id}",
+            json={"review_status": "approved", "engineer_approved": True},
+        )
+        assert ap.status_code == 200, ap.text
+
+    # Transfer levels -> backfills unassigned regions in state.regions and returns updated document
+    tr = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/transfer-levels",
+        json={"page_number": 5, "replace_existing": True},
+    )
+    assert tr.status_code == 200, tr.text
+    tr_doc = tr.json()["document"]
+    reg_by_page = {r["page_number"]: r for r in tr_doc["regions"]}
+    assert reg_by_page[1]["floor_level"] == "GF"
+    assert reg_by_page[2]["floor_level"] == "RD"
+    assert reg_by_page[3]["floor_level"] == "ROOF"
+    # Manual override preserved!
+    assert reg_by_page[4]["floor_level"] == "ALL"
+
+    # Now upload a fresh PDF to the same project (which already has GF, 2F, RD, ROOF) -> auto-mapped immediately!
+    up2 = client.post(
+        f"/api/projects/{pid}/pdf-imports",
+        files={"file": ("fresh_with_levels.pdf", pdf_bytes, "application/pdf")},
+    )
+    assert up2.status_code == 200, up2.text
+    st2 = up2.json()
+    reg2_by_page = {r["page_number"]: r for r in st2["regions"]}
+    assert reg2_by_page[1]["floor_level"] == "GF"
+    assert reg2_by_page[2]["floor_level"] == "RD"
+    assert reg2_by_page[3]["floor_level"] == "ROOF"
+    assert reg2_by_page[4]["floor_level"] == "2F"
+
+

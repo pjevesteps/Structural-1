@@ -20,6 +20,7 @@ from .inspector import (
     DEFAULT_RENDER_DPI,
     InvalidPdfError,
     _extract_text_blocks_px,
+    auto_assign_region_floor_levels,
     build_floor_plan_regions,
     compute_scale_metrics,
     inspect_and_render_pdf,
@@ -363,7 +364,10 @@ def upload_pdf(
     pdf_path.write_bytes(content)
 
     try:
-        pages, regions = inspect_and_render_pdf(pdf_path, pages_dir, dpi=dpi)
+        project = _ensure_project_exists(project_id)
+        pages, regions = inspect_and_render_pdf(
+            pdf_path, pages_dir, dpi=dpi, project_levels=project.levels
+        )
     except InvalidPdfError:
         for child in sorted(doc_root.rglob("*"), reverse=True):
             if child.is_file():
@@ -459,11 +463,13 @@ def append_pdf(
 
     os.replace(str(tmp_path), str(pdf_path))
 
+    project = _ensure_project_exists(project_id)
     new_pages, new_regions = inspect_and_render_pdf(
         pdf_path,
         pages_dir,
         dpi=dpi,
         start_page_index=old_page_count,
+        project_levels=project.levels,
     )
 
     state.pages.extend(new_pages)
@@ -694,7 +700,10 @@ def update_page(
     if req.sheet_title is not None:
         page.sheet_title = req.sheet_title.strip()
 
-    if page.sheet_type in ("floor_plan", "structural_plan") and not any(r.page_number == page_number for r in state.regions):
+    project = _ensure_project_exists(project_id)
+    if page.sheet_type in ("floor_plan", "structural_plan", "roof_plan") and not any(
+        r.page_number == page_number for r in state.regions
+    ):
         pdf_path = _original_pdf_path(project_id, doc_id)
         png_path = _pages_dir(project_id, doc_id) / page.image_filename
         if pdf_path.exists():
@@ -715,6 +724,13 @@ def update_page(
                 state.regions.extend(new_regions)
             finally:
                 doc.close()
+
+    if project.levels:
+        auto_assign_region_floor_levels(
+            state.pages,
+            [r for r in state.regions if r.page_number == page_number],
+            project.levels,
+        )
 
     _save_state(state)
     _append_audit(
@@ -1246,6 +1262,10 @@ def transfer_levels(
     for det in approved_levels:
         det.transferred = True
 
+    auto_mapped_regions = auto_assign_region_floor_levels(
+        state.pages, state.regions, updated_project.levels
+    )
+
     involved_pages = sorted({det.page_number for det in approved_levels})
     state.transfers.append(
         TransferRecord(
@@ -1266,9 +1286,15 @@ def transfer_levels(
             "replace_existing": req.replace_existing,
             "levels_transferred": len(approved_levels),
             "level_ids": [lv.id for lv in new_levels],
+            "auto_mapped_regions": auto_mapped_regions,
         },
     )
 
+    mapped_suffix = (
+        f" Auto-mapped {auto_mapped_regions} plan region(s) to project levels."
+        if auto_mapped_regions > 0
+        else ""
+    )
     return TransferLevelsResponse(
         project_id=project_id,
         doc_id=doc_id,
@@ -1276,7 +1302,7 @@ def transfer_levels(
         total_project_levels=len(updated_project.levels),
         notice=(
             f"Transferred {len(approved_levels)} engineer-approved level(s) into project '{project_id}' "
-            f"(sorted by elevation_m)."
+            f"(sorted by elevation_m).{mapped_suffix}"
         ),
         project=updated_project,
         document=state,
