@@ -39,6 +39,91 @@ function dcrColor(dcr, status) {
   return "#10b981";
 }
 
+function renderSummaryCardPng({ title, subtitle = "", status = "PASS", rows = [] }) {
+  const W = 780;
+  const rowCount = Math.max(1, rows.length);
+  const cols = rows.length > 4 ? 2 : 1;
+  const gridRows = Math.ceil(rowCount / cols);
+  const H = Math.max(250, 128 + gridRows * 46 + 40);
+  const canvas = document.createElement("canvas");
+  canvas.width = W;
+  canvas.height = H;
+  const ctx = canvas.getContext("2d");
+
+  ctx.fillStyle = "#f8fafc";
+  ctx.fillRect(0, 0, W, H);
+  ctx.strokeStyle = "#cbd5e1";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(1, 1, W - 2, H - 2);
+
+  ctx.fillStyle = "#0f172a";
+  ctx.fillRect(0, 0, W, 68);
+
+  const clampText = (txt, maxW, font) => {
+    ctx.font = font;
+    let s = String(txt ?? "");
+    if (ctx.measureText(s).width <= maxW) return s;
+    while (s.length > 3 && ctx.measureText(`${s}…`).width > maxW) {
+      s = s.slice(0, -1);
+    }
+    return `${s}…`;
+  };
+
+  ctx.fillStyle = "#ffffff";
+  const titleFont = "bold 17px system-ui, -apple-system, Segoe UI, sans-serif";
+  ctx.fillText(clampText(title, W - 150, titleFont), 20, 30);
+
+  if (subtitle) {
+    ctx.fillStyle = "#cbd5e1";
+    const subFont = "12px system-ui, -apple-system, Segoe UI, sans-serif";
+    ctx.fillText(clampText(subtitle, W - 150, subFont), 20, 52);
+  }
+
+  const stUp = String(status || "INFO").toUpperCase();
+  const badgeBg = stUp === "FAIL" ? "#dc2626" : stUp === "PASS" ? "#059669" : "#2563eb";
+  ctx.fillStyle = badgeBg;
+  ctx.fillRect(W - 108, 18, 88, 30);
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "bold 13px system-ui, -apple-system, Segoe UI, sans-serif";
+  ctx.textAlign = "center";
+  ctx.fillText(stUp.slice(0, 8), W - 64, 38);
+  ctx.textAlign = "left";
+
+  const padX = 20;
+  const gapX = 14;
+  const cellW = (W - padX * 2 - gapX * (cols - 1)) / cols;
+  const startY = 84;
+  rows.forEach(([label, value], idx) => {
+    const colIdx = idx % cols;
+    const rowIdx = Math.floor(idx / cols);
+    const x = padX + colIdx * (cellW + gapX);
+    const y = startY + rowIdx * 46;
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(x, y, cellW, 38);
+    ctx.strokeStyle = "#e2e8f0";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x, y, cellW, 38);
+
+    ctx.fillStyle = "#64748b";
+    ctx.font = "bold 10px system-ui, -apple-system, Segoe UI, sans-serif";
+    ctx.fillText(clampText(label, cellW - 16, ctx.font), x + 10, y + 14);
+
+    ctx.fillStyle = "#0f172a";
+    ctx.font = "bold 12.5px ui-monospace, SFMono-Regular, Menlo, monospace";
+    ctx.fillText(clampText(value, cellW - 16, ctx.font), x + 10, y + 31);
+  });
+
+  ctx.fillStyle = "#64748b";
+  ctx.font = "11px system-ui, -apple-system, Segoe UI, sans-serif";
+  ctx.fillText(
+    `Pinned for NBCP PD 1096 / OBO Structural Calculation Report · ${new Date().toISOString().slice(0, 19).replace("T", " ")} UTC`,
+    20,
+    H - 14
+  );
+
+  return canvas.toDataURL("image/png");
+}
+
 export default function DesignReview({ project, onClose, onUpdated }) {
   const pid = encodeURIComponent(project.project_id);
   const canvasRef = useRef(null);
@@ -48,6 +133,7 @@ export default function DesignReview({ project, onClose, onUpdated }) {
 
   const [fullProject, setFullProject] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [pinningKey, setPinningKey] = useState("");
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
   const [autoLog, setAutoLog] = useState(null);
@@ -567,6 +653,53 @@ export default function DesignReview({ project, onClose, onUpdated }) {
     }
   }
 
+  async function handlePinToObo(pinKey, title, caption, cardSpec, customDataUrl = null) {
+    if (pinningKey || busy) return;
+    setPinningKey(pinKey);
+    setError("");
+    try {
+      const imageDataUrl =
+        customDataUrl && customDataUrl.startsWith("data:image/")
+          ? customDataUrl
+          : renderSummaryCardPng(cardSpec);
+      const updated = await apiJson(`/api/projects/${pid}/design/pin-snapshot`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title,
+          caption,
+          image_data_url: imageDataUrl,
+        }),
+      });
+      setFullProject((prev) => (prev ? { ...prev, analysis_design: updated } : prev));
+      setNotice(`Pinned "${title}" to OBO Report.`);
+      if (onUpdated) await onUpdated();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setPinningKey("");
+    }
+  }
+
+  async function handleUnpinSnapshot(snapId, title) {
+    if (!snapId || busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      const updated = await apiJson(
+        `/api/projects/${pid}/design/pin-snapshot/${encodeURIComponent(snapId)}`,
+        { method: "DELETE" }
+      );
+      setFullProject((prev) => (prev ? { ...prev, analysis_design: updated } : prev));
+      setNotice(`Removed pinned view "${title || snapId}" from OBO Report.`);
+      if (onUpdated) await onUpdated();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const selectedBeam = selectedMemberId != null ? beamByMid[selectedMemberId] : null;
   const selectedCol = selectedMemberId != null ? colByMid[selectedMemberId] : null;
 
@@ -872,6 +1005,41 @@ export default function DesignReview({ project, onClose, onUpdated }) {
                   >
                     Reset View
                   </button>
+                  <button
+                    type="button"
+                    className="secondary mini"
+                    disabled={busy || Boolean(pinningKey) || !ad?.generated_at}
+                    onClick={() => {
+                      const maxB = Math.max(0, ...(ad?.beam_designs || []).map((b) => b.governing_dcr));
+                      const maxC = Math.max(0, ...(ad?.column_designs || []).map((c) => c.governing_dcr));
+                      let dataUrl = null;
+                      try {
+                        if (canvasRef.current) dataUrl = canvasRef.current.toDataURL("image/png");
+                      } catch {
+                        dataUrl = null;
+                      }
+                      handlePinToObo(
+                        "tab1-util3d",
+                        `3D Utilization View (${storyFilter === "ALL" ? "All Floors" : storyFilter})`,
+                        `Filter: ${storyFilter} · Max Beam DCR ${maxB.toFixed(2)} · Max Column DCR ${maxC.toFixed(2)} · Beams ${kpis.beamPass}/${kpis.beamTotal}, Cols ${kpis.colPass}/${kpis.colTotal}`,
+                        {
+                          title: `3D Utilization View (${storyFilter})`,
+                          subtitle: `${project.project_name} (${project.project_id})`,
+                          status: maxB > 1 || maxC > 1 ? "FAIL" : "PASS",
+                          rows: [
+                            ["Story Filter", storyFilter],
+                            ["Beams Pass", `${kpis.beamPass} / ${kpis.beamTotal}`],
+                            ["Columns Pass", `${kpis.colPass} / ${kpis.colTotal}`],
+                            ["Max Beam DCR", maxB.toFixed(2)],
+                            ["Max Column DCR", maxC.toFixed(2)],
+                          ],
+                        },
+                        dataUrl
+                      );
+                    }}
+                  >
+                    {pinningKey === "tab1-util3d" ? "Pinning..." : "Pin to OBO"}
+                  </button>
                 </div>
               </div>
 
@@ -993,6 +1161,38 @@ export default function DesignReview({ project, onClose, onUpdated }) {
                       soft-story check included.
                     </small>
                   </div>
+                  <button
+                    type="button"
+                    className="secondary mini"
+                    disabled={busy || Boolean(pinningKey) || !(ad?.story_drifts || []).length}
+                    onClick={() => {
+                      const drifts = ad?.story_drifts || [];
+                      const rxns = ad?.support_reactions || [];
+                      const maxDr = Math.max(0, ...drifts.map((d) => Math.max(d.drift_ratio_x, d.drift_ratio_z)));
+                      const maxDx = Math.max(0, ...drifts.map((d) => d.delta_m_x_mm));
+                      const maxDz = Math.max(0, ...drifts.map((d) => d.delta_m_z_mm));
+                      const maxPu = Math.max(0, ...rxns.map((r) => r.max_lrfd_pu_kn));
+                      const anyFail = drifts.some((d) => d.status === "FAIL");
+                      handlePinToObo(
+                        "tab2-drift-summary",
+                        "Story Drift & Support Reactions Summary",
+                        `NSCP 2015 Sec. 208.6.4 · Max Drift Ratio ${maxDr.toFixed(2)} · Max ΔM X/Z ${maxDx.toFixed(1)}/${maxDz.toFixed(1)} mm · Max LRFD Pu ${maxPu.toFixed(1)} kN`,
+                        {
+                          title: "Story Drift & Support Reactions Summary",
+                          subtitle: `${drifts.length} Stories · ${rxns.length} Foundation Supports`,
+                          status: anyFail ? "FAIL" : "PASS",
+                          rows: [
+                            ["Max Drift Ratio", `${maxDr.toFixed(2)} (Limit 1.00)`],
+                            ["Max ΔM X / Z", `${maxDx.toFixed(1)} / ${maxDz.toFixed(1)} mm`],
+                            ["Max LRFD Pu", `${maxPu.toFixed(1)} kN`],
+                            ["Stories Pass", `${drifts.filter((d) => d.status === "PASS").length} / ${drifts.length}`],
+                          ],
+                        }
+                      );
+                    }}
+                  >
+                    {pinningKey === "tab2-drift-summary" ? "Pinning..." : "Pin Summary to OBO"}
+                  </button>
                 </div>
                 <div className="sizing-table-wrap">
                   <table className="sizing-table">
@@ -1007,11 +1207,13 @@ export default function DesignReview({ project, onClose, onUpdated }) {
                         <th>Drift Bar</th>
                         <th>Soft?</th>
                         <th>Status</th>
+                        <th>Action</th>
                       </tr>
                     </thead>
                     <tbody>
                       {[...(ad?.story_drifts || [])].reverse().map((d) => {
                         const maxR = Math.max(d.drift_ratio_x, d.drift_ratio_z);
+                        const pk = `drift-${d.floor_level}`;
                         return (
                           <tr key={d.floor_level}>
                             <td>
@@ -1056,12 +1258,40 @@ export default function DesignReview({ project, onClose, onUpdated }) {
                                 {d.status}
                               </span>
                             </td>
+                            <td>
+                              <button
+                                type="button"
+                                className="secondary mini"
+                                disabled={busy || Boolean(pinningKey)}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handlePinToObo(
+                                    pk,
+                                    `Story Drift — ${d.floor_level}`,
+                                    `h=${d.story_height_m.toFixed(2)}m · ΔM X/Z=${d.delta_m_x_mm.toFixed(1)}/${d.delta_m_z_mm.toFixed(1)}mm (Allow ${d.allowable_drift_mm.toFixed(1)}mm) · Ratio ${d.drift_ratio_x.toFixed(2)}/${d.drift_ratio_z.toFixed(2)} · ${d.status}`,
+                                    {
+                                      title: `Story Drift — ${d.floor_level}`,
+                                      subtitle: `Elevation ${d.elevation_m.toFixed(2)} m · Story Height ${d.story_height_m.toFixed(2)} m`,
+                                      status: d.status,
+                                      rows: [
+                                        ["Elastic Δs X / Z", `${d.delta_s_x_mm.toFixed(2)} / ${d.delta_s_z_mm.toFixed(2)} mm`],
+                                        ["Inelastic ΔM X / Z", `${d.delta_m_x_mm.toFixed(1)} / ${d.delta_m_z_mm.toFixed(1)} mm`],
+                                        ["Allowable Drift", `${d.allowable_drift_mm.toFixed(1)} mm`],
+                                        ["Drift Ratio X / Z", `${d.drift_ratio_x.toFixed(2)} / ${d.drift_ratio_z.toFixed(2)}`],
+                                      ],
+                                    }
+                                  );
+                                }}
+                              >
+                                {pinningKey === pk ? "..." : "Pin"}
+                              </button>
+                            </td>
                           </tr>
                         );
                       })}
                       {!(ad?.story_drifts || []).length && (
                         <tr>
-                          <td colSpan={9} className="loads-empty">
+                          <td colSpan={10} className="loads-empty">
                             Run Analysis &amp; RC Design or upload a STAAD .anl file to inspect
                             story drifts.
                           </td>
@@ -1091,35 +1321,67 @@ export default function DesignReview({ project, onClose, onUpdated }) {
                         <th>Max Mux / Muz (kNm)</th>
                         <th>Max V (kN)</th>
                         <th>Governing LRFD</th>
+                        <th>Action</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {(ad?.support_reactions || []).map((r) => (
-                        <tr key={r.node_id}>
-                          <td>
-                            <code>N{r.node_id}</code>
-                          </td>
-                          <td>
-                            {r.grid_ref || "—"} · {r.floor_level}
-                          </td>
-                          <td>
-                            <b>{r.max_asd_fy_kn.toFixed(1)}</b>
-                          </td>
-                          <td style={{ color: r.min_asd_fy_kn < 0 ? "#fca5a5" : undefined }}>
-                            {r.min_asd_fy_kn.toFixed(1)}
-                          </td>
-                          <td>
-                            <b>{r.max_lrfd_pu_kn.toFixed(1)}</b>
-                          </td>
-                          <td>
-                            {r.max_lrfd_mux_knm.toFixed(1)} / {r.max_lrfd_muz_knm.toFixed(1)}
-                          </td>
-                          <td>{r.max_lrfd_v_kn.toFixed(1)}</td>
-                          <td>
-                            <small>{r.governing_lrfd_combo}</small>
-                          </td>
-                        </tr>
-                      ))}
+                      {(ad?.support_reactions || []).map((r) => {
+                        const pk = `rxn-${r.node_id}`;
+                        return (
+                          <tr key={r.node_id}>
+                            <td>
+                              <code>N{r.node_id}</code>
+                            </td>
+                            <td>
+                              {r.grid_ref || "—"} · {r.floor_level}
+                            </td>
+                            <td>
+                              <b>{r.max_asd_fy_kn.toFixed(1)}</b>
+                            </td>
+                            <td style={{ color: r.min_asd_fy_kn < 0 ? "#fca5a5" : undefined }}>
+                              {r.min_asd_fy_kn.toFixed(1)}
+                            </td>
+                            <td>
+                              <b>{r.max_lrfd_pu_kn.toFixed(1)}</b>
+                            </td>
+                            <td>
+                              {r.max_lrfd_mux_knm.toFixed(1)} / {r.max_lrfd_muz_knm.toFixed(1)}
+                            </td>
+                            <td>{r.max_lrfd_v_kn.toFixed(1)}</td>
+                            <td>
+                              <small>{r.governing_lrfd_combo}</small>
+                            </td>
+                            <td>
+                              <button
+                                type="button"
+                                className="secondary mini"
+                                disabled={busy || Boolean(pinningKey)}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handlePinToObo(
+                                    pk,
+                                    `Support Reaction — Node N${r.node_id} (${r.grid_ref || r.floor_level})`,
+                                    `Max ASD Fy ${r.max_asd_fy_kn.toFixed(1)} kN · Max LRFD Pu ${r.max_lrfd_pu_kn.toFixed(1)} kN · Mux/Muz ${r.max_lrfd_mux_knm.toFixed(1)}/${r.max_lrfd_muz_knm.toFixed(1)} kNm`,
+                                    {
+                                      title: `Support Reaction — Node N${r.node_id}`,
+                                      subtitle: `${r.grid_ref || "Support"} · ${r.floor_level} · ${r.governing_lrfd_combo}`,
+                                      status: r.min_asd_fy_kn < 0 ? "UPLIFT" : "PASS",
+                                      rows: [
+                                        ["ASD Fy Max / Min", `${r.max_asd_fy_kn.toFixed(1)} / ${r.min_asd_fy_kn.toFixed(1)} kN`],
+                                        ["LRFD Pu Max", `${r.max_lrfd_pu_kn.toFixed(1)} kN`],
+                                        ["LRFD Mux / Muz", `${r.max_lrfd_mux_knm.toFixed(1)} / ${r.max_lrfd_muz_knm.toFixed(1)} kNm`],
+                                        ["LRFD Max Shear V", `${r.max_lrfd_v_kn.toFixed(1)} kN`],
+                                      ],
+                                    }
+                                  );
+                                }}
+                              >
+                                {pinningKey === pk ? "..." : "Pin"}
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>
@@ -1186,52 +1448,86 @@ export default function DesignReview({ project, onClose, onUpdated }) {
                       <th>Stirrups (Supp / Mid)</th>
                       <th>DCR</th>
                       <th>Status</th>
+                      <th>Action</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {filteredBeams.map((b) => (
-                      <tr key={b.member_id} onClick={() => setSelectedMemberId(b.member_id)}>
-                        <td>
-                          <code>M{b.member_id}</code>
-                        </td>
-                        <td>
-                          <b>{b.section_id}</b> ({b.width_mm}×{b.depth_mm})
-                        </td>
-                        <td>{b.floor_level}</td>
-                        <td>
-                          {b.mu_neg_start_knm.toFixed(1)} / {b.mu_pos_mid_knm.toFixed(1)} /{" "}
-                          {b.mu_neg_end_knm.toFixed(1)}
-                        </td>
-                        <td>{b.vu_max_kn.toFixed(1)}</td>
-                        <td>
-                          <b>{b.bars_top_start}</b>
-                        </td>
-                        <td>
-                          <b>{b.bars_bot_mid}</b>
-                        </td>
-                        <td>
-                          <b>{b.bars_top_end}</b>
-                        </td>
-                        <td>
-                          <small>
-                            {b.stirrups_support} | {b.stirrups_midspan}
-                          </small>
-                        </td>
-                        <td style={{ color: dcrColor(b.governing_dcr, b.status) }}>
-                          <b>{b.governing_dcr.toFixed(2)}</b>
-                        </td>
-                        <td>
-                          <span
-                            className={`design-status-pill ${b.status === "PASS" ? "pass" : "fail"}`}
-                          >
-                            {b.status}
-                          </span>
-                        </td>
-                      </tr>
-                    ))}
+                    {filteredBeams.map((b) => {
+                      const pk = `beam-${b.member_id}`;
+                      return (
+                        <tr key={b.member_id} onClick={() => setSelectedMemberId(b.member_id)}>
+                          <td>
+                            <code>M{b.member_id}</code>
+                          </td>
+                          <td>
+                            <b>{b.section_id}</b> ({b.width_mm}×{b.depth_mm})
+                          </td>
+                          <td>{b.floor_level}</td>
+                          <td>
+                            {b.mu_neg_start_knm.toFixed(1)} / {b.mu_pos_mid_knm.toFixed(1)} /{" "}
+                            {b.mu_neg_end_knm.toFixed(1)}
+                          </td>
+                          <td>{b.vu_max_kn.toFixed(1)}</td>
+                          <td>
+                            <b>{b.bars_top_start}</b>
+                          </td>
+                          <td>
+                            <b>{b.bars_bot_mid}</b>
+                          </td>
+                          <td>
+                            <b>{b.bars_top_end}</b>
+                          </td>
+                          <td>
+                            <small>
+                              {b.stirrups_support} | {b.stirrups_midspan}
+                            </small>
+                          </td>
+                          <td style={{ color: dcrColor(b.governing_dcr, b.status) }}>
+                            <b>{b.governing_dcr.toFixed(2)}</b>
+                          </td>
+                          <td>
+                            <span
+                              className={`design-status-pill ${b.status === "PASS" ? "pass" : "fail"}`}
+                            >
+                              {b.status}
+                            </span>
+                          </td>
+                          <td>
+                            <button
+                              type="button"
+                              className="secondary mini"
+                              disabled={busy || Boolean(pinningKey)}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handlePinToObo(
+                                  pk,
+                                  `Beam M${b.member_id} (${b.section_id} · ${b.floor_level})`,
+                                  `${b.width_mm}×${b.depth_mm}mm · Mu(-/+/-) ${b.mu_neg_start_knm.toFixed(1)}/${b.mu_pos_mid_knm.toFixed(1)}/${b.mu_neg_end_knm.toFixed(1)} kNm · Vu ${b.vu_max_kn.toFixed(1)} kN · Top ${b.bars_top_start} / Bot ${b.bars_bot_mid} · DCR ${b.governing_dcr.toFixed(2)}`,
+                                  {
+                                    title: `Beam M${b.member_id} · ${b.section_id}`,
+                                    subtitle: `${b.floor_level} · ${b.width_mm} × ${b.depth_mm} mm · DCR ${b.governing_dcr.toFixed(2)}`,
+                                    status: b.status,
+                                    rows: [
+                                      ["Mu (-Start / +Mid / -End)", `${b.mu_neg_start_knm.toFixed(1)} / ${b.mu_pos_mid_knm.toFixed(1)} / ${b.mu_neg_end_knm.toFixed(1)} kNm`],
+                                      ["Vu Max", `${b.vu_max_kn.toFixed(1)} kN`],
+                                      ["Top Bars (Start / End)", `${b.bars_top_start} / ${b.bars_top_end}`],
+                                      ["Bottom Bars (Mid)", b.bars_bot_mid],
+                                      ["Stirrups (Supp / Mid)", `${b.stirrups_support} | ${b.stirrups_midspan}`],
+                                      ["Governing DCR", b.governing_dcr.toFixed(2)],
+                                    ],
+                                  }
+                                );
+                              }}
+                            >
+                              {pinningKey === pk ? "..." : "Pin to OBO"}
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
                     {filteredBeams.length === 0 && (
                       <tr>
-                        <td colSpan={11} className="loads-empty">
+                        <td colSpan={12} className="loads-empty">
                           No beam design rows match the current filter.
                         </td>
                       </tr>
@@ -1300,46 +1596,79 @@ export default function DesignReview({ project, onClose, onUpdated }) {
                       <th>Ties (Conf / Mid)</th>
                       <th>P-M DCR</th>
                       <th>Status</th>
+                      <th>Action</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {filteredCols.map((c) => (
-                      <tr key={c.member_id} onClick={() => setSelectedMemberId(c.member_id)}>
-                        <td>
-                          <code>M{c.member_id}</code>
-                        </td>
-                        <td>
-                          <b>{c.section_id}</b> ({c.width_mm}×{c.depth_mm})
-                        </td>
-                        <td>{c.floor_level}</td>
-                        <td>{c.pu_max_kn.toFixed(1)}</td>
-                        <td>
-                          {c.mux_max_knm.toFixed(1)} / {c.muy_max_knm.toFixed(1)}
-                        </td>
-                        <td>
-                          <b>{c.main_bars}</b>
-                        </td>
-                        <td>{(c.rho_provided * 100).toFixed(2)}%</td>
-                        <td>
-                          <small>
-                            {c.ties_confined} | {c.ties_mid}
-                          </small>
-                        </td>
-                        <td style={{ color: dcrColor(c.governing_dcr, c.status) }}>
-                          <b>{c.pm_dcr.toFixed(2)}</b>
-                        </td>
-                        <td>
-                          <span
-                            className={`design-status-pill ${c.status === "PASS" ? "pass" : "fail"}`}
-                          >
-                            {c.status}
-                          </span>
-                        </td>
-                      </tr>
-                    ))}
+                    {filteredCols.map((c) => {
+                      const pk = `col-${c.member_id}`;
+                      return (
+                        <tr key={c.member_id} onClick={() => setSelectedMemberId(c.member_id)}>
+                          <td>
+                            <code>M{c.member_id}</code>
+                          </td>
+                          <td>
+                            <b>{c.section_id}</b> ({c.width_mm}×{c.depth_mm})
+                          </td>
+                          <td>{c.floor_level}</td>
+                          <td>{c.pu_max_kn.toFixed(1)}</td>
+                          <td>
+                            {c.mux_max_knm.toFixed(1)} / {c.muy_max_knm.toFixed(1)}
+                          </td>
+                          <td>
+                            <b>{c.main_bars}</b>
+                          </td>
+                          <td>{(c.rho_provided * 100).toFixed(2)}%</td>
+                          <td>
+                            <small>
+                              {c.ties_confined} | {c.ties_mid}
+                            </small>
+                          </td>
+                          <td style={{ color: dcrColor(c.governing_dcr, c.status) }}>
+                            <b>{c.pm_dcr.toFixed(2)}</b>
+                          </td>
+                          <td>
+                            <span
+                              className={`design-status-pill ${c.status === "PASS" ? "pass" : "fail"}`}
+                            >
+                              {c.status}
+                            </span>
+                          </td>
+                          <td>
+                            <button
+                              type="button"
+                              className="secondary mini"
+                              disabled={busy || Boolean(pinningKey)}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handlePinToObo(
+                                  pk,
+                                  `Column M${c.member_id} (${c.section_id} · ${c.floor_level})`,
+                                  `${c.width_mm}×${c.depth_mm}mm · Pu ${c.pu_max_kn.toFixed(1)} kN · Mux/Muy ${c.mux_max_knm.toFixed(1)}/${c.muy_max_knm.toFixed(1)} kNm · ${c.main_bars} · DCR ${c.governing_dcr.toFixed(2)}`,
+                                  {
+                                    title: `Column M${c.member_id} · ${c.section_id}`,
+                                    subtitle: `${c.floor_level} · ${c.width_mm} × ${c.depth_mm} mm · P-M DCR ${c.pm_dcr.toFixed(2)}`,
+                                    status: c.status,
+                                    rows: [
+                                      ["Pu Max", `${c.pu_max_kn.toFixed(1)} kN`],
+                                      ["Mux / Muy", `${c.mux_max_knm.toFixed(1)} / ${c.muy_max_knm.toFixed(1)} kNm`],
+                                      ["Main Longitudinal Bars", `${c.main_bars} (ρ=${(c.rho_provided * 100).toFixed(2)}%)`],
+                                      ["Ties (Conf / Mid)", `${c.ties_confined} | ${c.ties_mid}`],
+                                      ["Governing DCR", c.governing_dcr.toFixed(2)],
+                                    ],
+                                  }
+                                );
+                              }}
+                            >
+                              {pinningKey === pk ? "..." : "Pin to OBO"}
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
                     {filteredCols.length === 0 && (
                       <tr>
-                        <td colSpan={10} className="loads-empty">
+                        <td colSpan={11} className="loads-empty">
                           No column design rows match the current filter.
                         </td>
                       </tr>
@@ -1375,46 +1704,176 @@ export default function DesignReview({ project, onClose, onUpdated }) {
                       <th>Punching DCR</th>
                       <th>Bottom Bars</th>
                       <th>Status</th>
+                      <th>Action</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {(ad?.footing_designs || []).map((f) => (
-                      <tr key={f.node_id}>
-                        <td>
-                          <b>{f.footing_tag}</b>
-                        </td>
-                        <td>
-                          <code>N{f.node_id}</code> {f.grid_ref ? `(${f.grid_ref})` : ""}
-                        </td>
-                        <td>{f.base_elevation_m.toFixed(2)} m</td>
-                        <td>{f.p_service_kn.toFixed(1)}</td>
-                        <td>
-                          <b>
-                            {f.b_m.toFixed(2)} &times; {f.l_m.toFixed(2)} m &times;{" "}
-                            {f.thickness_mm.toFixed(0)} mm
-                          </b>
-                        </td>
-                        <td>
-                          {f.q_actual_kpa.toFixed(1)} / {f.q_allow_kpa.toFixed(0)}
-                        </td>
-                        <td style={{ color: dcrColor(f.punching_shear_dcr, f.status) }}>
-                          <b>{f.punching_shear_dcr.toFixed(2)}</b>
-                        </td>
-                        <td>
-                          <b>{f.bottom_bars_x}</b>
-                        </td>
-                        <td>
-                          <span
-                            className={`design-status-pill ${f.status === "PASS" ? "pass" : "fail"}`}
-                          >
-                            {f.status}
-                          </span>
-                        </td>
-                      </tr>
-                    ))}
-                    {!(ad?.footing_designs || []).length && (
+                    {(ad?.footing_designs || []).map((f) => {
+                      const pk = `ftg-${f.node_id}`;
+                      return (
+                        <tr key={f.node_id}>
+                          <td>
+                            <b>{f.footing_tag}</b>
+                          </td>
+                          <td>
+                            <code>N{f.node_id}</code> {f.grid_ref ? `(${f.grid_ref})` : ""}
+                          </td>
+                          <td>{f.base_elevation_m.toFixed(2)} m</td>
+                          <td>{f.p_service_kn.toFixed(1)}</td>
+                          <td>
+                            <b>
+                              {f.b_m.toFixed(2)} &times; {f.l_m.toFixed(2)} m &times;{" "}
+                              {f.thickness_mm.toFixed(0)} mm
+                            </b>
+                          </td>
+                          <td>
+                            {f.q_actual_kpa.toFixed(1)} / {f.q_allow_kpa.toFixed(0)}
+                          </td>
+                          <td style={{ color: dcrColor(f.punching_shear_dcr, f.status) }}>
+                            <b>{f.punching_shear_dcr.toFixed(2)}</b>
+                          </td>
+                          <td>
+                            <b>{f.bottom_bars_x}</b>
+                          </td>
+                          <td>
+                            <span
+                              className={`design-status-pill ${f.status === "PASS" ? "pass" : "fail"}`}
+                            >
+                              {f.status}
+                            </span>
+                          </td>
+                          <td>
+                            <button
+                              type="button"
+                              className="secondary mini"
+                              disabled={busy || Boolean(pinningKey)}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handlePinToObo(
+                                  pk,
+                                  `Footing ${f.footing_tag} (N${f.node_id})`,
+                                  `${f.b_m.toFixed(2)}×${f.l_m.toFixed(2)}m × ${f.thickness_mm.toFixed(0)}mm · Bars ${f.bottom_bars_x} · Bearing DCR ${f.bearing_dcr.toFixed(2)} · Punching DCR ${f.punching_shear_dcr.toFixed(2)}`,
+                                  {
+                                    title: `Isolated Footing ${f.footing_tag} (N${f.node_id})`,
+                                    subtitle: `${f.grid_ref || "Support"} · Elev ${f.base_elevation_m.toFixed(2)} m`,
+                                    status: f.status,
+                                    rows: [
+                                      ["Dimensions B × L × t", `${f.b_m.toFixed(2)} × ${f.l_m.toFixed(2)} m × ${f.thickness_mm.toFixed(0)} mm`],
+                                      ["Soil Bearing q_act / q_all", `${f.q_actual_kpa.toFixed(1)} / ${f.q_allow_kpa.toFixed(0)} kPa (DCR ${f.bearing_dcr.toFixed(2)})`],
+                                      ["Punching Shear DCR", f.punching_shear_dcr.toFixed(2)],
+                                      ["Bottom Rebar (X / Z)", `${f.bottom_bars_x} / ${f.bottom_bars_z}`],
+                                    ],
+                                  }
+                                );
+                              }}
+                            >
+                              {pinningKey === pk ? "..." : "Pin to OBO"}
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                    {(ad?.combined_footing_designs || []).map((cf) => {
+                      const pk = `cftg-${cf.combined_id}`;
+                      return (
+                        <tr key={`cf-${cf.combined_id}`}>
+                          <td><b>{cf.combined_id}</b></td>
+                          <td>Combined ({(cf.node_ids || []).map((n) => `N${n}`).join(", ")})</td>
+                          <td>—</td>
+                          <td>{Number(cf.total_ps_kn || 0).toFixed(1)}</td>
+                          <td><b>{cf.length_l_m.toFixed(2)} × {cf.width_b_m.toFixed(2)} m × {cf.thickness_mm.toFixed(0)} mm</b></td>
+                          <td>{Number(cf.q_max_kpa || 0).toFixed(1)} / {Number(cf.q_allow_kpa || 0).toFixed(0)}</td>
+                          <td><b>{Number(cf.punching_shear_dcr || 0).toFixed(2)}</b></td>
+                          <td><b>{cf.bot_long_bars}</b></td>
+                          <td>
+                            <span className={`design-status-pill ${cf.status === "PASS" ? "pass" : "fail"}`}>
+                              {cf.status}
+                            </span>
+                          </td>
+                          <td>
+                            <button
+                              type="button"
+                              className="secondary mini"
+                              disabled={busy || Boolean(pinningKey)}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handlePinToObo(
+                                  pk,
+                                  `Combined Footing ${cf.combined_id}`,
+                                  `${cf.length_l_m.toFixed(2)}×${cf.width_b_m.toFixed(2)}m × ${cf.thickness_mm.toFixed(0)}mm · Top ${cf.top_long_bars} / Bot ${cf.bot_long_bars} · Punching DCR ${Number(cf.punching_shear_dcr || 0).toFixed(2)}`,
+                                  {
+                                    title: `Combined Footing ${cf.combined_id}`,
+                                    subtitle: `Nodes ${(cf.node_ids || []).map((n) => `N${n}`).join(", ")}`,
+                                    status: cf.status,
+                                    rows: [
+                                      ["Dimensions L × B × t", `${cf.length_l_m.toFixed(2)} × ${cf.width_b_m.toFixed(2)} m × ${cf.thickness_mm.toFixed(0)} mm`],
+                                      ["Top / Bottom Bars", `${cf.top_long_bars} / ${cf.bot_long_bars}`],
+                                      ["Bearing / Punching DCR", `${Number(cf.bearing_dcr || 0).toFixed(2)} / ${Number(cf.punching_shear_dcr || 0).toFixed(2)}`],
+                                    ],
+                                  }
+                                );
+                              }}
+                            >
+                              {pinningKey === pk ? "..." : "Pin to OBO"}
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                    {ad?.mat_foundation_design && (() => {
+                      const mf = ad.mat_foundation_design;
+                      const pk = `mat-${mf.mat_id}`;
+                      return (
+                        <tr key={`mat-${mf.mat_id}`}>
+                          <td><b>{mf.mat_id}</b></td>
+                          <td>Mat / Raft Foundation</td>
+                          <td>{Number(mf.y_m || 0).toFixed(2)} m</td>
+                          <td>{Number(mf.total_ps_kn || 0).toFixed(1)}</td>
+                          <td><b>{mf.width_bx_m.toFixed(2)} × {mf.length_lz_m.toFixed(2)} m × {mf.thickness_mm.toFixed(0)} mm</b></td>
+                          <td>{mf.q_max_kpa.toFixed(1)} / {mf.q_net_allow_kpa.toFixed(0)}</td>
+                          <td><b>{mf.max_punching_dcr.toFixed(2)}</b></td>
+                          <td><b>{mf.bot_bars_x}</b></td>
+                          <td>
+                            <span className={`design-status-pill ${mf.status === "PASS" ? "pass" : "fail"}`}>
+                              {mf.status}
+                            </span>
+                          </td>
+                          <td>
+                            <button
+                              type="button"
+                              className="secondary mini"
+                              disabled={busy || Boolean(pinningKey)}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handlePinToObo(
+                                  pk,
+                                  `Mat Foundation ${mf.mat_id}`,
+                                  `${mf.width_bx_m.toFixed(2)}×${mf.length_lz_m.toFixed(2)}m × ${mf.thickness_mm.toFixed(0)}mm · Bearing DCR ${mf.bearing_dcr.toFixed(2)} · Punching DCR ${mf.max_punching_dcr.toFixed(2)}`,
+                                  {
+                                    title: `Mat / Raft Foundation ${mf.mat_id}`,
+                                    subtitle: `Elev ${Number(mf.y_m || 0).toFixed(2)} m`,
+                                    status: mf.status,
+                                    rows: [
+                                      ["Dimensions Bx × Lz × t", `${mf.width_bx_m.toFixed(2)} × ${mf.length_lz_m.toFixed(2)} m × ${mf.thickness_mm.toFixed(0)} mm`],
+                                      ["Bearing / Punching DCR", `${mf.bearing_dcr.toFixed(2)} / ${mf.max_punching_dcr.toFixed(2)}`],
+                                      ["Top Bars (X / Z)", `${mf.top_bars_x} / ${mf.top_bars_z}`],
+                                      ["Bot Bars (X / Z)", `${mf.bot_bars_x} / ${mf.bot_bars_z}`],
+                                    ],
+                                  }
+                                );
+                              }}
+                            >
+                              {pinningKey === pk ? "..." : "Pin to OBO"}
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })()}
+                    {!(ad?.footing_designs || []).length &&
+                      !(ad?.combined_footing_designs || []).length &&
+                      !ad?.mat_foundation_design && (
                       <tr>
-                        <td colSpan={9} className="loads-empty">
+                        <td colSpan={10} className="loads-empty">
                           Run Analysis &amp; RC Design to generate isolated footing sizing.
                         </td>
                       </tr>
@@ -1450,11 +1909,13 @@ export default function DesignReview({ project, onClose, onUpdated }) {
                       <th>SCWB Ratio &ge; 1.20</th>
                       <th>Joint Shear DCR</th>
                       <th>Status</th>
+                      <th>Action</th>
                     </tr>
                   </thead>
                   <tbody>
                     {(ad?.smrf_joint_checks || []).map((j) => {
                       const bothPass = j.scwb_status === "PASS" && j.joint_shear_status === "PASS";
+                      const pk = `smrf-${j.joint_node_id}`;
                       return (
                         <tr key={j.joint_node_id}>
                           <td>
@@ -1486,12 +1947,40 @@ export default function DesignReview({ project, onClose, onUpdated }) {
                               {bothPass ? "PASS" : "FAIL"}
                             </span>
                           </td>
+                          <td>
+                            <button
+                              type="button"
+                              className="secondary mini"
+                              disabled={busy || Boolean(pinningKey)}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handlePinToObo(
+                                  pk,
+                                  `SMRF Joint N${j.joint_node_id} (${j.floor_level} · ${j.grid_ref || "Joint"})`,
+                                  `ΣMnc=${j.sum_mnc_knm.toFixed(1)} / ΣMnb=${j.sum_mnb_knm.toFixed(1)} kNm · SCWB=${j.scwb_ratio.toFixed(2)} (${j.scwb_status}) · Joint Shear DCR=${j.joint_shear_dcr.toFixed(2)} (${j.joint_shear_status})`,
+                                  {
+                                    title: `SMRF Beam-Column Joint N${j.joint_node_id}`,
+                                    subtitle: `${j.floor_level} · Grid ${j.grid_ref || "—"} · NSCP Sec. 418`,
+                                    status: bothPass ? "PASS" : "FAIL",
+                                    rows: [
+                                      ["ΣMnc / ΣMnb", `${j.sum_mnc_knm.toFixed(1)} / ${j.sum_mnb_knm.toFixed(1)} kNm`],
+                                      ["SCWB Ratio (>= 1.20)", `${j.scwb_ratio.toFixed(2)} (${j.scwb_status})`],
+                                      ["Joint Shear DCR", `${j.joint_shear_dcr.toFixed(2)} (${j.joint_shear_status})`],
+                                      ["Joint Vu / φVn", `${j.joint_shear_vu_kn.toFixed(1)} / ${j.joint_shear_phi_vn_kn.toFixed(1)} kN`],
+                                    ],
+                                  }
+                                );
+                              }}
+                            >
+                              {pinningKey === pk ? "..." : "Pin to OBO"}
+                            </button>
+                          </td>
                         </tr>
                       );
                     })}
                     {!(ad?.smrf_joint_checks || []).length && (
                       <tr>
-                        <td colSpan={8} className="loads-empty">
+                        <td colSpan={9} className="loads-empty">
                           Run Analysis &amp; RC Design to evaluate elevated SMRF beam-column joints.
                         </td>
                       </tr>
@@ -1565,16 +2054,47 @@ export default function DesignReview({ project, onClose, onUpdated }) {
                               </span>
                             </td>
                             <td>
-                              <button
-                                type="button"
-                                className="secondary mini"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  selectSlab();
-                                }}
-                              >
-                                Preview
-                              </button>
+                              <div style={{ display: "inline-flex", gap: 4 }}>
+                                <button
+                                  type="button"
+                                  className="secondary mini"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    selectSlab();
+                                  }}
+                                >
+                                  Preview
+                                </button>
+                                <button
+                                  type="button"
+                                  className="secondary mini"
+                                  disabled={busy || Boolean(pinningKey)}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    const pk = `slab-${s.floor_level}-${s.panel_id}`;
+                                    handlePinToObo(
+                                      pk,
+                                      `Slab ${s.panel_id} (${s.floor_level})`,
+                                      `${s.lx_m.toFixed(2)}×${s.ly_m.toFixed(2)}m · t=${s.thickness_mm.toFixed(0)}mm · Short(+) ${s.short_span_pos} · Long(+) ${s.long_span_pos} · ${s.status}`,
+                                      {
+                                        title: `RC Slab Panel ${s.panel_id} (${s.floor_level})`,
+                                        subtitle: `Lx × Ly = ${s.lx_m.toFixed(2)} × ${s.ly_m.toFixed(2)} m · Thickness t = ${s.thickness_mm.toFixed(0)} mm`,
+                                        status: s.status,
+                                        rows: [
+                                          ["Short Cont (-)", s.short_span_cont_neg],
+                                          ["Short Disc (-)", s.short_span_disc_neg],
+                                          ["Short Pos (+)", s.short_span_pos],
+                                          ["Long Neg (-)", s.long_span_neg],
+                                          ["Long Pos (+)", s.long_span_pos],
+                                          ["Status", s.status],
+                                        ],
+                                      }
+                                    );
+                                  }}
+                                >
+                                  {pinningKey === `slab-${s.floor_level}-${s.panel_id}` ? "..." : "Pin to OBO"}
+                                </button>
+                              </div>
                             </td>
                           </tr>
                         );
@@ -1661,13 +2181,43 @@ export default function DesignReview({ project, onClose, onUpdated }) {
                             </span>
                           </td>
                           <td>
-                            <button
-                              className="secondary mini"
-                              disabled={busy}
-                              onClick={() => deleteSecondary(`stairs/${encodeURIComponent(st.stair_id)}`, `Removed stair ${st.stair_id}.`)}
-                            >
-                              Delete
-                            </button>
+                            <div style={{ display: "inline-flex", gap: 4 }}>
+                              <button
+                                type="button"
+                                className="secondary mini"
+                                disabled={busy || Boolean(pinningKey)}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  const pk = `stair-${st.stair_id}`;
+                                  handlePinToObo(
+                                    pk,
+                                    `RC Stair ${st.stair_id}`,
+                                    `Span ${st.flight_span_m.toFixed(2)}m · Waist ${st.waist_thickness_mm.toFixed(0)}mm · Main ${st.main_bars} · Deflection ${st.deflection_status}`,
+                                    {
+                                      title: `Waist-Slab RC Stair ${st.stair_id}`,
+                                      subtitle: `Span ${st.flight_span_m.toFixed(2)} m · Riser/Tread ${st.riser_mm.toFixed(0)}/${st.tread_mm.toFixed(0)} mm`,
+                                      status: st.deflection_status,
+                                      rows: [
+                                        ["Waist Thickness", `${st.waist_thickness_mm.toFixed(0)} mm`],
+                                        ["Design Moment Mu", `${st.mu_knm_per_m.toFixed(2)} kN·m/m`],
+                                        ["Main Bars", st.main_bars],
+                                        ["Distribution Bars", st.dist_bars],
+                                      ],
+                                    }
+                                  );
+                                }}
+                              >
+                                {pinningKey === `stair-${st.stair_id}` ? "..." : "Pin to OBO"}
+                              </button>
+                              <button
+                                type="button"
+                                className="secondary mini"
+                                disabled={busy}
+                                onClick={() => deleteSecondary(`stairs/${encodeURIComponent(st.stair_id)}`, `Removed stair ${st.stair_id}.`)}
+                              >
+                                Delete
+                              </button>
+                            </div>
                           </td>
                         </tr>
                       ))}
@@ -1794,6 +2344,35 @@ export default function DesignReview({ project, onClose, onUpdated }) {
                               <button
                                 type="button"
                                 className="secondary mini"
+                                disabled={busy || Boolean(pinningKey)}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  const pk = `rw-${r.wall_id}`;
+                                  handlePinToObo(
+                                    pk,
+                                    `Retaining Wall ${r.wall_id}${r.floor_level ? ` (${r.floor_level})` : ""}`,
+                                    `H=${r.retained_height_m.toFixed(2)}m × L=${r.total_length_m.toFixed(1)}m · Ka/K0/Kae ${r.ka.toFixed(2)}/${r.k0.toFixed(2)}/${r.k_ae_seismic.toFixed(2)} · FS OT/Slide ${r.fs_overturning.toFixed(2)}/${r.fs_sliding.toFixed(2)} · q_toe ${r.max_toe_bearing_kpa.toFixed(1)} kPa · ${r.stem_vertical_bars}`,
+                                    {
+                                      title: `Retaining Wall ${r.wall_id}`,
+                                      subtitle: `${r.floor_level || "Grade"} · H=${r.retained_height_m.toFixed(2)} m × L=${r.total_length_m.toFixed(1)} m`,
+                                      status: r.status,
+                                      rows: [
+                                        ["Ka / K0 / Kae", `${r.ka.toFixed(2)} / ${r.k0.toFixed(2)} / ${r.k_ae_seismic.toFixed(2)}`],
+                                        ["Stem Mu / Vu", `${r.stem_mu_knm_per_m.toFixed(1)} kNm/m / ${r.stem_vu_kn_per_m.toFixed(1)} kN/m`],
+                                        ["FS Overturning / Sliding", `${r.fs_overturning.toFixed(2)} / ${r.fs_sliding.toFixed(2)}`],
+                                        ["Max Toe Bearing q_toe", `${r.max_toe_bearing_kpa.toFixed(1)} kPa`],
+                                        ["Stem Vertical Bars", r.stem_vertical_bars],
+                                        ["Base Heel/Toe Bars", r.base_heel_toe_bars],
+                                      ],
+                                    }
+                                  );
+                                }}
+                              >
+                                {pinningKey === `rw-${r.wall_id}` ? "..." : "Pin to OBO"}
+                              </button>
+                              <button
+                                type="button"
+                                className="secondary mini"
                                 disabled={busy}
                                 onClick={(e) => {
                                   e.stopPropagation();
@@ -1914,13 +2493,43 @@ export default function DesignReview({ project, onClose, onUpdated }) {
                             </span>
                           </td>
                           <td>
-                            <button
-                              className="secondary mini"
-                              disabled={busy}
-                              onClick={() => deleteSecondary(`roof-trusses/${encodeURIComponent(t.truss_id)}`, `Removed truss ${t.truss_id}.`)}
-                            >
-                              Delete
-                            </button>
+                            <div style={{ display: "inline-flex", gap: 4 }}>
+                              <button
+                                type="button"
+                                className="secondary mini"
+                                disabled={busy || Boolean(pinningKey)}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  const pk = `truss-${t.truss_id}`;
+                                  handlePinToObo(
+                                    pk,
+                                    `Roof Truss ${t.truss_id} (${t.truss_type})`,
+                                    `Span ${t.span_m.toFixed(1)}m @ ${t.pitch_deg.toFixed(0)}° · Top ${t.top_chord_section} / Bot ${t.bottom_chord_section} / Web ${t.web_section} · R_DL=${Number(t.r_dl_kn || 0).toFixed(1)}, R_LR=${Number(t.r_lr_kn || 0).toFixed(1)} kN`,
+                                    {
+                                      title: `Steel Roof Truss ${t.truss_id} (${t.truss_type})`,
+                                      subtitle: `Span ${t.span_m.toFixed(1)} m · Pitch ${t.pitch_deg.toFixed(0)}° · Est. Steel ${t.estimated_steel_kg.toFixed(1)} kg`,
+                                      status: t.status,
+                                      rows: [
+                                        ["Top / Bot Chord", `${t.top_chord_section} / ${t.bottom_chord_section}`],
+                                        ["Web Members", `${t.web_section} (DCR ${t.max_chord_dcr.toFixed(2)}/${t.max_web_dcr.toFixed(2)})`],
+                                        ["Reactions DL / LR", `${Number(t.r_dl_kn || 0).toFixed(1)} / ${Number(t.r_lr_kn || 0).toFixed(1)} kN`],
+                                        ["Wind Down / Uplift", `${Number(t.r_wl_down_kn || 0).toFixed(1)} / ${Number(t.r_wl_uplift_kn || 0).toFixed(1)} kN`],
+                                      ],
+                                    }
+                                  );
+                                }}
+                              >
+                                {pinningKey === `truss-${t.truss_id}` ? "..." : "Pin to OBO"}
+                              </button>
+                              <button
+                                type="button"
+                                className="secondary mini"
+                                disabled={busy}
+                                onClick={() => deleteSecondary(`roof-trusses/${encodeURIComponent(t.truss_id)}`, `Removed truss ${t.truss_id}.`)}
+                              >
+                                Delete
+                              </button>
+                            </div>
                           </td>
                         </tr>
                       ))}
@@ -1987,13 +2596,43 @@ export default function DesignReview({ project, onClose, onUpdated }) {
                             </span>
                           </td>
                           <td>
-                            <button
-                              className="secondary mini"
-                              disabled={busy}
-                              onClick={() => deleteSecondary(`strap-footings/${encodeURIComponent(sf.strap_id)}`, `Removed strap ${sf.strap_id}.`)}
-                            >
-                              Delete
-                            </button>
+                            <div style={{ display: "inline-flex", gap: 4 }}>
+                              <button
+                                type="button"
+                                className="secondary mini"
+                                disabled={busy || Boolean(pinningKey)}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  const pk = `strap-${sf.strap_id}`;
+                                  handlePinToObo(
+                                    pk,
+                                    `Strap Footing ${sf.strap_id}`,
+                                    `N${sf.exterior_node_id}→N${sf.interior_node_id} · Beam ${sf.strap_b_mm.toFixed(0)}×${sf.strap_h_mm.toFixed(0)}mm · Top ${sf.strap_top_bars} / Bot ${sf.strap_bot_bars} · ${sf.status}`,
+                                    {
+                                      title: `Eccentric Strap Footing ${sf.strap_id}`,
+                                      subtitle: `Exterior N${sf.exterior_node_id} → Interior N${sf.interior_node_id}`,
+                                      status: sf.status,
+                                      rows: [
+                                        ["Ext / Int Pads", `${sf.ext_pad_b_m.toFixed(2)}×${sf.ext_pad_l_m.toFixed(2)}m / ${sf.int_pad_b_m.toFixed(2)}×${sf.int_pad_l_m.toFixed(2)}m`],
+                                        ["Strap Beam (b × h)", `${sf.strap_b_mm.toFixed(0)} × ${sf.strap_h_mm.toFixed(0)} mm`],
+                                        ["Top / Bottom Bars", `${sf.strap_top_bars} / ${sf.strap_bot_bars}`],
+                                        ["Stirrups", sf.strap_stirrups],
+                                      ],
+                                    }
+                                  );
+                                }}
+                              >
+                                {pinningKey === `strap-${sf.strap_id}` ? "..." : "Pin to OBO"}
+                              </button>
+                              <button
+                                type="button"
+                                className="secondary mini"
+                                disabled={busy}
+                                onClick={() => deleteSecondary(`strap-footings/${encodeURIComponent(sf.strap_id)}`, `Removed strap ${sf.strap_id}.`)}
+                              >
+                                Delete
+                              </button>
+                            </div>
                           </td>
                         </tr>
                       ))}
@@ -2104,6 +2743,46 @@ export default function DesignReview({ project, onClose, onUpdated }) {
               )}
             </div>
           </div>
+
+          {(ad?.pinned_design_views || []).length > 0 && (
+            <div className="geom-panel">
+              <div className="geom-panel-head">
+                <div>
+                  <strong>Pinned OBO Report Views ({ad.pinned_design_views.length})</strong>
+                  <small>Included in Module 08 DOCX &amp; PDF Section 4.4</small>
+                </div>
+              </div>
+              <div style={{ padding: "8px 10px", display: "flex", flexDirection: "column", gap: 6 }}>
+                {ad.pinned_design_views.map((snap, idx) => (
+                  <div
+                    key={snap.id || `pin-${idx}`}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      gap: 6,
+                      fontSize: 11.5,
+                    }}
+                  >
+                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {snap.title || "Pinned View"}
+                    </span>
+                    {snap.id && (
+                      <button
+                        type="button"
+                        className="secondary mini"
+                        disabled={busy}
+                        title={`Remove ${snap.title || "pinned view"}`}
+                        onClick={() => handleUnpinSnapshot(snap.id, snap.title)}
+                      >
+                        &times;
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </aside>
       </div>
     </section>

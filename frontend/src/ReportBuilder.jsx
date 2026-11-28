@@ -165,6 +165,25 @@ export default function ReportBuilder({ project, onClose, onUpdated }) {
     loadProjectState();
   }, [project.project_id]);
 
+  async function handleUnpinSnapshot(snapId, title) {
+    if (!snapId || busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      const updatedAd = await apiJson(
+        `/api/projects/${pid}/design/pin-snapshot/${encodeURIComponent(snapId)}`,
+        { method: "DELETE" }
+      );
+      setFullProject((prev) => (prev ? { ...prev, analysis_design: updatedAd } : prev));
+      setNotice(`Unpinned "${title || snapId}" from OBO Report.`);
+      if (onUpdated) await onUpdated();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const model = fullProject?.structural_model;
   const sizing = fullProject?.member_sizing;
   const lg = fullProject?.load_generation;
@@ -869,6 +888,49 @@ export default function ReportBuilder({ project, onClose, onUpdated }) {
                   />
                 </label>
               </div>
+
+              {(ad?.pinned_design_views || []).length > 0 && (
+                <div style={{ padding: "10px 14px", borderTop: "1px solid rgba(148,163,184,0.18)" }}>
+                  <strong style={{ display: "block", marginBottom: 6, fontSize: 13 }}>
+                    Pinned OBO Report Views ({ad.pinned_design_views.length})
+                  </strong>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    {ad.pinned_design_views.map((snap, idx) => (
+                      <div
+                        key={snap.id || `snap-${idx}`}
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "space-between",
+                          gap: 8,
+                          padding: "6px 10px",
+                          borderRadius: 6,
+                          background: "rgba(15,23,42,0.35)",
+                        }}
+                      >
+                        <div style={{ minWidth: 0 }}>
+                          <div style={{ fontSize: 12, fontWeight: 600 }}>{snap.title || "Pinned View"}</div>
+                          {snap.caption && (
+                            <div className="pdf-muted" style={{ fontSize: 11 }}>
+                              {snap.caption}
+                            </div>
+                          )}
+                        </div>
+                        {snap.id && (
+                          <button
+                            type="button"
+                            className="secondary mini"
+                            disabled={busy}
+                            onClick={() => handleUnpinSnapshot(snap.id, snap.title)}
+                          >
+                            Unpin
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               <div className="geom-panel-head" style={{ borderTop: "1px solid #223147" }}>
                 <strong>Report Sections &amp; Appendices</strong>

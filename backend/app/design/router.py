@@ -284,6 +284,18 @@ def post_pin_snapshot(project_id: str, payload: PinDesignSnapshotRequest):
     return ad
 
 
+@router.delete("/pin-snapshot/{snap_id}", response_model=AnalysisDesignState)
+def delete_pin_snapshot(project_id: str, snap_id: str):
+    project = _load_or_404(project_id)
+    ad = project.analysis_design
+    before = len(ad.pinned_design_views)
+    ad.pinned_design_views = [s for s in ad.pinned_design_views if s.get("id") != snap_id]
+    if len(ad.pinned_design_views) == before:
+        raise HTTPException(status_code=404, detail=f"Pinned snapshot '{snap_id}' not found.")
+    storage.save_project(project)
+    return ad
+
+
 class SoilParametersRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     soil_investigation: SoilInvestigationParams | None = None
