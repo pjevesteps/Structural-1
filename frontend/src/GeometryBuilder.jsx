@@ -72,6 +72,7 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
   const [addBeamType, setAddBeamType] = useState("primary_beam");
   const [replicateAllFloors, setReplicateAllFloors] = useState(false);
   const [beamStartNodeId, setBeamStartNodeId] = useState(null);
+  const [beamSnapPreview, setBeamSnapPreview] = useState(null);
   const [cantileverLenM, setCantileverLenM] = useState("1.5");
   const [cantileverDir, setCantileverDir] = useState("+X");
   const [rwStartNodeId, setRwStartNodeId] = useState(null);
@@ -439,23 +440,33 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
     }
   }
 
-  async function handleAddBeam(startNid, endNid, endXyzM = null) {
+  async function handleAddBeam(
+    startNid,
+    endNid,
+    endXyzM = null,
+    overrideBeamType = null,
+    splitEnd = null
+  ) {
     setBusy(true);
     setError("");
     const prevCount = (model.members || []).length;
+    const effectiveType = overrideBeamType || addBeamType;
     try {
       const payload = {
         start_node: startNid,
-        member_type: addBeamType,
+        member_type: effectiveType,
         floor_level: activeFloor,
         replicate_all_floors: replicateAllFloors,
       };
       if (endNid !== null && endNid !== undefined) {
         payload.end_node = endNid;
+      } else if (splitEnd && splitEnd.member_id) {
+        payload.split_end_member_id = splitEnd.member_id;
+        payload.split_end_ratio = Number(splitEnd.ratio.toFixed(4));
       } else if (Array.isArray(endXyzM) && endXyzM.length === 3) {
         const coords = endXyzM.map((v) => Number(v));
         if (coords.some((v) => !Number.isFinite(v))) {
-          throw new Error("Invalid cantilever tip coordinates.");
+          throw new Error("Invalid beam target coordinates.");
         }
         payload.end_xyz_m = coords;
       }
@@ -467,15 +478,18 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
       const addedCount = Math.max(1, (updated.members || []).length - prevCount);
       await applyModelUpdate(
         updated,
-        endXyzM
-          ? `Added ${addBeamType} from N${startNid} to (${endXyzM[0].toFixed(2)}, ${endXyzM[2].toFixed(2)}) m${
+        splitEnd
+          ? `Added ${effectiveType} from N${startNid} to T-junction on M${splitEnd.member_id} (${endXyzM ? `${endXyzM[0].toFixed(2)}, ${endXyzM[2].toFixed(2)} m` : "split"}).`
+          : endXyzM
+          ? `Added ${effectiveType} from N${startNid} to (${endXyzM[0].toFixed(2)}, ${endXyzM[2].toFixed(2)}) m${
               replicateAllFloors && addedCount > 1 ? ` across ${addedCount} floor(s)` : ""
             }.`
           : replicateAllFloors && addedCount > 1
-          ? `Added ${addBeamType} N${startNid}→N${endNid} and replicated across ${addedCount} matching floor(s).`
-          : `Added ${addBeamType} from N${startNid} to N${endNid}.`
+          ? `Added ${effectiveType} N${startNid}→N${endNid} and replicated across ${addedCount} matching floor(s).`
+          : `Added ${effectiveType} from N${startNid} to N${endNid}.`
       );
       setBeamStartNodeId(null);
+      setBeamSnapPreview(null);
       setStdPreview(null);
     } catch (e) {
       setError(e.message);
@@ -977,16 +991,87 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
     };
   }
 
+  function findBeamSnapTarget(e, restrictedMember = null) {
+    if (editorMode !== "add_beam" || beamStartNodeId === null || addBeamType === "cantilever_beam") {
+      return null;
+    }
+    const startNode = nodeMap.get(beamStartNodeId);
+    if (!startNode) return null;
+    const pt = fromSvg2D(e);
+    if (!pt) return null;
+    const clickSvg = toSvg2D(pt.x_m, pt.z_m);
+    const candidates = restrictedMember ? [restrictedMember] : floorData.beams || [];
+    let best = null;
+    let bestPx = restrictedMember ? 48 : 18;
+    for (const m of candidates) {
+      if (m.start_node === beamStartNodeId || m.end_node === beamStartNodeId) continue;
+      const na = nodeMap.get(m.start_node);
+      const nb = nodeMap.get(m.end_node);
+      if (!na || !nb) continue;
+      const dx = nb.x_m - na.x_m;
+      const dz = nb.z_m - na.z_m;
+      const lenSq = dx * dx + dz * dz;
+      if (lenSq < 1e-6) continue;
+      const t = ((pt.x_m - na.x_m) * dx + (pt.z_m - na.z_m) * dz) / lenSq;
+      if (t <= 0.03 || t >= 0.97) continue;
+      const projX = na.x_m + t * dx;
+      const projZ = na.z_m + t * dz;
+      const projSvg = toSvg2D(projX, projZ);
+      const distPx = Math.hypot(clickSvg.x - projSvg.x, clickSvg.y - projSvg.y);
+      if (distPx <= bestPx) {
+        bestPx = distPx;
+        const pa = toSvg2D(na.x_m, na.z_m);
+        const pb = toSvg2D(nb.x_m, nb.z_m);
+        best = {
+          member_id: m.member_id,
+          ratio: t,
+          x_m: Number(projX.toFixed(4)),
+          y_m: startNode.y_m,
+          z_m: Number(projZ.toFixed(4)),
+          sx: projSvg.x,
+          sy: projSvg.y,
+          pa,
+          pb,
+        };
+      }
+    }
+    return best;
+  }
+
+  function handleSvg2DMouseMove(e) {
+    if (busy || editorMode !== "add_beam" || beamStartNodeId === null || addBeamType === "cantilever_beam") {
+      if (beamSnapPreview) setBeamSnapPreview(null);
+      return;
+    }
+    const snap = findBeamSnapTarget(e);
+    setBeamSnapPreview(snap);
+  }
+
   function handleSvg2DClick(e) {
     if (busy) return;
-    if (editorMode !== "add_beam" || addBeamType !== "cantilever_beam" || beamStartNodeId === null) {
+    if (editorMode !== "add_beam" || beamStartNodeId === null) {
       return;
     }
     const startNode = nodeMap.get(beamStartNodeId);
     if (!startNode) return;
-    const pt = fromSvg2D(e);
-    if (!pt) return;
-    handleAddBeam(beamStartNodeId, null, [pt.x_m, startNode.y_m, pt.z_m]);
+    if (addBeamType === "cantilever_beam") {
+      const pt = fromSvg2D(e);
+      if (!pt) return;
+      handleAddBeam(beamStartNodeId, null, [pt.x_m, startNode.y_m, pt.z_m]);
+      return;
+    }
+    const snap = findBeamSnapTarget(e);
+    if (snap) {
+      const effectiveType =
+        !addBeamType || addBeamType === "primary_beam" ? "secondary_beam" : addBeamType;
+      handleAddBeam(
+        beamStartNodeId,
+        null,
+        [snap.x_m, snap.y_m, snap.z_m],
+        effectiveType,
+        { member_id: snap.member_id, ratio: snap.ratio }
+      );
+    }
   }
 
   function handlePlaceDirectionalCantilever() {
@@ -1111,10 +1196,24 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
     setSelectedEntity({ type: "node", data: node });
   }
 
-  function handleBeam2DClick(member) {
+  function handleBeam2DClick(member, e) {
     if (busy) return;
-    if (editorMode === "add_beam" && addBeamType === "cantilever_beam" && beamStartNodeId !== null) {
-      return;
+    if (editorMode === "add_beam" && beamStartNodeId !== null) {
+      if (addBeamType === "cantilever_beam") return;
+      const snap = findBeamSnapTarget(e, member);
+      if (snap) {
+        if (e) e.stopPropagation();
+        const effectiveType =
+          !addBeamType || addBeamType === "primary_beam" ? "secondary_beam" : addBeamType;
+        handleAddBeam(
+          beamStartNodeId,
+          null,
+          [snap.x_m, snap.y_m, snap.z_m],
+          effectiveType,
+          { member_id: snap.member_id, ratio: snap.ratio }
+        );
+        return;
+      }
     }
     if (editorMode === "delete_member") {
       handleDeleteMember(member.member_id);
@@ -1499,10 +1598,10 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
                     {beamStartNodeId
                       ? addBeamType === "cantilever_beam"
                         ? `Support N${beamStartNodeId} selected — click overhang tip on 2D plan or use Place Cantilever.`
-                        : `Selected start N${beamStartNodeId} — click target node.`
+                        : `Selected start N${beamStartNodeId} — click target node or snap onto an existing beam (T-junction).`
                       : addBeamType === "cantilever_beam"
                         ? "Click support node, then click overhang tip on 2D plan (or enter length)."
-                        : "Click start node, then click end node."}
+                        : "Click start node, then click target node or existing beam (T-junction)."}
                   </small>
                 </div>
               )}
@@ -1582,6 +1681,8 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
                 className="geom-svg-2d"
                 viewBox="0 0 640 440"
                 onClick={handleSvg2DClick}
+                onMouseMove={handleSvg2DMouseMove}
+                onMouseLeave={() => setBeamSnapPreview(null)}
               >
                 {/* Grid lines */}
                 {(fullProject?.grids?.x_grids || []).map((g) => {
@@ -1768,7 +1869,7 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
                     <g
                       key={m.member_id}
                       className="geom-clickable"
-                      onClick={() => handleBeam2DClick(m)}
+                      onClick={(ev) => handleBeam2DClick(m, ev)}
                     >
                       <line x1={pa.x} y1={pa.y} x2={pb.x} y2={pb.y} stroke="transparent" strokeWidth="12" />
                       {(isDupMem || isPrimMem || isWarnMem) && (
@@ -1804,6 +1905,53 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
                     </g>
                   );
                 })}
+
+                {/* T-Junction Snap-to-Beam Preview Overlay */}
+                {beamSnapPreview && beamStartNodeId !== null && (() => {
+                  const sNode = nodeMap.get(beamStartNodeId);
+                  if (!sNode) return null;
+                  const ps = toSvg2D(sNode.x_m, sNode.z_m);
+                  return (
+                    <g pointerEvents="none">
+                      <line
+                        x1={beamSnapPreview.pa.x}
+                        y1={beamSnapPreview.pa.y}
+                        x2={beamSnapPreview.pb.x}
+                        y2={beamSnapPreview.pb.y}
+                        stroke="#facc15"
+                        strokeOpacity={0.45}
+                        strokeWidth="7"
+                      />
+                      <line
+                        x1={ps.x}
+                        y1={ps.y}
+                        x2={beamSnapPreview.sx}
+                        y2={beamSnapPreview.sy}
+                        stroke="#38bdf8"
+                        strokeWidth="2.4"
+                        strokeDasharray="5 3"
+                      />
+                      <circle
+                        cx={beamSnapPreview.sx}
+                        cy={beamSnapPreview.sy}
+                        r="6"
+                        fill="#facc15"
+                        stroke="#0f172a"
+                        strokeWidth="1.6"
+                      />
+                      <text
+                        x={beamSnapPreview.sx}
+                        y={beamSnapPreview.sy - 10}
+                        textAnchor="middle"
+                        fill="#fef08a"
+                        fontSize="9"
+                        fontWeight="800"
+                      >
+                        T-JUNCTION ({beamSnapPreview.x_m.toFixed(1)}, {beamSnapPreview.z_m.toFixed(1)})
+                      </text>
+                    </g>
+                  );
+                })()}
 
                 {/* Nodes on Active Floor */}
                 {floorData.nodes.map((n) => {

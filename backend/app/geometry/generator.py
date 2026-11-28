@@ -570,6 +570,7 @@ def generate_structural_model(
     replay_y_tol = 0.10
     max_cantilever_m = 6.0
     synthesized_tip_node_ids: set[int] = set()
+    split_junction_node_ids: set[int] = set()
     ordered_manual_beams = sorted(
         saved_manual_beams,
         key=lambda mb: 0 if mb.member_type == "cantilever_beam" else 1,
@@ -586,11 +587,119 @@ def generate_structural_model(
             default=None,
         )
 
+    def _split_host_beam_for_point(
+        px: float,
+        py: float,
+        pz: float,
+        preferred_floor: str = "",
+    ) -> AnalyticalNode | None:
+        """
+        If (px, py, pz) lies on the interior of an existing same-floor beam (0.03 < t < 0.97,
+        perp_dist <= max(tol, 0.15)), create/reuse a shared T-junction AnalyticalNode and split
+        the host beam into two connected segments in members, seen_member_pairs, and level_beam_edges.
+        """
+        host_tol = max(tol, 0.15)
+        node_lookup = {n.node_id: n for n in nodes}
+        best_hit: tuple[float, int, AnalyticalMember, AnalyticalNode, AnalyticalNode, float, float, float] | None = None
+        for idx, m in enumerate(members):
+            if m.member_type == "column":
+                continue
+            u = node_lookup.get(m.start_node)
+            v = node_lookup.get(m.end_node)
+            if u is None or v is None:
+                continue
+            if abs(u.y_m - py) > replay_y_tol or abs(v.y_m - py) > replay_y_tol:
+                continue
+            if preferred_floor and m.floor_level and m.floor_level != preferred_floor and abs(u.y_m - py) > 0.02:
+                continue
+            dx = v.x_m - u.x_m
+            dz = v.z_m - u.z_m
+            len_sq = dx * dx + dz * dz
+            if len_sq < 1e-6:
+                continue
+            t = ((px - u.x_m) * dx + (pz - u.z_m) * dz) / len_sq
+            if not (0.03 < t < 0.97):
+                continue
+            proj_x = u.x_m + t * dx
+            proj_z = u.z_m + t * dz
+            perp_dist = hypot(px - proj_x, pz - proj_z)
+            if perp_dist <= host_tol:
+                if best_hit is None or perp_dist < best_hit[0]:
+                    best_hit = (perp_dist, idx, m, u, v, proj_x, u.y_m, proj_z)
+
+        if best_hit is None:
+            return None
+
+        _, _, host_m, u, v, proj_x, proj_y, proj_z = best_hit
+        fl_host = host_m.floor_level or u.floor_level
+        prev_node_count = len(nodes)
+        mid_nid = get_or_create_node(proj_x, proj_y, proj_z, fl_host, "")
+        mid_node = next(n for n in nodes if n.node_id == mid_nid)
+        if len(nodes) > prev_node_count:
+            split_junction_node_ids.add(mid_nid)
+        if mid_nid in (u.node_id, v.node_id):
+            return mid_node
+
+        old_pair = (min(u.node_id, v.node_id), max(u.node_id, v.node_id))
+        seen_member_pairs.discard(old_pair)
+        if fl_host in level_beam_edges:
+            level_beam_edges[fl_host].discard(old_pair)
+
+        orig_end = host_m.end_node
+        host_m.end_node = mid_nid
+        host_m.length_m = round(
+            sqrt((mid_node.x_m - u.x_m) ** 2 + (mid_node.y_m - u.y_m) ** 2 + (mid_node.z_m - u.z_m) ** 2),
+            4,
+        )
+        seg2_mid = max((mm.member_id for mm in members), default=0) + 1
+        seg2 = AnalyticalMember(
+            member_id=seg2_mid,
+            start_node=mid_nid,
+            end_node=orig_end,
+            member_type=host_m.member_type,
+            floor_level=host_m.floor_level,
+            grid_ref=host_m.grid_ref,
+            length_m=round(
+                sqrt((v.x_m - mid_node.x_m) ** 2 + (v.y_m - mid_node.y_m) ** 2 + (v.z_m - mid_node.z_m) ** 2),
+                4,
+            ),
+            manual_override=host_m.manual_override,
+        )
+        members.append(seg2)
+
+        # Duplicate any existing MemberPropertyAssignment from host beam onto split segment
+        existing_asgn = next(
+            (a for a in project.member_sizing.member_assignments if a.member_id == host_m.member_id),
+            None,
+        )
+        if existing_asgn is not None and not any(
+            a.member_id == seg2_mid for a in project.member_sizing.member_assignments
+        ):
+            project.member_sizing.member_assignments.append(
+                existing_asgn.model_copy(update={"member_id": seg2_mid})
+            )
+
+        p1 = (min(u.node_id, mid_nid), max(u.node_id, mid_nid))
+        p2 = (min(mid_nid, orig_end), max(mid_nid, orig_end))
+        seen_member_pairs.add(p1)
+        seen_member_pairs.add(p2)
+        if u.floor_level == v.floor_level and fl_host in level_beam_edges:
+            level_beam_edges[fl_host].add(p1)
+            level_beam_edges[fl_host].add(p2)
+        return mid_node
+
     for mb in ordered_manual_beams:
         sx, sy, sz = mb.start_xyz_m
         ex, ey, ez = mb.end_xyz_m
         na = _find_matching_node(sx, sy, sz)
         nb = _find_matching_node(ex, ey, ez)
+
+        # If an endpoint lands on an existing same-floor beam interior (T-junction), split host beam
+        if mb.member_type != "cantilever_beam":
+            if na is None:
+                na = _split_host_beam_for_point(sx, sy, sz, mb.floor_level)
+            if nb is None:
+                nb = _split_host_beam_for_point(ex, ey, ez, mb.floor_level)
 
         # Synthesize free-end cantilever tip node when exactly one endpoint matches an existing node
         if (na is None) ^ (nb is None):
@@ -660,8 +769,11 @@ def generate_structural_model(
             if len(lv_nodes) < 4 or len(beam_edges) < 4:
                 continue
 
-            xs = _cluster_coords([n.x_m for n in lv_nodes], tol)
-            zs = _cluster_coords([n.z_m for n in lv_nodes], tol)
+            # Exclude mid-span T-junction split nodes from bay coordinate clustering so rectangular
+            # slab bays remain intact while _side_is_connected walks through the split nodes.
+            bay_nodes = [n for n in lv_nodes if n.node_id not in split_junction_node_ids]
+            xs = _cluster_coords([n.x_m for n in bay_nodes], tol)
+            zs = _cluster_coords([n.z_m for n in bay_nodes], tol)
             lv_openings = _openings_for_level(project.openings, lv.id, levels)
 
             def find_node(xv: float, zv: float) -> AnalyticalNode | None:

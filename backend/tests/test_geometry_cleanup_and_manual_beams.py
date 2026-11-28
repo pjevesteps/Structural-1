@@ -624,6 +624,111 @@ def test_spatial_retaining_wall_and_decoupled_roof_truss_reaction_transfer(isola
     assert not any(bl["source"].startswith("roof_truss_") for bl in lg_slab.json()["beam_loads"])
 
 
+def test_column_to_beam_t_junction_splits_host_beam_and_persists_on_regenerate(isolated_env):
+    """
+    Verify:
+      1. Adding a manual beam from a column node onto the interior of an existing same-floor beam
+         (via end_xyz_m) creates a shared T-junction node, splits the host beam into two connected
+         segments, and records a ManualBeamOverride.
+      2. Re-running POST /geometry/generate replays the exact same T-junction split cleanly,
+         preserving slab panels and keeping cantilever/manual beams intact.
+    """
+    client = isolated_env
+    pid = "TEST-TJUNC-SPLIT"
+    storage.save_project(ProjectState.model_validate(_make_2x2_project(pid)))
+
+    r_gen = client.post(f"/api/projects/{pid}/geometry/generate", json={})
+    assert r_gen.status_code == 200, r_gen.text
+    g0 = r_gen.json()
+    orig_slab_count = len(g0["slab_panels"])
+    assert orig_slab_count > 0
+
+    nodes_2f = [n for n in g0["nodes"] if n["floor_level"] == "2F"]
+    n_a1 = next(n for n in nodes_2f if abs(n["x_m"] - 0.0) < 0.01 and abs(n["z_m"] - 0.0) < 0.01)
+    n_a2 = next(n for n in nodes_2f if abs(n["x_m"] - 0.0) < 0.01 and abs(n["z_m"] - 4.0) < 0.01)
+    n_b2 = next(n for n in nodes_2f if abs(n["x_m"] - 5.0) < 0.01 and abs(n["z_m"] - 4.0) < 0.01)
+
+    # Host beam on 2F runs from A-2 (0, 4) to B-2 (5, 4). Target T-junction midpoint at (2.5, y, 4.0).
+    orig_host = next(
+        (
+            m
+            for m in g0["members"]
+            if m["floor_level"] == "2F"
+            and {m["start_node"], m["end_node"]} == {n_a2["node_id"], n_b2["node_id"]}
+        ),
+        None,
+    )
+    assert orig_host is not None
+
+    # 1. Add secondary beam from column node A-1 (0, 0) onto host beam midpoint (2.5, y, 4.0) via end_xyz_m
+    r_add = client.post(
+        f"/api/projects/{pid}/geometry/members",
+        json={
+            "start_node": n_a1["node_id"],
+            "end_xyz_m": [2.5, n_a1["y_m"], 4.0],
+            "member_type": "secondary_beam",
+            "floor_level": "2F",
+            "grid_ref": "TJUNC-1",
+        },
+    )
+    assert r_add.status_code == 200, r_add.text
+    g1 = r_add.json()
+
+    # Shared T-junction node must exist at (2.5, y, 4.0)
+    t_node = next(
+        (
+            n
+            for n in g1["nodes"]
+            if n["floor_level"] == "2F" and abs(n["x_m"] - 2.5) < 0.05 and abs(n["z_m"] - 4.0) < 0.05
+        ),
+        None,
+    )
+    assert t_node is not None, "Expected T-junction AnalyticalNode at (2.5, 4.0) on 2F"
+
+    # Unsplit host beam (A-2 <-> B-2) must be gone and replaced by two segments meeting at t_node
+    m_2f = [m for m in g1["members"] if m["floor_level"] == "2F" and m["member_type"] != "column"]
+    assert not any({m["start_node"], m["end_node"]} == {n_a2["node_id"], n_b2["node_id"]} for m in m_2f)
+    assert any({m["start_node"], m["end_node"]} == {n_a2["node_id"], t_node["node_id"]} for m in m_2f)
+    assert any({m["start_node"], m["end_node"]} == {t_node["node_id"], n_b2["node_id"]} for m in m_2f)
+    assert any(
+        {m["start_node"], m["end_node"]} == {n_a1["node_id"], t_node["node_id"]}
+        and m["member_type"] == "secondary_beam"
+        for m in m_2f
+    )
+    assert len(g1["manual_beams"]) == 1
+
+    # 2. Regenerate geometry -> T-junction split must replay identically and preserve slab panels
+    r_regen = client.post(f"/api/projects/{pid}/geometry/generate", json={})
+    assert r_regen.status_code == 200, r_regen.text
+    g2 = r_regen.json()
+
+    t_node_2 = next(
+        (
+            n
+            for n in g2["nodes"]
+            if n["floor_level"] == "2F" and abs(n["x_m"] - 2.5) < 0.05 and abs(n["z_m"] - 4.0) < 0.05
+        ),
+        None,
+    )
+    assert t_node_2 is not None, "T-junction node must persist across POST /geometry/generate"
+
+    n2_a1 = next(n for n in g2["nodes"] if n["floor_level"] == "2F" and abs(n["x_m"] - 0.0) < 0.01 and abs(n["z_m"] - 0.0) < 0.01)
+    n2_a2 = next(n for n in g2["nodes"] if n["floor_level"] == "2F" and abs(n["x_m"] - 0.0) < 0.01 and abs(n["z_m"] - 4.0) < 0.01)
+    n2_b2 = next(n for n in g2["nodes"] if n["floor_level"] == "2F" and abs(n["x_m"] - 5.0) < 0.01 and abs(n["z_m"] - 4.0) < 0.01)
+    m2_2f = [m for m in g2["members"] if m["floor_level"] == "2F" and m["member_type"] != "column"]
+
+    assert not any({m["start_node"], m["end_node"]} == {n2_a2["node_id"], n2_b2["node_id"]} for m in m2_2f)
+    assert any({m["start_node"], m["end_node"]} == {n2_a2["node_id"], t_node_2["node_id"]} for m in m2_2f)
+    assert any({m["start_node"], m["end_node"]} == {t_node_2["node_id"], n2_b2["node_id"]} for m in m2_2f)
+    assert any(
+        {m["start_node"], m["end_node"]} == {n2_a1["node_id"], t_node_2["node_id"]}
+        and m["member_type"] == "secondary_beam"
+        for m in m2_2f
+    )
+    assert len(g2["slab_panels"]) >= orig_slab_count
+
+
+
 
 
 

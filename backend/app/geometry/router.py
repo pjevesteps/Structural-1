@@ -126,7 +126,12 @@ def _revalidate_preserving_info(model: StructuralModelState) -> None:
         model.engineer_approved = False
 
 
-def _split_member_for_node(model: StructuralModelState, member_id: int, ratio: float) -> int:
+def _split_member_for_node(
+    model: StructuralModelState,
+    member_id: int,
+    ratio: float,
+    project=None,
+) -> int:
     node_by_id = {n.node_id: n for n in model.nodes}
     target = next((m for m in model.members if m.member_id == member_id), None)
     if target is None:
@@ -170,7 +175,69 @@ def _split_member_for_node(model: StructuralModelState, member_id: int, ratio: f
             manual_override=True,
         )
     )
+    if project is not None and project.member_sizing.member_assignments:
+        existing_asgn = next(
+            (a for a in project.member_sizing.member_assignments if a.member_id == target.member_id),
+            None,
+        )
+        if existing_asgn is not None and not any(
+            a.member_id == next_mid for a in project.member_sizing.member_assignments
+        ):
+            project.member_sizing.member_assignments.append(
+                existing_asgn.model_copy(update={"member_id": next_mid})
+            )
     return new_nid
+
+
+def _find_or_split_host_beam_for_xyz(
+    model: StructuralModelState,
+    tx: float,
+    ty: float,
+    tz: float,
+    floor_level: str,
+    project=None,
+) -> int | None:
+    """
+    Search same-floor non-column beams for the closest XZ projection of (tx, ty, tz).
+    If within tol and 0.03 < t < 0.97, splits the host beam and returns the new T-junction node_id.
+    If near either end (t <= 0.03 or t >= 0.97), reuses that endpoint node_id.
+    """
+    node_by_id = {n.node_id: n for n in model.nodes}
+    host_tol = max(model.options.snap_tolerance_m, 0.15)
+    best_hit: tuple[float, int, float, int, int] | None = None
+    for m in model.members:
+        if m.member_type == "column":
+            continue
+        u = node_by_id.get(m.start_node)
+        v = node_by_id.get(m.end_node)
+        if u is None or v is None:
+            continue
+        if abs(u.y_m - ty) > 0.10 or abs(v.y_m - ty) > 0.10:
+            continue
+        if floor_level and m.floor_level and m.floor_level != floor_level:
+            continue
+        dx = v.x_m - u.x_m
+        dz = v.z_m - u.z_m
+        len_sq = dx * dx + dz * dz
+        if len_sq < 1e-6:
+            continue
+        t_raw = ((tx - u.x_m) * dx + (tz - u.z_m) * dz) / len_sq
+        t_clamped = max(0.0, min(1.0, t_raw))
+        proj_x = u.x_m + t_clamped * dx
+        proj_z = u.z_m + t_clamped * dz
+        perp_dist = hypot(tx - proj_x, tz - proj_z)
+        if perp_dist <= host_tol:
+            if best_hit is None or perp_dist < best_hit[0]:
+                best_hit = (perp_dist, m.member_id, t_clamped, u.node_id, v.node_id)
+
+    if best_hit is None:
+        return None
+    _, host_mid, t_val, u_nid, v_nid = best_hit
+    if t_val <= 0.03:
+        return u_nid
+    if t_val >= 0.97:
+        return v_nid
+    return _split_member_for_node(model, host_mid, t_val, project=project)
 
 
 @router.post("/generate", response_model=StructuralModelState)
@@ -204,22 +271,20 @@ def add_member(project_id: str, payload: AddMemberRequest):
     end_nid = payload.end_node
 
     if start_nid is None and payload.split_start_member_id is not None:
-        start_nid = _split_member_for_node(model, payload.split_start_member_id, payload.split_start_ratio)
+        start_nid = _split_member_for_node(
+            model, payload.split_start_member_id, payload.split_start_ratio, project=project
+        )
     if end_nid is None and payload.split_end_member_id is not None:
-        end_nid = _split_member_for_node(model, payload.split_end_member_id, payload.split_end_ratio)
+        end_nid = _split_member_for_node(
+            model, payload.split_end_member_id, payload.split_end_ratio, project=project
+        )
 
-    # Support cantilever / free-end beam creation from start_node to end_xyz_m
+    # Support T-junction host-beam splitting OR cantilever free-end beam creation from start_node to end_xyz_m
     if start_nid is not None and end_nid is None and payload.end_xyz_m is not None:
         anchor = next((n for n in model.nodes if n.node_id == start_nid), None)
         if anchor is None:
             raise HTTPException(status_code=404, detail="Start node not found in structural model.")
         tx, ty, tz = payload.end_xyz_m
-        overhang = hypot(tx - anchor.x_m, tz - anchor.z_m)
-        if overhang < 0.05 or overhang > 6.0:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Cantilever overhang length ({overhang:.2f} m) must be between 0.05 m and 6.0 m.",
-            )
         snap_tol = max(model.options.snap_tolerance_m, 0.05)
         existing_tip = next(
             (
@@ -232,7 +297,22 @@ def add_member(project_id: str, payload: AddMemberRequest):
         )
         if existing_tip is not None:
             end_nid = existing_tip.node_id
+        elif payload.member_type != "cantilever_beam":
+            end_nid = _find_or_split_host_beam_for_xyz(
+                model, tx, anchor.y_m, tz, anchor.floor_level, project=project
+            )
+            if end_nid is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Target end_xyz_m does not match an existing node or host beam on this floor.",
+                )
         else:
+            overhang = hypot(tx - anchor.x_m, tz - anchor.z_m)
+            if overhang < 0.05 or overhang > 6.0:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Cantilever overhang length ({overhang:.2f} m) must be between 0.05 m and 6.0 m.",
+                )
             new_nid = max((n.node_id for n in model.nodes), default=0) + 1
             model.nodes.append(
                 AnalyticalNode(
@@ -319,9 +399,7 @@ def add_member(project_id: str, payload: AddMemberRequest):
                 key=lambda n: hypot(n.x_m - nb.x_m, n.z_m - nb.z_m),
                 default=None,
             )
-            if oa is not None and ob is None and (
-                payload.member_type == "cantilever_beam" or payload.end_xyz_m is not None
-            ):
+            if oa is not None and ob is None and payload.member_type == "cantilever_beam":
                 new_nid = max((n.node_id for n in model.nodes), default=0) + 1
                 ob = AnalyticalNode(
                     node_id=new_nid,
@@ -335,6 +413,19 @@ def add_member(project_id: str, payload: AddMemberRequest):
                 )
                 model.nodes.append(ob)
                 floor_nodes.append(ob)
+            elif oa is not None and ob is None:
+                split_nid = _find_or_split_host_beam_for_xyz(
+                    model,
+                    oa.x_m + (nb.x_m - na.x_m),
+                    oa.y_m,
+                    oa.z_m + (nb.z_m - na.z_m),
+                    other_floor,
+                    project=project,
+                )
+                if split_nid is not None:
+                    ob = next((n for n in model.nodes if n.node_id == split_nid), None)
+                    if ob is not None:
+                        floor_nodes.append(ob)
             if oa is None or ob is None or oa.node_id == ob.node_id:
                 continue
             opair = (min(oa.node_id, ob.node_id), max(oa.node_id, ob.node_id))
