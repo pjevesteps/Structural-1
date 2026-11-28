@@ -364,6 +364,38 @@ def auto_size_members(
 
     temp_project = project.model_copy(update={"member_sizing": sizing_state})
     sizing_state.validation_issues = validate_member_sizing(temp_project)
+
+    # --- 4. Preliminary Retaining Wall Sizing (synchronized with Module 06/08) ---
+    rw_inputs = project.analysis_design.retaining_wall_inputs
+    if rw_inputs:
+        from ..design.retaining_wall import design_retaining_wall
+
+        for rw in rw_inputs:
+            h_ret = max(float(rw.retained_height_m), 0.5)
+            prelim_base_w = max(1.20, round(math.ceil((0.60 * h_ret) * 10.0) / 10.0, 2))
+            prelim_toe_w = round(max(0.30, 0.25 * prelim_base_w), 2)
+            prelim_stem_t = _round_up(max(250.0, h_ret * 100.0), 50.0)
+            prelim_base_t = _round_up(max(300.0, prelim_stem_t + 50.0), 50.0)
+
+            if preserve_manual_overrides:
+                if rw.base_width_m < prelim_base_w:
+                    rw.base_width_m = prelim_base_w
+                if rw.toe_width_m < prelim_toe_w:
+                    rw.toe_width_m = prelim_toe_w
+                if rw.stem_thickness_mm < prelim_stem_t:
+                    rw.stem_thickness_mm = prelim_stem_t
+                if rw.base_thickness_mm < prelim_base_t:
+                    rw.base_thickness_mm = prelim_base_t
+            else:
+                rw.base_width_m = prelim_base_w
+                rw.toe_width_m = prelim_toe_w
+                rw.stem_thickness_mm = prelim_stem_t
+                rw.base_thickness_mm = prelim_base_t
+
+        project.analysis_design.retaining_wall_designs = [
+            design_retaining_wall(temp_project, rw) for rw in rw_inputs
+        ]
+
     return sizing_state
 
 

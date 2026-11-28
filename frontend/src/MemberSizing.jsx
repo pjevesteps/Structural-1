@@ -97,8 +97,9 @@ export default function MemberSizing({ project, onClose, onUpdated }) {
   const [bulkRelStart, setBulkRelStart] = useState("KEEP"); // KEEP | true | false
   const [bulkRelEnd, setBulkRelEnd] = useState("KEEP"); // KEEP | true | false
 
-  // Slab inline edits
+  // Slab & Retaining Wall inline edits
   const [slabDrafts, setSlabDrafts] = useState({});
+  const [rwDrafts, setRwDrafts] = useState({});
 
   async function apiJson(url, options) {
     const res = await fetch(url, options);
@@ -308,6 +309,8 @@ export default function MemberSizing({ project, onClose, onUpdated }) {
         updated,
         `Auto-sized ${updated.sections.length} section(s) across ${updated.member_assignments.length} member(s) and ${updated.slab_assignments.length} slab panel(s).`
       );
+      await loadProject();
+      setRwDrafts({});
       setSelectedMemberIds([]);
     } catch (e) {
       setError(e.message);
@@ -475,6 +478,46 @@ export default function MemberSizing({ project, onClose, onUpdated }) {
         delete next[sa.panel_id];
         return next;
       });
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleSaveRetainingWall(rw) {
+    const draft = rwDrafts[rw.wall_id];
+    if (!draft) return;
+    setBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      const payload = {
+        ...rw,
+        retained_height_m: parseFloat(draft.retained_height_m),
+        total_length_m: parseFloat(draft.total_length_m),
+        stem_thickness_mm: parseFloat(draft.stem_thickness_mm),
+        base_width_m: parseFloat(draft.base_width_m),
+        toe_width_m: parseFloat(draft.toe_width_m),
+        base_thickness_mm: parseFloat(draft.base_thickness_mm),
+        friction_angle_deg: parseFloat(draft.friction_angle_deg),
+        surcharge_kpa: parseFloat(draft.surcharge_kpa),
+        allowable_bearing_kpa: parseFloat(draft.allowable_bearing_kpa),
+        is_restrained_top: Boolean(draft.is_restrained_top),
+      };
+      const updatedAd = await apiJson(`/api/projects/${pid}/design/retaining-walls`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      setFullProject((prev) => (prev ? { ...prev, analysis_design: updatedAd } : prev));
+      setRwDrafts((prev) => {
+        const next = { ...prev };
+        delete next[rw.wall_id];
+        return next;
+      });
+      setNotice(`Updated retaining wall ${rw.wall_id} preliminary properties and synced design.`);
+      if (onUpdated) await onUpdated();
     } catch (err) {
       setError(err.message);
     } finally {
@@ -825,6 +868,12 @@ export default function MemberSizing({ project, onClose, onUpdated }) {
             onClick={() => setActiveTab("slabs")}
           >
             Slabs ({(sizing.slab_assignments || []).length})
+          </button>
+          <button
+            className={`secondary ${activeTab === "retwalls" ? "active" : ""}`}
+            onClick={() => setActiveTab("retwalls")}
+          >
+            Retaining Walls ({(fullProject?.analysis_design?.retaining_wall_inputs || []).length})
           </button>
         </div>
       </div>
@@ -1389,6 +1438,235 @@ export default function MemberSizing({ project, onClose, onUpdated }) {
                                   className="mini-btn on-approve"
                                   disabled={busy}
                                   onClick={() => handleSaveSlab(sa)}
+                                >
+                                  Save
+                                </button>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            </div>
+          )}
+
+          {activeTab === "retwalls" && (
+            <div className="geom-panel">
+              <div className="geom-panel-head">
+                <div>
+                  <strong>Retaining Wall Preliminary Properties</strong>
+                  <small>
+                    NSCP 2015 preliminary sizing (auto-sized from retained height H; edits sync with
+                    Module 06 &amp; Module 08)
+                  </small>
+                </div>
+              </div>
+              <div className="sizing-table-wrap">
+                {(fullProject?.analysis_design?.retaining_wall_inputs || []).length === 0 ? (
+                  <p className="pdf-muted" style={{ padding: 14 }}>
+                    No retaining walls defined yet. Place retaining walls in Module 03 or add them in
+                    Module 06 (Tab 8).
+                  </p>
+                ) : (
+                  <table className="sizing-table">
+                    <thead>
+                      <tr>
+                        <th>Wall ID</th>
+                        <th>H (m)</th>
+                        <th>L (m)</th>
+                        <th>Stem (mm)</th>
+                        <th>Base B (m)</th>
+                        <th>Toe (m)</th>
+                        <th>Base t (mm)</th>
+                        <th>&phi; (&deg;)</th>
+                        <th>Surch (kPa)</th>
+                        <th>qa (kPa)</th>
+                        <th>Top Restr.</th>
+                        <th>Status</th>
+                        <th></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(fullProject?.analysis_design?.retaining_wall_inputs || []).map((rw) => {
+                        const rwDesign = (
+                          fullProject?.analysis_design?.retaining_wall_designs || []
+                        ).find((d) => d.wall_id === rw.wall_id);
+                        const draft = rwDrafts[rw.wall_id] || {
+                          retained_height_m: String(rw.retained_height_m),
+                          total_length_m: String(rw.total_length_m),
+                          stem_thickness_mm: String(rw.stem_thickness_mm),
+                          base_width_m: String(rw.base_width_m),
+                          toe_width_m: String(rw.toe_width_m),
+                          base_thickness_mm: String(rw.base_thickness_mm),
+                          friction_angle_deg: String(rw.friction_angle_deg),
+                          surcharge_kpa: String(rw.surcharge_kpa),
+                          allowable_bearing_kpa: String(rw.allowable_bearing_kpa),
+                          is_restrained_top: Boolean(rw.is_restrained_top),
+                        };
+                        const dirty =
+                          String(draft.retained_height_m) !== String(rw.retained_height_m) ||
+                          String(draft.total_length_m) !== String(rw.total_length_m) ||
+                          String(draft.stem_thickness_mm) !== String(rw.stem_thickness_mm) ||
+                          String(draft.base_width_m) !== String(rw.base_width_m) ||
+                          String(draft.toe_width_m) !== String(rw.toe_width_m) ||
+                          String(draft.base_thickness_mm) !== String(rw.base_thickness_mm) ||
+                          String(draft.friction_angle_deg) !== String(rw.friction_angle_deg) ||
+                          String(draft.surcharge_kpa) !== String(rw.surcharge_kpa) ||
+                          String(draft.allowable_bearing_kpa) !== String(rw.allowable_bearing_kpa) ||
+                          Boolean(draft.is_restrained_top) !== Boolean(rw.is_restrained_top);
+                        const updateField = (key, val) =>
+                          setRwDrafts((prev) => ({
+                            ...prev,
+                            [rw.wall_id]: { ...draft, [key]: val },
+                          }));
+                        return (
+                          <tr key={rw.wall_id}>
+                            <td>
+                              <strong>{rw.wall_id}</strong>
+                              {rw.floor_level ? (
+                                <div className="pdf-muted" style={{ fontSize: 11 }}>
+                                  {rw.floor_level}
+                                </div>
+                              ) : null}
+                            </td>
+                            <td>
+                              <input
+                                type="number"
+                                className="region-level-input"
+                                style={{ width: 64 }}
+                                step="0.1"
+                                min="0.5"
+                                value={draft.retained_height_m}
+                                disabled={busy}
+                                onChange={(e) => updateField("retained_height_m", e.target.value)}
+                              />
+                            </td>
+                            <td>
+                              <input
+                                type="number"
+                                className="region-level-input"
+                                style={{ width: 64 }}
+                                step="0.5"
+                                min="0.5"
+                                value={draft.total_length_m}
+                                disabled={busy}
+                                onChange={(e) => updateField("total_length_m", e.target.value)}
+                              />
+                            </td>
+                            <td>
+                              <input
+                                type="number"
+                                className="region-level-input"
+                                style={{ width: 68 }}
+                                step="25"
+                                min="150"
+                                value={draft.stem_thickness_mm}
+                                disabled={busy}
+                                onChange={(e) => updateField("stem_thickness_mm", e.target.value)}
+                              />
+                            </td>
+                            <td>
+                              <input
+                                type="number"
+                                className="region-level-input"
+                                style={{ width: 64 }}
+                                step="0.1"
+                                min="0.5"
+                                value={draft.base_width_m}
+                                disabled={busy}
+                                onChange={(e) => updateField("base_width_m", e.target.value)}
+                              />
+                            </td>
+                            <td>
+                              <input
+                                type="number"
+                                className="region-level-input"
+                                style={{ width: 60 }}
+                                step="0.05"
+                                min="0"
+                                value={draft.toe_width_m}
+                                disabled={busy}
+                                onChange={(e) => updateField("toe_width_m", e.target.value)}
+                              />
+                            </td>
+                            <td>
+                              <input
+                                type="number"
+                                className="region-level-input"
+                                style={{ width: 68 }}
+                                step="25"
+                                min="200"
+                                value={draft.base_thickness_mm}
+                                disabled={busy}
+                                onChange={(e) => updateField("base_thickness_mm", e.target.value)}
+                              />
+                            </td>
+                            <td>
+                              <input
+                                type="number"
+                                className="region-level-input"
+                                style={{ width: 56 }}
+                                step="1"
+                                min="15"
+                                max="45"
+                                value={draft.friction_angle_deg}
+                                disabled={busy}
+                                onChange={(e) => updateField("friction_angle_deg", e.target.value)}
+                              />
+                            </td>
+                            <td>
+                              <input
+                                type="number"
+                                className="region-level-input"
+                                style={{ width: 60 }}
+                                step="1"
+                                min="0"
+                                value={draft.surcharge_kpa}
+                                disabled={busy}
+                                onChange={(e) => updateField("surcharge_kpa", e.target.value)}
+                              />
+                            </td>
+                            <td>
+                              <input
+                                type="number"
+                                className="region-level-input"
+                                style={{ width: 64 }}
+                                step="10"
+                                min="30"
+                                value={draft.allowable_bearing_kpa}
+                                disabled={busy}
+                                onChange={(e) => updateField("allowable_bearing_kpa", e.target.value)}
+                              />
+                            </td>
+                            <td style={{ textAlign: "center" }}>
+                              <input
+                                type="checkbox"
+                                checked={Boolean(draft.is_restrained_top)}
+                                disabled={busy}
+                                onChange={(e) => updateField("is_restrained_top", e.target.checked)}
+                              />
+                            </td>
+                            <td>
+                              {rwDesign ? (
+                                <span
+                                  className={`status-pill ${rwDesign.status === "PASS" ? "pass" : "fail"}`}
+                                >
+                                  {rwDesign.status}
+                                </span>
+                              ) : (
+                                <span className="pdf-muted">—</span>
+                              )}
+                            </td>
+                            <td>
+                              {dirty && (
+                                <button
+                                  type="button"
+                                  className="mini-btn on-approve"
+                                  disabled={busy}
+                                  onClick={() => handleSaveRetainingWall(rw)}
                                 >
                                   Save
                                 </button>

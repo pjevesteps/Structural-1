@@ -52,6 +52,7 @@ export default function DesignReview({ project, onClose, onUpdated }) {
   const [error, setError] = useState("");
   const [autoLog, setAutoLog] = useState(null);
   const [enforceScwb, setEnforceScwb] = useState(false);
+  const [upsizeRetainingWalls, setUpsizeRetainingWalls] = useState(true);
 
   // Pass C-2 Secondary Element Forms
   const [rwForm, setRwForm] = useState({
@@ -455,14 +456,18 @@ export default function DesignReview({ project, onClose, onUpdated }) {
       const res = await apiJson(`/api/projects/${pid}/design/auto-resolve`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ max_iterations: 6, enforce_scwb: enforceScwb }),
+        body: JSON.stringify({
+          max_iterations: 6,
+          enforce_scwb: enforceScwb,
+          upsize_retaining_walls: upsizeRetainingWalls,
+        }),
       });
       setAutoLog(res);
       setFullProject((prev) => (prev ? { ...prev, analysis_design: res.analysis_design } : prev));
       await loadProjectState();
       setNotice(
         res.converged
-          ? `Auto-Resolve converged in ${res.iterations_run} iteration(s): 0 failing members or drifts.`
+          ? `Auto-Resolve converged in ${res.iterations_run} iteration(s): 0 failing members, drifts, or retaining walls.`
           : `Auto-Resolve stopped after ${res.iterations_run} iteration(s) with failures remaining.`
       );
       if (onUpdated) await onUpdated();
@@ -638,7 +643,11 @@ export default function DesignReview({ project, onClose, onUpdated }) {
             {autoLog.history.map((h) => (
               <li key={h.iteration}>
                 Iter {h.iteration}: {h.fail_beams} beam / {h.fail_columns} column / {h.fail_footings}{" "}
-                footing / {h.fail_drifts} drift failures (max drift ratio {h.max_drift_ratio})
+                footing / {h.fail_drifts} drift
+                {typeof h.fail_retaining_walls === "number"
+                  ? ` / ${h.fail_retaining_walls} retaining wall`
+                  : ""}{" "}
+                failures (max drift ratio {h.max_drift_ratio})
                 {h.actions?.length ? ` — ${h.actions.join("; ")}` : ""}
               </li>
             ))}
@@ -770,6 +779,14 @@ export default function DesignReview({ project, onClose, onUpdated }) {
             onChange={(e) => setEnforceScwb(e.target.checked)}
           />
           Enforce SCWB &ge; 1.20
+        </label>
+        <label className="pdf-check" title="Iteratively widen base and thicken stem/base of failing retaining walls during Auto-Resolve">
+          <input
+            type="checkbox"
+            checked={upsizeRetainingWalls}
+            onChange={(e) => setUpsizeRetainingWalls(e.target.checked)}
+          />
+          Auto-Resolve Retaining Walls
         </label>
       </div>
 

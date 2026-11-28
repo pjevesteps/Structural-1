@@ -12,9 +12,14 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from fastapi.testclient import TestClient
+
+from backend.app import storage
 from backend.app.cad.dxf_builder import build_dxf_bytes, get_available_cad_items
+from backend.app.design.auto_resolve import AutoResolveRequest, run_auto_resolve
 from backend.app.design.rc_design import run_analysis_and_design
 from backend.app.design.retaining_wall import design_retaining_wall
+from backend.app.main import app
 from backend.app.design.secondary_elements import (
     design_roof_truss,
     design_stair,
@@ -192,3 +197,109 @@ def test_stair_roof_truss_strap_footing_and_bom_cad_report_integration():
     dxf_doc = ezdxf.read(StringIO(dxf_bytes.decode("utf-8")))
     assert len(dxf_doc.audit().errors) == 0
     assert cad_state.total_entities > 50
+
+
+def test_module04_auto_size_preliminary_retaining_walls_and_preserves_spatial_fields(tmp_path, monkeypatch):
+    monkeypatch.setattr(storage, "DATA_DIR", tmp_path)
+    p = _make_frame("RW-M04-AUTO")
+    p.analysis_design.retaining_wall_inputs = [
+        RetainingWallInput(
+            wall_id="RW-SPATIAL",
+            label="North Basement Wall",
+            retained_height_m=3.0,
+            total_length_m=4.5,
+            stem_thickness_mm=180.0,
+            base_width_m=0.8,
+            toe_width_m=0.15,
+            base_thickness_mm=200.0,
+            floor_level="GF",
+            start_xyz_m=[0.0, 0.0, 0.0],
+            end_xyz_m=[4.5, 0.0, 0.0],
+            backfill_side="left",
+        )
+    ]
+    storage.save_project(p)
+
+    client = TestClient(app)
+    resp = client.post(
+        f"/api/projects/{p.project_info.project_id}/sizing/auto-size",
+        json={"preserve_manual_overrides": False},
+    )
+    assert resp.status_code == 200, resp.text
+
+    loaded = storage.load_project(p.project_info.project_id)
+    assert len(loaded.analysis_design.retaining_wall_inputs) == 1
+    rw = loaded.analysis_design.retaining_wall_inputs[0]
+    # H = 3.0 m -> B = ceil(1.8 * 10)/10 = 1.80, toe = 0.45, stem = 300, base = 350
+    assert rw.base_width_m == 1.8
+    assert rw.toe_width_m == 0.45
+    assert rw.stem_thickness_mm == 300.0
+    assert rw.base_thickness_mm == 350.0
+    # Spatial fields preserved
+    assert rw.floor_level == "GF"
+    assert rw.start_xyz_m == [0.0, 0.0, 0.0]
+    assert rw.end_xyz_m == [4.5, 0.0, 0.0]
+    assert rw.backfill_side == "left"
+    # retaining_wall_designs synced immediately
+    assert len(loaded.analysis_design.retaining_wall_designs) == 1
+    rw_des = loaded.analysis_design.retaining_wall_designs[0]
+    assert rw_des.wall_id == "RW-SPATIAL"
+    assert rw_des.start_xyz_m == [0.0, 0.0, 0.0]
+    assert rw_des.end_xyz_m == [4.5, 0.0, 0.0]
+    assert rw_des.backfill_side == "left"
+
+
+def test_auto_resolve_converges_failing_retaining_wall_to_pass(tmp_path, monkeypatch):
+    monkeypatch.setattr(storage, "DATA_DIR", tmp_path)
+    p = _make_frame("RW-AUTORESOLVE")
+    # Narrow base_width_m=1.2 for H=2.8m -> fails overturning/sliding initially
+    failing_rw = RetainingWallInput(
+        wall_id="RW-1",
+        label="Perimeter Wall",
+        retained_height_m=2.8,
+        total_length_m=6.0,
+        stem_thickness_mm=250.0,
+        base_width_m=1.2,
+        toe_width_m=0.3,
+        base_thickness_mm=300.0,
+        friction_angle_deg=32.0,
+        is_restrained_top=True,
+        floor_level="GF",
+        start_xyz_m=[0.0, 0.0, 0.0],
+        end_xyz_m=[6.0, 0.0, 0.0],
+        backfill_side="exterior",
+    )
+    initial_des = design_retaining_wall(p, failing_rw)
+    assert initial_des.status == "FAIL"
+
+    p.analysis_design.retaining_wall_inputs = [failing_rw]
+    p.analysis_design.retaining_wall_designs = [initial_des]
+    storage.save_project(p)
+
+    # First verify upsize_retaining_walls=False leaves it untouched
+    p_disabled = storage.load_project(p.project_info.project_id)
+    res_disabled = run_auto_resolve(
+        p_disabled,
+        AutoResolveRequest(max_iterations=3, upsize_retaining_walls=False),
+    )
+    assert p_disabled.analysis_design.retaining_wall_inputs[0].base_width_m == 1.2
+    assert res_disabled.history[0]["fail_retaining_walls"] == 0
+
+    # Now test via HTTP endpoint with upsize_retaining_walls=True (default)
+    client = TestClient(app)
+    resp = client.post(
+        f"/api/projects/{p.project_info.project_id}/design/auto-resolve",
+        json={"max_iterations": 10, "upsize_retaining_walls": True},
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["converged"] is True
+    assert data["iterations_run"] >= 2
+    assert data["history"][0]["fail_retaining_walls"] == 1
+    assert any("Upsized retaining wall RW-1" in a for h in data["history"] for a in h["actions"])
+    assert data["analysis_design"]["retaining_wall_designs"][0]["status"] == "PASS"
+
+    saved = storage.load_project(p.project_info.project_id)
+    assert saved.analysis_design.retaining_wall_inputs[0].base_width_m > 1.2
+    assert saved.analysis_design.retaining_wall_designs[0].status == "PASS"
+    assert saved.analysis_design.retaining_wall_inputs[0].start_xyz_m == [0.0, 0.0, 0.0]
