@@ -7,7 +7,20 @@ import shutil
 import subprocess
 import tempfile
 
-from ezdxf.addons import odafc
+
+def _get_odafc():
+    mod = globals().get("odafc")
+    if mod is None:
+        from ezdxf.addons import odafc as mod
+        globals()["odafc"] = mod
+    return mod
+
+
+def __getattr__(name: str):
+    if name == "odafc":
+        return _get_odafc()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 INSTALL_HINT = (
     "Native .dwg export requires a local DXF-to-DWG converter binary. "
@@ -60,8 +73,10 @@ def _find_oda_executable() -> str | None:
         return which_oda
 
     try:
-        if odafc.is_installed():
-            cfg_path = getattr(odafc, "win_exec_path", None) or getattr(odafc, "unix_exec_path", None)
+        _odafc = _get_odafc()
+
+        if _odafc.is_installed():
+            cfg_path = getattr(_odafc, "win_exec_path", None) or getattr(_odafc, "unix_exec_path", None)
             return str(cfg_path) if cfg_path else "ODAFileConverter"
     except Exception:
         pass
@@ -147,13 +162,15 @@ def convert_dxf_to_dwg(dxf_bytes: bytes, dwg_version: str = "ACAD2013") -> bytes
         in_dxf.write_bytes(dxf_bytes)
 
         if backend == "oda_file_converter":
+            _odafc = _get_odafc()
+
             oda_ver = _ODA_VERSION_MAP.get(dwg_version, "R2013")
             if exe_path and os.name == "nt" and Path(exe_path).is_file():
-                odafc.win_exec_path = exe_path
+                _odafc.win_exec_path = exe_path
             elif exe_path and os.name != "nt" and Path(exe_path).is_file():
-                odafc.unix_exec_path = exe_path
+                _odafc.unix_exec_path = exe_path
             try:
-                odafc.convert(str(in_dxf), str(out_dwg), version=oda_ver, replace=True)
+                _odafc.convert(str(in_dxf), str(out_dwg), version=oda_ver, replace=True)
             except Exception as exc:
                 raise RuntimeError(f"ODA File Converter failed: {exc}") from exc
 
@@ -215,12 +232,14 @@ def convert_dwg_to_dxf(dwg_bytes: bytes) -> bytes:
         in_dwg.write_bytes(dwg_bytes)
 
         if backend == "oda_file_converter":
+            _odafc = _get_odafc()
+
             if exe_path and os.name == "nt" and Path(exe_path).is_file():
-                odafc.win_exec_path = exe_path
+                _odafc.win_exec_path = exe_path
             elif exe_path and os.name != "nt" and Path(exe_path).is_file():
-                odafc.unix_exec_path = exe_path
+                _odafc.unix_exec_path = exe_path
             try:
-                odafc.convert(str(in_dwg), str(out_dxf), version="R2010", replace=True)
+                _odafc.convert(str(in_dwg), str(out_dxf), version="R2010", replace=True)
             except Exception as exc:
                 raise RuntimeError(f"ODA File Converter (.dwg -> .dxf) failed: {exc}") from exc
 

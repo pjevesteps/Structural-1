@@ -1,7 +1,8 @@
+import importlib
+
 from fastapi import APIRouter, Body, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 
-from .inspector import InvalidPdfError, PdfTooLargeError
 from .schemas import (
     ApplyMasterGridRequest,
     ApplyMasterGridResponse,
@@ -15,6 +16,7 @@ from .schemas import (
     ExtractionResponse,
     ImportDocumentState,
     ImportDocumentSummary,
+    InvalidPdfError,
     LevelCreateRequest,
     LevelExtractionResponse,
     LevelUpdateRequest,
@@ -25,6 +27,7 @@ from .schemas import (
     ManualGridTraceRequest,
     OpeningCreateRequest,
     PageUpdateRequest,
+    PdfTooLargeError,
     PreflightDiagnosticsResponse,
     QuickUnitScaleRequest,
     RegionCreateRequest,
@@ -39,7 +42,22 @@ from .schemas import (
     UpdateCadLayersRequest,
 )
 from ..cad.dwg_converter import DwgConverterUnavailableError
-from . import cad_importer, service
+
+
+class _LazyModule:
+    def __init__(self, module_name: str, package: str | None) -> None:
+        self._module_name = module_name
+        self._package = package
+        self._mod = None
+
+    def __getattr__(self, item: str):
+        if self._mod is None:
+            self._mod = importlib.import_module(self._module_name, self._package)
+        return getattr(self._mod, item)
+
+
+cad_importer = _LazyModule(".cad_importer", __package__)
+service = _LazyModule(".service", __package__)
 
 router = APIRouter(
     prefix="/api/projects/{project_id}/pdf-imports",

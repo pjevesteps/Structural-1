@@ -7,8 +7,10 @@ import numpy as np
 import pymupdf
 
 from .schemas import (
+    InvalidPdfError,
     PageClassification,
     PageInfo,
+    PdfTooLargeError,
     PlanRegion,
     ScaleCalibration,
     SheetType,
@@ -158,14 +160,6 @@ GENERAL_TITLE_RE = re.compile(
     r")\b",
     re.IGNORECASE,
 )
-
-
-class InvalidPdfError(ValueError):
-    """Raised when an uploaded file fails PDF validation."""
-
-
-class PdfTooLargeError(ValueError):
-    """Raised when an uploaded PDF exceeds the maximum allowed size."""
 
 
 def validate_pdf_bytes(data: bytes, max_bytes: int = MAX_PDF_SIZE_BYTES) -> None:

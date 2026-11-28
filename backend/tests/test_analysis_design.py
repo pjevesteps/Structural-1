@@ -76,7 +76,11 @@ def _setup_loaded_project(client: TestClient, pid: str) -> ProjectState:
     assert (
         client.post(
             f"/api/projects/{pid}/geometry/generate",
-            json={"default_support_type": "FIXED", "include_base_tie_beams": True},
+            json={
+                "default_support_type": "FIXED",
+                "include_base_tie_beams": True,
+                "include_roof_slab": True,
+            },
         ).status_code
         == 200
     )

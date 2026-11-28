@@ -29,8 +29,6 @@ from .deliverables import (
     persist_structural_report_artifacts,
     report_artifact_paths,
 )
-from .docx_builder import build_calculation_report_docx
-from .pdf_builder import build_calculation_report_pdf
 
 router = APIRouter(
     prefix="/api/projects/{project_id}/reports",
@@ -91,6 +89,9 @@ def _ensure_report_ready(project):
 
 
 def _build_and_store_structural_report(project, profile) -> dict:
+    from .docx_builder import build_calculation_report_docx
+    from .pdf_builder import build_calculation_report_pdf
+
     include_bom = bool(project.reporting.options.include_bom_cost_estimate and project.reporting.bom is not None)
     docx_bytes = build_calculation_report_docx(project, profile=profile, include_bom=include_bom)
     pdf_bytes = build_calculation_report_pdf(project, profile=profile, include_bom=include_bom)
@@ -327,6 +328,8 @@ def download_report_docx(project_id: str):
         )
 
     _ensure_report_ready(project)
+    from .docx_builder import build_calculation_report_docx
+
     try:
         docx_bytes = build_calculation_report_docx(project, profile=profile)
     except ValueError as exc:
@@ -360,6 +363,8 @@ def download_report_pdf(project_id: str):
         )
 
     _ensure_report_ready(project)
+    from .pdf_builder import build_calculation_report_pdf
+
     try:
         pdf_bytes = build_calculation_report_pdf(project, profile=profile)
     except ValueError as exc:

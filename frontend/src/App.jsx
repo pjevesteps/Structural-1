@@ -1,13 +1,14 @@
-import React, { useEffect, useState } from "react";
-import EngineerProfileModal from "./EngineerProfileModal.jsx";
-import ProjectManagement from "./ProjectManagement.jsx";
-import PdfImporter from "./PdfImporter.jsx";
-import GeometryBuilder from "./GeometryBuilder.jsx";
-import MemberSizing from "./MemberSizing.jsx";
-import LoadGenerator from "./LoadGenerator.jsx";
-import DesignReview from "./DesignReview.jsx";
-import CadDrawings from "./CadDrawings.jsx";
-import ReportBuilder from "./ReportBuilder.jsx";
+import React, { Suspense, lazy, useEffect, useState } from "react";
+
+const EngineerProfileModal = lazy(() => import("./EngineerProfileModal.jsx"));
+const ProjectManagement = lazy(() => import("./ProjectManagement.jsx"));
+const PdfImporter = lazy(() => import("./PdfImporter.jsx"));
+const GeometryBuilder = lazy(() => import("./GeometryBuilder.jsx"));
+const MemberSizing = lazy(() => import("./MemberSizing.jsx"));
+const LoadGenerator = lazy(() => import("./LoadGenerator.jsx"));
+const DesignReview = lazy(() => import("./DesignReview.jsx"));
+const CadDrawings = lazy(() => import("./CadDrawings.jsx"));
+const ReportBuilder = lazy(() => import("./ReportBuilder.jsx"));
 
 const MODULES = [
   ["01", "Project Management", "Project metadata, seismic/wind site parameters & revision snapshots"],
@@ -538,6 +539,7 @@ export default function App() {
         </div>
       </header>
 
+      <Suspense fallback={<div className="panel" style={{ padding: 24 }}>Loading module...</div>}>
       {showModule01 ? (
         <ProjectManagement
           projects={projects}
@@ -922,12 +924,17 @@ export default function App() {
           )}
         </>
       )}
+      </Suspense>
 
       <footer>{disclaimerText}</footer>
-      <EngineerProfileModal
-        open={showProfileModal}
-        onClose={() => setShowProfileModal(false)}
-      />
+      {showProfileModal && (
+        <Suspense fallback={null}>
+          <EngineerProfileModal
+            open={showProfileModal}
+            onClose={() => setShowProfileModal(false)}
+          />
+        </Suspense>
+      )}
     </main>
   );
 }

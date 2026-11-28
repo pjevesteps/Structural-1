@@ -28,7 +28,6 @@ from .storage import (
 )
 from .staad import write_staad_preview, simulate_placeholder
 from .pdf_importer import router as pdf_importer_router
-from .pdf_importer import cad_importer as pdf_cad_importer
 from .pdf_importer.router import _handle_error as _handle_pdf_error
 from .pdf_importer.schemas import ImportDocumentState
 from .geometry import router as geometry_router
@@ -239,6 +238,8 @@ class CreateRevisionRequest(BaseModel):
 
 @app.post("/api/projects/{project_id}/pdf-import/upload-cad", response_model=ImportDocumentState)
 async def upload_cad_plan_alias(project_id: str, file: UploadFile = File(...)):
+    from .pdf_importer import cad_importer as pdf_cad_importer
+
     try:
         content = await file.read()
         return pdf_cad_importer.upload_cad_plan(project_id, file.filename or "plan.dxf", content)

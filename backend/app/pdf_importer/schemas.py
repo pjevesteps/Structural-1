@@ -3,6 +3,14 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, ConfigDict, model_validator
 from ..models import ProjectState
 
+
+class InvalidPdfError(ValueError):
+    """Raised when an uploaded file fails PDF validation."""
+
+
+class PdfTooLargeError(ValueError):
+    """Raised when an uploaded PDF exceeds the maximum allowed size."""
+
 LengthUnit = Literal["mm", "cm", "m", "ft", "in"]
 PageClassification = Literal["vector", "scanned", "hybrid"]
 SheetType = Literal[

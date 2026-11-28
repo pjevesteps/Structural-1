@@ -12,9 +12,14 @@ from ..models import (
     ManualBeamOverride,
     StructuralModelState,
 )
-from ..sizing.engine import ensure_all_members_sized
 from .generator import _is_roof_level_id, generate_structural_model, is_perimeter_beam_pair
 from .validator import validate_structural_model
+
+
+def _ensure_all_members_sized(project) -> bool:
+    from ..sizing.engine import ensure_all_members_sized
+
+    return ensure_all_members_sized(project)
 
 router = APIRouter(
     prefix="/api/projects/{project_id}/geometry",
@@ -455,7 +460,7 @@ def add_member(project_id: str, payload: AddMemberRequest):
     model.engineer_approved = False
     _revalidate_preserving_info(model)
     if project.member_sizing.generated_at is not None or project.member_sizing.sections:
-        ensure_all_members_sized(project)
+        _ensure_all_members_sized(project)
     storage.save_project(project)
     return model
 
@@ -487,7 +492,7 @@ def delete_member(project_id: str, member_id: int):
     model.engineer_approved = False
     _revalidate_preserving_info(model)
     if project.member_sizing.generated_at is not None or project.member_sizing.sections:
-        ensure_all_members_sized(project)
+        _ensure_all_members_sized(project)
     storage.save_project(project)
     return model
 
@@ -541,7 +546,7 @@ def clear_interior_roof_beams(
         model.engineer_approved = False
     _revalidate_preserving_info(model)
     if project.member_sizing.generated_at is not None or project.member_sizing.sections:
-        ensure_all_members_sized(project)
+        _ensure_all_members_sized(project)
     storage.save_project(project)
     return model
 
@@ -733,7 +738,7 @@ def update_node_support(project_id: str, node_id: int, payload: SupportUpdateReq
     model.engineer_approved = False
     _revalidate_preserving_info(model)
     if project.member_sizing.generated_at is not None or project.member_sizing.sections:
-        ensure_all_members_sized(project)
+        _ensure_all_members_sized(project)
     storage.save_project(project)
     return model
 

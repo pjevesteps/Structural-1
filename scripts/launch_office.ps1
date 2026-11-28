@@ -116,7 +116,7 @@ Write-Host "  STRUCTURAL AI OFFICE - LOCAL ENGINEERING WORKSPACE" -ForegroundCol
 Write-Host "==========================================================" -ForegroundColor Cyan
 Write-Host "Starting FastAPI backend on port $ActiveBackendPort..." -ForegroundColor Green
 
-$BackendCmd = "`$Host.UI.RawUI.WindowTitle='Structural AI Backend (:$ActiveBackendPort)'; Set-Location '$RepoRoot'; & '$VenvPython' -m uvicorn backend.app.main:app --reload --host 0.0.0.0 --port $ActiveBackendPort"
+$BackendCmd = "`$Host.UI.RawUI.WindowTitle='Structural AI Backend (:$ActiveBackendPort)'; Set-Location '$RepoRoot'; & '$VenvPython' -m uvicorn backend.app.main:app --reload --reload-dir backend --host 0.0.0.0 --port $ActiveBackendPort"
 $BackendProc = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoExit", "-NoProfile", "-Command", $BackendCmd -WorkingDirectory $RepoRoot -PassThru
 
 Write-Host "Starting Vite frontend on port $ActiveFrontendPort (proxying /api -> 127.0.0.1:$ActiveBackendPort)..." -ForegroundColor Green

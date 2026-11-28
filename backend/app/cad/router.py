@@ -12,12 +12,6 @@ from .dwg_converter import (
     convert_dxf_to_dwg,
     detect_dwg_converter,
 )
-from .dxf_builder import (
-    build_dxf_bytes,
-    build_sheets_pdf,
-    build_sheets_zip,
-    render_sheet_svg,
-)
 
 router = APIRouter(
     prefix="/api/projects/{project_id}/cad",
@@ -41,6 +35,8 @@ def _load_or_404(project_id: str):
 
 @router.post("/generate", response_model=CadDrawingState)
 def generate_cad_drawings(project_id: str, payload: GenerateCadRequest | None = None):
+    from .dxf_builder import build_dxf_bytes
+
     project = _load_or_404(project_id)
     req = payload if payload is not None else GenerateCadRequest()
     profile = load_engineer_profile()
@@ -62,6 +58,8 @@ def get_cad_dwg_status(project_id: str):
 
 @router.get("/download/dwg")
 def download_cad_dwg(project_id: str):
+    from .dxf_builder import build_dxf_bytes
+
     project = _load_or_404(project_id)
     profile = load_engineer_profile()
     try:
@@ -94,6 +92,8 @@ def download_cad_dwg(project_id: str):
 
 @router.get("/download/dxf")
 def download_cad_dxf(project_id: str):
+    from .dxf_builder import build_dxf_bytes
+
     project = _load_or_404(project_id)
     profile = load_engineer_profile()
     try:
@@ -116,6 +116,8 @@ def download_cad_dxf(project_id: str):
 
 @router.get("/download/pdf")
 def download_cad_pdf(project_id: str):
+    from .dxf_builder import build_sheets_pdf
+
     project = _load_or_404(project_id)
     profile = load_engineer_profile()
     try:
@@ -134,6 +136,8 @@ def download_cad_pdf(project_id: str):
 
 @router.get("/download/zip")
 def download_cad_zip(project_id: str):
+    from .dxf_builder import build_sheets_zip
+
     project = _load_or_404(project_id)
     profile = load_engineer_profile()
     try:
@@ -155,6 +159,8 @@ def preview_cad_sheet_svg(
     project_id: str,
     sheet_no: str | None = Query(default=None),
 ):
+    from .dxf_builder import render_sheet_svg
+
     project = _load_or_404(project_id)
     profile = load_engineer_profile()
     try:
