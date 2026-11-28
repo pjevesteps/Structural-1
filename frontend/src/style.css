@@ -259,7 +259,7 @@ footer{color:#64748b;font-size:10.5px;margin-top:22px;padding-top:12px;border-to
 .pdf-master-grid-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding-top:6px;border-top:1px solid #223147}
 .pdf-controls-strip.elev-strip{grid-template-columns:1fr}
 .pdf-stage.mode-set_origin{cursor:crosshair}
-.pdf-level-card{background:#0e1828;border:1px solid #233349;border-left:3px solid #efc37d;border-radius:8px;padding:9px;display:flex;flex-direction:column;gap:7px}
+.pdf-level-card,.pdf-manual-level-card{background:#0e1828;border:1px solid #233349;border-left:3px solid #efc37d;border-radius:8px;padding:9px;display:flex;flex-direction:column;gap:7px}
 .pdf-level-card.status-approved{border-left-color:#45c9a8}
 .pdf-level-card.status-rejected{border-left-color:#e06c75;opacity:.68}
 .pdf-level-inputs{display:flex;flex-direction:column;gap:6px}

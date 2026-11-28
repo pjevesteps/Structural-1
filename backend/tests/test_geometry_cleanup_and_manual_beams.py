@@ -728,6 +728,93 @@ def test_column_to_beam_t_junction_splits_host_beam_and_persists_on_regenerate(i
     assert len(g2["slab_panels"]) >= orig_slab_count
 
 
+def test_deleting_t_junction_beam_rejoins_collinear_host_beam_and_persists(isolated_env):
+    """
+    Deleting a T-junction manual beam that previously split a host beam must:
+      1. Automatically rejoin the two collinear host-beam segments (a, mid) + (mid, b) -> (a, b)
+      2. Remove the orphaned mid-span AnalyticalNode
+      3. Prune stale member_sizing assignments while preserving the rejoined host beam's assignment
+      4. Stay cleanly unsplit after Regenerate Geometry (POST /geometry/generate)
+    """
+    client = isolated_env
+    pid = "TEST-TJUNC-REJOIN"
+    payload = _make_2x2_project(pid)
+    storage.save_project(ProjectState.model_validate(payload))
+
+    r0 = client.post(f"/api/projects/{pid}/geometry/generate", json={})
+    assert r0.status_code == 200, r0.text
+    g0 = r0.json()
+    orig_node_count = len(g0["nodes"])
+    orig_member_count = len(g0["members"])
+
+    n_a1 = next(n for n in g0["nodes"] if n["floor_level"] == "2F" and abs(n["x_m"] - 0.0) < 0.01 and abs(n["z_m"] - 0.0) < 0.01)
+    n_a2 = next(n for n in g0["nodes"] if n["floor_level"] == "2F" and abs(n["x_m"] - 0.0) < 0.01 and abs(n["z_m"] - 4.0) < 0.01)
+    n_b2 = next(n for n in g0["nodes"] if n["floor_level"] == "2F" and abs(n["x_m"] - 5.0) < 0.01 and abs(n["z_m"] - 4.0) < 0.01)
+
+    # 1. Add T-junction secondary beam onto host beam A2-B2 midpoint (2.5, y, 4.0)
+    r_add = client.post(
+        f"/api/projects/{pid}/geometry/members",
+        json={
+            "start_node": n_a1["node_id"],
+            "end_xyz_m": [2.5, n_a1["y_m"], 4.0],
+            "member_type": "secondary_beam",
+            "floor_level": "2F",
+            "grid_ref": "TJUNC-DEL",
+        },
+    )
+    assert r_add.status_code == 200, r_add.text
+    g1 = r_add.json()
+    assert len(g1["nodes"]) == orig_node_count + 1
+    assert len(g1["members"]) == orig_member_count + 2  # +1 split segment, +1 T-junction beam
+
+    # Auto-size so member_assignments exist before deletion
+    r_size = client.post(f"/api/projects/{pid}/sizing/auto-size", json={})
+    assert r_size.status_code == 200, r_size.text
+
+    t_beam = next(m for m in g1["members"] if m["grid_ref"] == "TJUNC-DEL")
+
+    # 2. Delete the T-junction beam -> host beam segments must auto-rejoin & mid node removed
+    r_del = client.delete(f"/api/projects/{pid}/geometry/members/{t_beam['member_id']}")
+    assert r_del.status_code == 200, r_del.text
+    g_after = r_del.json()
+
+    assert len(g_after["nodes"]) == orig_node_count
+    assert len(g_after["members"]) == orig_member_count
+    assert not any(
+        n["floor_level"] == "2F" and abs(n["x_m"] - 2.5) < 0.05 and abs(n["z_m"] - 4.0) < 0.05
+        for n in g_after["nodes"]
+    )
+    rejoined = next(
+        (
+            m
+            for m in g_after["members"]
+            if m["floor_level"] == "2F"
+            and {m["start_node"], m["end_node"]} == {n_a2["node_id"], n_b2["node_id"]}
+        ),
+        None,
+    )
+    assert rejoined is not None, "Expected host beam (A-2 <-> B-2) to be rejoined after T-junction delete"
+    assert abs(rejoined["length_m"] - 5.0) < 1e-3
+
+    # Verify sizing assignments have no stale member IDs and still cover the rejoined beam
+    saved = storage.load_project(pid)
+    active_ids = {m.member_id for m in saved.structural_model.members}
+    assigned_ids = {a.member_id for a in saved.member_sizing.member_assignments}
+    assert assigned_ids == active_ids
+    assert rejoined["member_id"] in assigned_ids
+
+    # 3. Regenerate geometry -> stays cleanly unsplit
+    r_regen = client.post(f"/api/projects/{pid}/geometry/generate", json={})
+    assert r_regen.status_code == 200, r_regen.text
+    g_regen = r_regen.json()
+    assert len(g_regen["nodes"]) == orig_node_count
+    assert len(g_regen["members"]) == orig_member_count
+    assert not any(
+        n["floor_level"] == "2F" and abs(n["x_m"] - 2.5) < 0.05 and abs(n["z_m"] - 4.0) < 0.05
+        for n in g_regen["nodes"]
+    )
+
+
 
 
 

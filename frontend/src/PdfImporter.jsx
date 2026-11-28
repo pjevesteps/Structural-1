@@ -3825,7 +3825,7 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
                   {/* Manual Level Entry & Click-on-Sheet Datum Picker (works on scanned / SHX elevations) */}
                   <form
                     onSubmit={handleAddManualLevel}
-                    className="pdf-level-card"
+                    className="pdf-manual-level-card"
                     style={{ marginBottom: "8px", borderLeftColor: "#38bdf8" }}
                   >
                     <div className="pdf-level-top" style={{ gap: "6px" }}>

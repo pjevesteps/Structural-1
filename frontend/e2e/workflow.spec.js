@@ -288,9 +288,14 @@ test.describe.serial("Structural AI Office — Full Browser E2E (Modules 01 to 0
     expect(await page.locator("table.sizing-table").nth(0).locator("tbody tr").count()).toBeGreaterThanOrEqual(3);
     expect(await page.locator("table.sizing-table").nth(1).locator("tbody tr").count()).toBeGreaterThanOrEqual(9);
 
-    // 2. Verify Beam Schedule tab renders rows
+    // 2. Verify Beam Schedule tab renders rows, row click syncs 2D/3D studio inspector, and Pin to OBO works
     await page.getByRole("button", { name: /3\. Beam Schedule/ }).click();
-    expect(await page.locator("table.sizing-table tbody tr").count()).toBeGreaterThan(0);
+    const beamRows = page.locator("table.sizing-table tbody tr");
+    expect(await beamRows.count()).toBeGreaterThan(0);
+    await beamRows.first().click();
+    await expect(studio.locator('svg.pdv-blueprint-svg[aria-label="Beam cross-section blueprint"]')).toBeVisible();
+    await beamRows.first().getByRole("button", { name: "Pin to OBO" }).click();
+    await expect(page.locator(".notice")).toContainText(/Pinned/i);
 
     // 3. Verify Column Schedule tab renders rows
     await page.getByRole("button", { name: /4\. Column Schedule/ }).click();
@@ -323,11 +328,18 @@ test.describe.serial("Structural AI Office — Full Browser E2E (Modules 01 to 0
       page.getByText("MODULE 08 · CALCULATION REPORTS (DOCX & PDF) & STRUCTURAL BOM")
     ).toBeVisible();
 
+    // 0. Verify Pinned OBO Report View thumbnail from Module 06 renders and Unpin removes it
+    const pinnedThumb = page.locator(".report-pinned-item img.report-pinned-thumb").first();
+    await expect(pinnedThumb).toBeVisible();
+    expect(await pinnedThumb.getAttribute("src")).toMatch(/^data:image\/png;base64,/);
+    await page.locator(".report-pinned-item").first().getByRole("button", { name: "Unpin" }).click();
+    await expect(page.locator(".notice")).toContainText(/Removed|Unpinned/i);
+
     // 1. Fill signatory details and generate Report & BOM
     await page.getByLabel("Engineer Name").fill("Engr. Playwright Verifier, CE");
     await page.getByLabel("PRC License No.").fill("0192837");
     await page.getByRole("button", { name: "Generate Report & BOM" }).click();
-    await expect(page.locator(".notice")).toContainText(/generated/i);
+    await expect(page.locator(".notice")).toContainText(/generated/i, { timeout: 20000 });
 
     // 2. Switch to BOM & Cost Estimate tab and verify all 3 tables render
     await page.getByRole("button", { name: "2. Bill of Materials & Cost Estimate (PHP)" }).click();
@@ -338,6 +350,7 @@ test.describe.serial("Structural AI Office — Full Browser E2E (Modules 01 to 0
 
     // 3. Switch to Report Preview tab and verify A4 executive summary renders
     await page.getByRole("button", { name: "3. Report Preview" }).click();
+    await page.getByRole("button", { name: "Executive Summary" }).click();
     await expect(page.locator(".report-paper")).toContainText(PROJECT_NAME);
     await expect(page.locator(".report-paper")).toContainText("Engr. Playwright Verifier, CE");
 

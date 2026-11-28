@@ -1467,7 +1467,20 @@ export default function DesignReview({ project, onClose, onUpdated }) {
                     {filteredBeams.map((b) => {
                       const pk = `beam-${b.member_id}`;
                       return (
-                        <tr key={b.member_id} onClick={() => setSelectedMemberId(b.member_id)}>
+                        <tr
+                          key={b.member_id}
+                          style={{
+                            cursor: "pointer",
+                            background:
+                              studioSelection?.type === "beam" && studioSelection?.id === b.member_id
+                                ? "rgba(56,189,248,0.12)"
+                                : undefined,
+                          }}
+                          onClick={() => {
+                            setSelectedMemberId(b.member_id);
+                            setStudioSelection({ type: "beam", id: b.member_id });
+                          }}
+                        >
                           <td>
                             <code>M{b.member_id}</code>
                           </td>
@@ -1615,7 +1628,20 @@ export default function DesignReview({ project, onClose, onUpdated }) {
                     {filteredCols.map((c) => {
                       const pk = `col-${c.member_id}`;
                       return (
-                        <tr key={c.member_id} onClick={() => setSelectedMemberId(c.member_id)}>
+                        <tr
+                          key={c.member_id}
+                          style={{
+                            cursor: "pointer",
+                            background:
+                              studioSelection?.type === "column" && studioSelection?.id === c.member_id
+                                ? "rgba(56,189,248,0.12)"
+                                : undefined,
+                          }}
+                          onClick={() => {
+                            setSelectedMemberId(c.member_id);
+                            setStudioSelection({ type: "column", id: c.member_id });
+                          }}
+                        >
                           <td>
                             <code>M{c.member_id}</code>
                           </td>
@@ -1723,7 +1749,17 @@ export default function DesignReview({ project, onClose, onUpdated }) {
                     {(ad?.footing_designs || []).map((f) => {
                       const pk = `ftg-${f.node_id}`;
                       return (
-                        <tr key={f.node_id}>
+                        <tr
+                          key={f.node_id}
+                          style={{
+                            cursor: "pointer",
+                            background:
+                              studioSelection?.type === "footing" && studioSelection?.id === f.node_id
+                                ? "rgba(56,189,248,0.12)"
+                                : undefined,
+                          }}
+                          onClick={() => setStudioSelection({ type: "footing", id: f.node_id })}
+                        >
                           <td>
                             <b>{f.footing_tag}</b>
                           </td>
@@ -1929,7 +1965,17 @@ export default function DesignReview({ project, onClose, onUpdated }) {
                       const bothPass = j.scwb_status === "PASS" && j.joint_shear_status === "PASS";
                       const pk = `smrf-${j.joint_node_id}`;
                       return (
-                        <tr key={j.joint_node_id}>
+                        <tr
+                          key={j.joint_node_id}
+                          style={{
+                            cursor: "pointer",
+                            background:
+                              studioSelection?.type === "joint" && studioSelection?.id === j.joint_node_id
+                                ? "rgba(56,189,248,0.12)"
+                                : undefined,
+                          }}
+                          onClick={() => setStudioSelection({ type: "joint", id: j.joint_node_id })}
+                        >
                           <td>
                             <code>N{j.joint_node_id}</code>
                           </td>

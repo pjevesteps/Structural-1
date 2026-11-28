@@ -465,6 +465,94 @@ def add_member(project_id: str, payload: AddMemberRequest):
     return model
 
 
+def _try_rejoin_collinear_host_beam(project, candidate_node_ids: list[int]) -> set[int]:
+    """
+    When a T-junction beam is deleted, if an endpoint node is now a non-support
+    degree-2 node shared by exactly two collinear same-floor, same-type beams
+    (a, mid) and (mid, b), merge them back into a single segment (a, b) and
+    remove the orphaned mid node. Returns any removed member_ids.
+    """
+    model = project.structural_model
+    removed_ids: set[int] = set()
+    tol_xz = max(model.options.snap_tolerance_m, 0.25)
+
+    for mid_nid in dict.fromkeys(candidate_node_ids):
+        node_by_id = {n.node_id: n for n in model.nodes}
+        mid_node = node_by_id.get(mid_nid)
+        if mid_node is None or mid_node.is_support:
+            continue
+
+        incident = [
+            m for m in model.members if m.start_node == mid_nid or m.end_node == mid_nid
+        ]
+        if len(incident) != 2:
+            continue
+        m1, m2 = incident
+        if m1.member_type == "column" or m2.member_type == "column":
+            continue
+        if m1.member_type != m2.member_type or m1.floor_level != m2.floor_level:
+            continue
+
+        a_nid = m1.end_node if m1.start_node == mid_nid else m1.start_node
+        b_nid = m2.end_node if m2.start_node == mid_nid else m2.start_node
+        if a_nid == b_nid:
+            continue
+
+        new_pair = (min(a_nid, b_nid), max(a_nid, b_nid))
+        if any(
+            m.member_id not in (m1.member_id, m2.member_id)
+            and (min(m.start_node, m.end_node), max(m.start_node, m.end_node)) == new_pair
+            for m in model.members
+        ):
+            continue
+
+        na = node_by_id.get(a_nid)
+        nb = node_by_id.get(b_nid)
+        if na is None or nb is None:
+            continue
+        if abs(na.y_m - mid_node.y_m) > 0.05 or abs(nb.y_m - mid_node.y_m) > 0.05:
+            continue
+
+        v1x, v1z = na.x_m - mid_node.x_m, na.z_m - mid_node.z_m
+        v2x, v2z = nb.x_m - mid_node.x_m, nb.z_m - mid_node.z_m
+        l1, l2 = hypot(v1x, v1z), hypot(v2x, v2z)
+        if l1 < 1e-4 or l2 < 1e-4:
+            continue
+        dot = (v1x * v2x + v1z * v2z) / (l1 * l2)
+        if dot > -0.999:
+            continue
+
+        # Merge m2 into m1 (preserving m1's member_id and sizing assignment)
+        m1.start_node = a_nid
+        m1.end_node = b_nid
+        m1.length_m = _dist_3d(na, nb)
+        was_manual = bool(m1.manual_override or m2.manual_override)
+        m1.manual_override = was_manual
+
+        model.members = [m for m in model.members if m.member_id != m2.member_id]
+        model.nodes = [n for n in model.nodes if n.node_id != mid_nid]
+        removed_ids.add(m2.member_id)
+
+        # Keep model.manual_beams clean so Regenerate Geometry doesn't re-split
+        a_xyz = [na.x_m, na.y_m, na.z_m]
+        m_xyz = [mid_node.x_m, mid_node.y_m, mid_node.z_m]
+        b_xyz = [nb.x_m, nb.y_m, nb.z_m]
+        matched_manual = False
+        kept_overrides = []
+        for ov in model.manual_beams:
+            if _override_matches_endpoints(ov, a_xyz, m_xyz, xz_tol=tol_xz, y_tol=0.10) or _override_matches_endpoints(
+                ov, m_xyz, b_xyz, xz_tol=tol_xz, y_tol=0.10
+            ):
+                matched_manual = True
+            else:
+                kept_overrides.append(ov)
+        if matched_manual:
+            model.manual_beams = kept_overrides
+            _record_manual_beam_override(model, na, nb, m1.member_type, m1.floor_level, m1.grid_ref)
+
+    return removed_ids
+
+
 @router.delete("/members/{member_id}", response_model=StructuralModelState)
 def delete_member(project_id: str, member_id: int):
     project = _load_or_404(project_id)
@@ -488,6 +576,12 @@ def delete_member(project_id: str, member_id: int):
             ]
 
     model.members = [m for m in model.members if m.member_id != member_id]
+    removed_ids = {member_id}
+    if target.member_type != "column":
+        removed_ids |= _try_rejoin_collinear_host_beam(
+            project, [target.start_node, target.end_node]
+        )
+    _prune_stale_member_refs(project, removed_ids)
 
     model.engineer_approved = False
     _revalidate_preserving_info(model)

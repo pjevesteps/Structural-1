@@ -898,23 +898,42 @@ export default function ReportBuilder({ project, onClose, onUpdated }) {
                     {ad.pinned_design_views.map((snap, idx) => (
                       <div
                         key={snap.id || `snap-${idx}`}
+                        className="report-pinned-item"
                         style={{
                           display: "flex",
                           alignItems: "center",
                           justifyContent: "space-between",
-                          gap: 8,
+                          gap: 10,
                           padding: "6px 10px",
                           borderRadius: 6,
                           background: "rgba(15,23,42,0.35)",
                         }}
                       >
-                        <div style={{ minWidth: 0 }}>
-                          <div style={{ fontSize: 12, fontWeight: 600 }}>{snap.title || "Pinned View"}</div>
-                          {snap.caption && (
-                            <div className="pdf-muted" style={{ fontSize: 11 }}>
-                              {snap.caption}
-                            </div>
+                        <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
+                          {snap.image_data_url && (
+                            <img
+                              src={snap.image_data_url}
+                              alt={snap.title || "Pinned View"}
+                              className="report-pinned-thumb"
+                              style={{
+                                width: 76,
+                                height: 50,
+                                objectFit: "cover",
+                                borderRadius: 4,
+                                border: "1px solid rgba(148,163,184,0.3)",
+                                background: "#0b1220",
+                                flexShrink: 0,
+                              }}
+                            />
                           )}
+                          <div style={{ minWidth: 0 }}>
+                            <div style={{ fontSize: 12, fontWeight: 600 }}>{snap.title || "Pinned View"}</div>
+                            {snap.caption && (
+                              <div className="pdf-muted" style={{ fontSize: 11 }}>
+                                {snap.caption}
+                              </div>
+                            )}
+                          </div>
                         </div>
                         {snap.id && (
                           <button
