@@ -847,7 +847,7 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
       ctx.textAlign = "left";
       ctx.fillText(ax.label, ex + 3, ey + 3);
     }
-  }, [model, fullProject?.openings, fullProject?.analysis_design?.retaining_wall_designs, sortedLevels, nodeMap, yaw, pitch, zoom3d, storyFilter, viewLayout, issueHighlight]);
+  }, [model, fullProject?.openings, fullProject?.analysis_design?.retaining_wall_designs, fullProject?.analysis_design?.retaining_wall_inputs, sortedLevels, nodeMap, yaw, pitch, zoom3d, storyFilter, viewLayout, issueHighlight]);
 
   // Map grade-level node_id -> buried footing support node when footing_depth_m > 0
   const pedestalSupportByGradeNodeId = useMemo(() => {
@@ -1045,6 +1045,27 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
       setNotice(
         `Placed retaining wall ${wallId} on ${activeFloor || na.floor_level} (L=${lenM.toFixed(2)} m, H=${hVal.toFixed(2)} m) — synced with Tab 8 & 3D view.`
       );
+      if (onUpdated) await onUpdated();
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleDeleteRetainingWall(wallId) {
+    if (!wallId) return;
+    setBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      const updatedAd = await apiJson(
+        `/api/projects/${pid}/design/retaining-walls/${encodeURIComponent(wallId)}`,
+        { method: "DELETE" }
+      );
+      setFullProject((prev) => (prev ? { ...prev, analysis_design: updatedAd } : prev));
+      setNotice(`Deleted retaining wall ${wallId} from 2D plan, 3D view, and Module 06.`);
+      if (onUpdated) await onUpdated();
     } catch (e) {
       setError(e.message);
     } finally {
@@ -1520,6 +1541,42 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
                 </div>
               )}
 
+              {((fullProject?.analysis_design?.retaining_wall_inputs || []).length > 0 ||
+                (fullProject?.analysis_design?.retaining_wall_designs || []).length > 0) && (
+                <div className="geom-subbar" style={{ flexWrap: "wrap", gap: 6 }}>
+                  <small className="pdf-hint" style={{ fontWeight: 600 }}>
+                    Retaining Walls:
+                  </small>
+                  {(
+                    fullProject?.analysis_design?.retaining_wall_inputs?.length
+                      ? fullProject.analysis_design.retaining_wall_inputs
+                      : fullProject?.analysis_design?.retaining_wall_designs || []
+                  ).map((rw) => (
+                    <span
+                      key={`rw-chip-${rw.wall_id}`}
+                      className="pdf-field-chip"
+                      style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "2px 8px" }}
+                    >
+                      <span>
+                        <strong>{rw.wall_id}</strong>
+                        {rw.floor_level ? ` (${rw.floor_level})` : ""} · H={Number(rw.retained_height_m || 0).toFixed(1)}m
+                      </span>
+                      <button
+                        type="button"
+                        className="mini-btn on-reject"
+                        style={{ padding: "0 5px", lineHeight: "16px" }}
+                        disabled={busy}
+                        title={`Delete retaining wall ${rw.wall_id}`}
+                        aria-label={`Delete retaining wall ${rw.wall_id}`}
+                        onClick={() => handleDeleteRetainingWall(rw.wall_id)}
+                      >
+                        &times;
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
+
               <svg
                 ref={svg2dRef}
                 className="geom-svg-2d"
@@ -1607,16 +1664,30 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
                   .map((rw) => {
                     const p1 = toSvg2D(rw.start_xyz_m[0], rw.start_xyz_m[2]);
                     const p2 = toSvg2D(rw.end_xyz_m[0], rw.end_xyz_m[2]);
+                    const isDeleteMode = editorMode === "delete_member";
                     return (
-                      <g key={`rw-2d-${rw.wall_id}`}>
+                      <g
+                        key={`rw-2d-${rw.wall_id}`}
+                        style={isDeleteMode ? { cursor: "pointer" } : undefined}
+                        onClick={(e) => {
+                          if (!isDeleteMode) return;
+                          e.stopPropagation();
+                          handleDeleteRetainingWall(rw.wall_id);
+                        }}
+                      >
+                        <title>
+                          {isDeleteMode
+                            ? `Click to delete retaining wall ${rw.wall_id}`
+                            : `Retaining wall ${rw.wall_id} (H=${Number(rw.retained_height_m || 0).toFixed(1)}m)`}
+                        </title>
                         <line
                           x1={p1.x}
                           y1={p1.y}
                           x2={p2.x}
                           y2={p2.y}
-                          stroke="#94a3b8"
-                          strokeWidth="7"
-                          strokeOpacity={0.55}
+                          stroke={isDeleteMode ? "#f87171" : "#94a3b8"}
+                          strokeWidth={isDeleteMode ? "9" : "7"}
+                          strokeOpacity={isDeleteMode ? 0.72 : 0.55}
                           strokeLinecap="round"
                         />
                         <line
@@ -1624,7 +1695,7 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
                           y1={p1.y}
                           x2={p2.x}
                           y2={p2.y}
-                          stroke="#e2e8f0"
+                          stroke={isDeleteMode ? "#fecaca" : "#e2e8f0"}
                           strokeWidth="1.6"
                           strokeDasharray="6 3"
                         />
@@ -1632,7 +1703,7 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
                           x={(p1.x + p2.x) * 0.5}
                           y={(p1.y + p2.y) * 0.5 - 8}
                           textAnchor="middle"
-                          fill="#e2e8f0"
+                          fill={isDeleteMode ? "#fecaca" : "#e2e8f0"}
                           fontSize="9.5"
                           fontWeight="800"
                         >

@@ -45,6 +45,21 @@ function ptSegDist(px, py, x1, y1, x2, y2) {
   return Math.hypot(px - (x1 + t * vx), py - (y1 + t * vy));
 }
 
+function pointInPolygon(px, py, pts) {
+  if (!pts || pts.length < 3) return false;
+  let inside = false;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const xi = pts[i].sx;
+    const yi = pts[i].sy;
+    const xj = pts[j].sx;
+    const yj = pts[j].sy;
+    const intersect =
+      yi > py !== yj > py && px < ((xj - xi) * (py - yi)) / (yj - yi + 1e-9) + xi;
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
 function CrossSectionBlueprint({ entity, data }) {
   if (!entity || !data) return null;
   const W = 280;
@@ -165,6 +180,130 @@ function CrossSectionBlueprint({ entity, data }) {
     );
   }
 
+  if (entity.type === "slab") {
+    const isOneWay = data.slab_action === "one_way";
+    const tMm = Number(data.thickness_mm) || 125;
+    const lx = Number(data.lx_m) || 3.0;
+    const ly = Number(data.ly_m) || 4.0;
+    const sw = 196;
+    const sh = Math.max(26, Math.min(48, tMm * 0.22));
+    const x0 = cx - sw * 0.5;
+    const y0 = cy - sh * 0.5 - 4;
+    const suppW = 18;
+    const suppH = 26;
+    return (
+      <svg className="pdv-blueprint-svg" viewBox={`0 0 ${W} ${H}`} aria-label="Slab section blueprint">
+        {/* Support beams at ends */}
+        <rect x={x0} y={y0 + sh} width={suppW} height={suppH} fill="#111c2d" stroke="#64748b" strokeWidth="1.2" />
+        <rect x={x0 + sw - suppW} y={y0 + sh} width={suppW} height={suppH} fill="#111c2d" stroke="#64748b" strokeWidth="1.2" />
+        {/* Slab concrete body */}
+        <rect x={x0} y={y0} width={sw} height={sh} fill="#111c2d" stroke="#38bdf8" strokeWidth="1.8" />
+        {/* Top negative bars at continuous (left) & discontinuous (right) supports */}
+        <line x1={x0 + 5} y1={y0 + 7} x2={x0 + sw * 0.30} y2={y0 + 7} stroke="#facc15" strokeWidth="1.8" />
+        <line x1={x0 + sw * 0.72} y1={y0 + 7} x2={x0 + sw - 5} y2={y0 + 7} stroke="#facc15" strokeWidth="1.8" />
+        {/* Bottom main short-span positive bar */}
+        <line x1={x0 + 6} y1={y0 + sh - 7} x2={x0 + sw - 6} y2={y0 + sh - 7} stroke="#4ade80" strokeWidth="2.0" />
+        {/* Perpendicular long-span / distribution bar dots */}
+        {Array.from({ length: isOneWay ? 6 : 8 }, (_, i) => (
+          <circle
+            key={i}
+            cx={x0 + 18 + (i / (isOneWay ? 5 : 7)) * (sw - 36)}
+            cy={y0 + sh - 11}
+            r="2.1"
+            fill="#38bdf8"
+          />
+        ))}
+        {/* Dimension & bar labels */}
+        <line x1={x0 - 12} y1={y0} x2={x0 - 12} y2={y0 + sh} stroke="#64748b" strokeWidth="1" />
+        <text x={x0 - 16} y={y0 + sh * 0.5 + 3} textAnchor="end" fill="#94a3b8" fontSize="9.5">
+          t={tMm.toFixed(0)}
+        </text>
+        <text x={cx} y={y0 + sh + 16} textAnchor="middle" fill="#94a3b8" fontSize="9.5">
+          Lx × Ly = {lx.toFixed(2)} × {ly.toFixed(2)} m ({isOneWay ? "1-WAY" : "2-WAY"})
+        </text>
+        <text x={cx} y={y0 + sh + 31} textAnchor="middle" fill="#4ade80" fontSize="9.2">
+          Short (+): {data.short_span_pos} · Long (+): {data.long_span_pos}
+        </text>
+        <text x={cx} y={y0 + sh + 44} textAnchor="middle" fill="#facc15" fontSize="9.0">
+          Top (-): Cont {data.short_span_cont_neg} / Disc {data.short_span_disc_neg}
+        </text>
+        <text x={cx} y={14} textAnchor="middle" fill="#cbd5e1" fontSize="10" fontWeight="600">
+          SLAB {data.panel_id} ({data.floor_level}) · {isOneWay ? "ONE-WAY" : "TWO-WAY"}
+        </text>
+      </svg>
+    );
+  }
+
+  if (entity.type === "retaining_wall") {
+    const H_m = Math.max(0.8, Number(data.retained_height_m) || 2.8);
+    const B_m = Math.max(0.8, Number(data.base_width_m) || Math.max(1.2, 0.6 * H_m));
+    const toe_m = Math.min(B_m * 0.6, Math.max(0.2, Number(data.toe_width_m) || 0.25 * B_m));
+    const tStem_m = Math.max(0.15, (Number(data.stem_thickness_mm) || 250) / 1000.0);
+    const tBase_m = Math.max(0.20, (Number(data.base_thickness_mm) || 300) / 1000.0);
+    const totalH = H_m + tBase_m;
+    const sc = Math.min(130 / B_m, 108 / totalH);
+    const bwPx = B_m * sc;
+    const bhPx = tBase_m * sc;
+    const swPx = Math.max(8, tStem_m * sc);
+    const shPx = H_m * sc;
+    const toePx = toe_m * sc;
+    const xBase = cx - bwPx * 0.5 - 12;
+    const yBaseBot = cy + totalH * sc * 0.5 + 8;
+    const yBaseTop = yBaseBot - bhPx;
+    const xStem = xBase + toePx;
+    const yStemTop = yBaseTop - shPx;
+
+    return (
+      <svg className="pdv-blueprint-svg" viewBox={`0 0 ${W} ${H}`} aria-label="Retaining wall section blueprint">
+        {/* Backfill soil wedge (right/heel side) */}
+        <polygon
+          points={`${xStem + swPx},${yStemTop + 4} ${xBase + bwPx + 24},${yStemTop + 4} ${xBase + bwPx + 24},${yBaseTop} ${xStem + swPx},${yBaseTop}`}
+          fill="rgba(245, 158, 11, 0.10)"
+          stroke="rgba(245, 158, 11, 0.35)"
+          strokeDasharray="3 2"
+        />
+        {/* Active/at-rest earth pressure triangle */}
+        <polygon
+          points={`${xBase + bwPx + 18},${yStemTop + 8} ${xBase + bwPx + 18},${yBaseTop} ${xStem + swPx + 6},${yBaseTop}`}
+          fill="rgba(239, 68, 68, 0.18)"
+          stroke="#f87171"
+          strokeWidth="1"
+        />
+        {/* Base slab & stem concrete */}
+        <rect x={xBase} y={yBaseTop} width={bwPx} height={bhPx} fill="#111c2d" stroke="#cbd5e1" strokeWidth="1.6" />
+        <rect x={xStem} y={yStemTop} width={swPx} height={shPx} fill="#111c2d" stroke="#cbd5e1" strokeWidth="1.6" />
+        {/* Restrained top indicator if basement wall */}
+        {data.is_restrained_top && (
+          <polygon
+            points={`${xStem - 10},${yStemTop + 2} ${xStem},${yStemTop + 7} ${xStem - 10},${yStemTop + 12}`}
+            fill="none"
+            stroke="#38bdf8"
+            strokeWidth="1.2"
+          />
+        )}
+        {/* Stem vertical tension rebar (backfill face) + base mat rebar */}
+        <line x1={xStem + swPx - 3} y1={yStemTop + 4} x2={xStem + swPx - 3} y2={yBaseBot - 4} stroke="#4ade80" strokeWidth="1.8" />
+        <line x1={xStem + 3} y1={yStemTop + 4} x2={xStem + 3} y2={yBaseBot - 4} stroke="#38bdf8" strokeWidth="1.2" />
+        <line x1={xBase + 4} y1={yBaseTop + 4} x2={xBase + bwPx - 4} y2={yBaseTop + 4} stroke="#facc15" strokeWidth="1.5" />
+        <line x1={xBase + 4} y1={yBaseBot - 4} x2={xBase + bwPx - 4} y2={yBaseBot - 4} stroke="#4ade80" strokeWidth="1.5" />
+        {/* Dimensions & bar callouts */}
+        <line x1={xBase} y1={yBaseBot + 10} x2={xBase + bwPx} y2={yBaseBot + 10} stroke="#64748b" strokeWidth="1" />
+        <text x={xBase + bwPx * 0.5} y={yBaseBot + 21} textAnchor="middle" fill="#94a3b8" fontSize="9.5">
+          B={B_m.toFixed(2)}m (toe {toe_m.toFixed(2)}m) · tb={Math.round(tBase_m * 1000)}mm
+        </text>
+        <text x={xBase - 6} y={yStemTop + shPx * 0.5} textAnchor="end" fill="#94a3b8" fontSize="9.5">
+          H={H_m.toFixed(2)}m
+        </text>
+        <text x={xBase - 6} y={yStemTop + shPx * 0.5 + 12} textAnchor="end" fill="#94a3b8" fontSize="9">
+          ts={Math.round(tStem_m * 1000)}
+        </text>
+        <text x={cx} y={14} textAnchor="middle" fill="#cbd5e1" fontSize="10" fontWeight="600">
+          RETAINING WALL {data.wall_id} · {data.stem_vertical_bars}
+        </text>
+      </svg>
+    );
+  }
+
   return null;
 }
 
@@ -255,6 +394,40 @@ export default function PostDesignViewer({
     return m;
   }, [ad?.smrf_joint_checks]);
 
+  const levelElevById = useMemo(() => {
+    const m = {};
+    for (const lv of project?.levels || []) m[lv.id] = lv.elevation_m;
+    return m;
+  }, [project?.levels]);
+
+  const slabPanelByKey = useMemo(() => {
+    const m = {};
+    for (const p of sm?.slab_panels || []) {
+      m[`${p.floor_level}::${p.panel_id}`] = p;
+    }
+    return m;
+  }, [sm?.slab_panels]);
+
+  const slabDesignByKey = useMemo(() => {
+    const m = {};
+    for (const s of ad?.slab_designs || []) {
+      m[`${s.floor_level}::${s.panel_id}`] = s;
+    }
+    return m;
+  }, [ad?.slab_designs]);
+
+  const rwInputById = useMemo(() => {
+    const m = {};
+    for (const rw of ad?.retaining_wall_inputs || []) m[rw.wall_id] = rw;
+    return m;
+  }, [ad?.retaining_wall_inputs]);
+
+  const rwDesignById = useMemo(() => {
+    const m = {};
+    for (const rw of ad?.retaining_wall_designs || []) m[rw.wall_id] = rw;
+    return m;
+  }, [ad?.retaining_wall_designs]);
+
   const clashNodeSet = useMemo(() => {
     const s = new Set();
     for (const cl of ad?.footing_clashes || []) {
@@ -300,8 +473,53 @@ export default function PostDesignViewer({
     if (selectedEntity.type === "column") return colByMid[selectedEntity.id] || null;
     if (selectedEntity.type === "footing") return ftgByNid[selectedEntity.id] || null;
     if (selectedEntity.type === "joint") return jointByNid[selectedEntity.id] || null;
+    if (selectedEntity.type === "slab") {
+      const key = `${selectedEntity.floor_level || ""}::${selectedEntity.id}`;
+      const sd =
+        slabDesignByKey[key] ||
+        (ad?.slab_designs || []).find((s) => s.panel_id === selectedEntity.id) ||
+        null;
+      if (!sd) return null;
+      const panel = slabPanelByKey[`${sd.floor_level}::${sd.panel_id}`] || null;
+      const lx = Number(sd.lx_m || panel?.lx_m || 3.0);
+      const ly = Number(sd.ly_m || panel?.ly_m || 4.0);
+      const fallbackAction =
+        Math.max(lx, ly) / Math.max(0.1, Math.min(lx, ly)) >= 2.0 ? "one_way" : "two_way";
+      return {
+        ...sd,
+        slab_action: panel?.slab_action && panel.slab_action !== "void" ? panel.slab_action : fallbackAction,
+        net_area_sqm: panel?.net_area_sqm ?? Number((lx * ly).toFixed(2)),
+      };
+    }
+    if (selectedEntity.type === "retaining_wall") {
+      const rwd = rwDesignById[selectedEntity.id] || null;
+      if (!rwd) return null;
+      const rwi = rwInputById[selectedEntity.id] || null;
+      return {
+        ...rwd,
+        stem_thickness_mm: rwi?.stem_thickness_mm ?? 250,
+        base_width_m: rwi?.base_width_m ?? Math.max(1.2, Number((0.6 * rwd.retained_height_m).toFixed(2))),
+        toe_width_m: rwi?.toe_width_m ?? 0.45,
+        base_thickness_mm: rwi?.base_thickness_mm ?? 300,
+        allowable_bearing_kpa: rwi?.allowable_bearing_kpa ?? 150,
+        is_restrained_top: rwi?.is_restrained_top ?? true,
+        friction_angle_deg: rwi?.friction_angle_deg ?? 30,
+        surcharge_kpa: rwi?.surcharge_kpa ?? 10,
+      };
+    }
     return null;
-  }, [selectedEntity, beamByMid, colByMid, ftgByNid, jointByNid]);
+  }, [
+    selectedEntity,
+    beamByMid,
+    colByMid,
+    ftgByNid,
+    jointByNid,
+    slabDesignByKey,
+    slabPanelByKey,
+    rwDesignById,
+    rwInputById,
+    ad?.slab_designs,
+  ]);
 
   // Sync quick override form when selection changes
   useEffect(() => {
@@ -411,6 +629,50 @@ export default function PostDesignViewer({
     }
 
     const hits = [];
+    const rwHits = [];
+    const slabHits = [];
+
+    // 0. Translucent slab panels (matched to slab_designs by panel_id + floor_level)
+    for (const panel of sm?.slab_panels || []) {
+      if (panel.slab_action === "void" || !Array.isArray(panel.polygon_m) || panel.polygon_m.length < 3) {
+        continue;
+      }
+      const sd = slabDesignByKey[`${panel.floor_level}::${panel.panel_id}`];
+      if (!sd) continue;
+      const yElev = levelElevById[panel.floor_level] ?? 0;
+      const polyPts = panel.polygon_m.map(([px, pz]) => proj({ x: px, y: yElev, z: pz }));
+      const isSel =
+        selectedEntity?.type === "slab" &&
+        selectedEntity.id === panel.panel_id &&
+        (!selectedEntity.floor_level || selectedEntity.floor_level === panel.floor_level);
+      ctx.beginPath();
+      ctx.moveTo(polyPts[0].sx, polyPts[0].sy);
+      for (let i = 1; i < polyPts.length; i++) ctx.lineTo(polyPts[i].sx, polyPts[i].sy);
+      ctx.closePath();
+      ctx.fillStyle = isSel
+        ? "rgba(56, 189, 248, 0.34)"
+        : sd.status === "FAIL"
+        ? "rgba(239, 68, 68, 0.16)"
+        : "rgba(56, 189, 248, 0.08)";
+      ctx.fill();
+      ctx.strokeStyle = isSel ? "#38bdf8" : "rgba(148, 163, 184, 0.28)";
+      ctx.lineWidth = isSel ? 2.2 : 0.8;
+      ctx.stroke();
+      if (isSel) {
+        const cxS = polyPts.reduce((acc, p) => acc + p.sx, 0) / polyPts.length;
+        const cyS = polyPts.reduce((acc, p) => acc + p.sy, 0) / polyPts.length;
+        ctx.fillStyle = "#e0f2fe";
+        ctx.font = "bold 10px ui-monospace, SFMono-Regular, monospace";
+        ctx.fillText(`${panel.panel_id} (${panel.floor_level})`, cxS - 22, cyS);
+      }
+      slabHits.push({
+        type: "slab",
+        id: panel.panel_id,
+        floor_level: panel.floor_level,
+        kind: "poly",
+        pts: polyPts,
+      });
+    }
 
     // 1. Retaining walls (render all spatially placed walls using exact X, Y-up, Z coordinates;
     // preserve legacy min-Z perimeter fallback for non-spatial retaining walls)
@@ -435,17 +697,28 @@ export default function PostDesignViewer({
       } else {
         continue;
       }
+      const isSelRw = selectedEntity?.type === "retaining_wall" && selectedEntity.id === rw.wall_id;
       ctx.beginPath();
       ctx.moveTo(c1.sx, c1.sy); ctx.lineTo(c2.sx, c2.sy);
       ctx.lineTo(c3.sx, c3.sy); ctx.lineTo(c4.sx, c4.sy); ctx.closePath();
-      ctx.fillStyle = "rgba(148, 163, 184, 0.24)";
+      ctx.fillStyle = isSelRw
+        ? "rgba(56, 189, 248, 0.36)"
+        : rw.status === "FAIL"
+        ? "rgba(239, 68, 68, 0.24)"
+        : "rgba(148, 163, 184, 0.24)";
       ctx.fill();
-      ctx.strokeStyle = "#cbd5e1";
-      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = isSelRw ? "#38bdf8" : rw.status === "FAIL" ? "#f87171" : "#cbd5e1";
+      ctx.lineWidth = isSelRw ? 2.6 : 1.5;
       ctx.stroke();
-      ctx.fillStyle = "#e2e8f0";
+      ctx.fillStyle = isSelRw ? "#e0f2fe" : "#e2e8f0";
       ctx.font = "bold 10px ui-monospace, SFMono-Regular, monospace";
       ctx.fillText(rw.wall_id, (c1.sx + c2.sx) * 0.5, (c3.sy + c4.sy) * 0.5 - 4);
+      rwHits.push({
+        type: "retaining_wall",
+        id: rw.wall_id,
+        kind: "poly",
+        pts: [c1, c2, c3, c4],
+      });
     }
 
     // 2. Scaled 3D footing pads at actual y_m
@@ -591,11 +864,11 @@ export default function PostDesignViewer({
       }
     }
 
-    hitListRef.current = hits;
+    hitListRef.current = { primary: hits, rw: rwHits, slabs: slabHits };
   }, [
     collapsed, layoutMode, sm, ad, selectedEntity, overlayMode, showDeflected,
     deflectAmp, dispByElev, yaw, pitch, zoom3d, pan3d, pulsePhase,
-    beamByMid, colByMid, nodeById, clashNodeSet,
+    beamByMid, colByMid, nodeById, clashNodeSet, slabDesignByKey, levelElevById,
   ]);
 
   function on3dDown(e) {
@@ -630,9 +903,10 @@ export default function PostDesignViewer({
     const rect = canvas.getBoundingClientRect();
     const px = e.clientX - rect.left;
     const py = e.clientY - rect.top;
+    const hitBuckets = hitListRef.current || { primary: [], rw: [], slabs: [] };
     let best = null;
     let bestD = 12;
-    for (const h of hitListRef.current) {
+    for (const h of hitBuckets.primary || []) {
       const d =
         h.kind === "point"
           ? Math.hypot(px - h.x, py - h.y)
@@ -640,6 +914,22 @@ export default function PostDesignViewer({
       if (d < Math.min(bestD, h.r || 12)) {
         bestD = d;
         best = { type: h.type, id: h.id };
+      }
+    }
+    if (!best) {
+      for (const h of hitBuckets.rw || []) {
+        if (pointInPolygon(px, py, h.pts)) {
+          best = { type: "retaining_wall", id: h.id };
+          break;
+        }
+      }
+    }
+    if (!best) {
+      for (const h of hitBuckets.slabs || []) {
+        if (pointInPolygon(px, py, h.pts)) {
+          best = { type: "slab", id: h.id, floor_level: h.floor_level };
+          break;
+        }
       }
     }
     onSelectEntity(best);
@@ -1195,6 +1485,14 @@ export default function PostDesignViewer({
                       {selectedEntity.type === "column" && `Column M${selectedData.member_id} · ${selectedData.section_id}`}
                       {selectedEntity.type === "footing" && `Footing ${selectedData.footing_tag} (N${selectedData.node_id})`}
                       {selectedEntity.type === "joint" && `SMRF Joint N${selectedData.joint_node_id} (${selectedData.grid_ref || selectedData.floor_level})`}
+                      {selectedEntity.type === "slab" &&
+                        `Slab ${selectedData.panel_id} (${selectedData.floor_level}) · ${
+                          selectedData.slab_action === "one_way" ? "1-Way" : "2-Way"
+                        }`}
+                      {selectedEntity.type === "retaining_wall" &&
+                        `Retaining Wall ${selectedData.wall_id}${
+                          selectedData.floor_level ? ` (${selectedData.floor_level})` : ""
+                        }`}
                     </strong>
                     <span
                       className={`design-status-pill ${
@@ -1280,10 +1578,74 @@ export default function PostDesignViewer({
                       <DcrBar label="Joint Shear DCR" value={selectedData.joint_shear_dcr} />
                     </>
                   )}
+                  {selectedEntity.type === "slab" && (
+                    <div className="pdv-kpi-grid" style={{ marginTop: 4 }}>
+                      <div className="pdv-kpi">
+                        <small>Thickness</small>
+                        <strong>{Number(selectedData.thickness_mm || 0).toFixed(0)} mm</strong>
+                      </div>
+                      <div className="pdv-kpi">
+                        <small>Aspect (Ly/Lx)</small>
+                        <strong>
+                          {(
+                            Math.max(selectedData.lx_m, selectedData.ly_m) /
+                            Math.max(0.1, Math.min(selectedData.lx_m, selectedData.ly_m))
+                          ).toFixed(2)}
+                        </strong>
+                      </div>
+                      <div className="pdv-kpi">
+                        <small>Short (+)</small>
+                        <strong>{selectedData.short_span_pos}</strong>
+                      </div>
+                      <div className="pdv-kpi">
+                        <small>Long (+)</small>
+                        <strong>{selectedData.long_span_pos}</strong>
+                      </div>
+                    </div>
+                  )}
+                  {selectedEntity.type === "retaining_wall" && (
+                    <>
+                      <DcrBar
+                        label="FS Overturning (>= 1.50)"
+                        value={Number(selectedData.fs_overturning || 0)}
+                        limit={1.5}
+                        invert
+                      />
+                      <DcrBar
+                        label="FS Sliding (>= 1.50)"
+                        value={Number(selectedData.fs_sliding || 0)}
+                        limit={1.5}
+                        invert
+                      />
+                      <DcrBar
+                        label={`Toe Bearing (${Number(selectedData.max_toe_bearing_kpa || 0).toFixed(0)} / ${Number(selectedData.allowable_bearing_kpa || 150).toFixed(0)} kPa)`}
+                        value={
+                          Number(selectedData.max_toe_bearing_kpa || 0) /
+                          Math.max(1, Number(selectedData.allowable_bearing_kpa || 150))
+                        }
+                      />
+                      <div className="pdv-kpi-grid" style={{ marginTop: 6 }}>
+                        <div className="pdv-kpi">
+                          <small>Ka / K0 / Kae</small>
+                          <strong>
+                            {Number(selectedData.ka || 0).toFixed(2)} / {Number(selectedData.k0 || 0).toFixed(2)} /{" "}
+                            {Number(selectedData.k_ae_seismic || 0).toFixed(2)}
+                          </strong>
+                        </div>
+                        <div className="pdv-kpi">
+                          <small>Stem Mu / Vu</small>
+                          <strong>
+                            {Number(selectedData.stem_mu_knm_per_m || 0).toFixed(1)} /{" "}
+                            {Number(selectedData.stem_vu_kn_per_m || 0).toFixed(1)}
+                          </strong>
+                        </div>
+                      </div>
+                    </>
+                  )}
                 </div>
 
                 {/* Quick Detailing Override */}
-                {selectedEntity.type !== "joint" && (
+                {!["joint", "slab", "retaining_wall"].includes(selectedEntity.type) && (
                   <div className="pdv-override-box">
                     <div className="pdv-override-title">Quick Detailing Override</div>
                     {selectedEntity.type === "beam" && (

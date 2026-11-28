@@ -1526,30 +1526,62 @@ export default function DesignReview({ project, onClose, onUpdated }) {
                         <th>Long Neg (-)</th>
                         <th>Long Pos (+)</th>
                         <th>Status</th>
+                        <th>Action</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {(ad?.slab_designs || []).map((s) => (
-                        <tr key={`${s.floor_level}-${s.panel_id}`}>
-                          <td><b>{s.panel_id}</b></td>
-                          <td>{s.floor_level}</td>
-                          <td>{s.lx_m.toFixed(2)} × {s.ly_m.toFixed(2)}</td>
-                          <td>{s.thickness_mm.toFixed(0)}</td>
-                          <td>{s.short_span_cont_neg}</td>
-                          <td>{s.short_span_disc_neg}</td>
-                          <td><b>{s.short_span_pos}</b></td>
-                          <td>{s.long_span_neg}</td>
-                          <td>{s.long_span_pos}</td>
-                          <td>
-                            <span className={`design-status-pill ${s.status === "PASS" ? "pass" : "fail"}`}>
-                              {s.status}
-                            </span>
-                          </td>
-                        </tr>
-                      ))}
+                      {(ad?.slab_designs || []).map((s) => {
+                        const isSel =
+                          studioSelection?.type === "slab" &&
+                          studioSelection.id === s.panel_id &&
+                          studioSelection.floor_level === s.floor_level;
+                        const selectSlab = () => {
+                          setStudioSelection({
+                            type: "slab",
+                            id: s.panel_id,
+                            floor_level: s.floor_level,
+                          });
+                          setActiveTab("util3d");
+                        };
+                        return (
+                          <tr
+                            key={`${s.floor_level}-${s.panel_id}`}
+                            className={isSel ? "selected" : ""}
+                            style={{ cursor: "pointer" }}
+                            onClick={selectSlab}
+                          >
+                            <td><b>{s.panel_id}</b></td>
+                            <td>{s.floor_level}</td>
+                            <td>{s.lx_m.toFixed(2)} × {s.ly_m.toFixed(2)}</td>
+                            <td>{s.thickness_mm.toFixed(0)}</td>
+                            <td>{s.short_span_cont_neg}</td>
+                            <td>{s.short_span_disc_neg}</td>
+                            <td><b>{s.short_span_pos}</b></td>
+                            <td>{s.long_span_neg}</td>
+                            <td>{s.long_span_pos}</td>
+                            <td>
+                              <span className={`design-status-pill ${s.status === "PASS" ? "pass" : "fail"}`}>
+                                {s.status}
+                              </span>
+                            </td>
+                            <td>
+                              <button
+                                type="button"
+                                className="secondary mini"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  selectSlab();
+                                }}
+                              >
+                                Preview
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })}
                       {!(ad?.slab_designs || []).length && (
                         <tr>
-                          <td colSpan={10} className="loads-empty">
+                          <td colSpan={11} className="loads-empty">
                             Run Analysis &amp; RC Design to auto-generate slab reinforcement schedules.
                           </td>
                         </tr>
@@ -1712,39 +1744,72 @@ export default function DesignReview({ project, onClose, onUpdated }) {
                     </tr>
                   </thead>
                   <tbody>
-                    {(ad?.retaining_wall_designs || []).map((r) => (
-                      <tr key={r.wall_id}>
-                        <td>
-                          <b>{r.wall_id}</b>
-                          {r.floor_level && (
-                            <div style={{ fontSize: "10px", opacity: 0.75 }}>
-                              {r.floor_level} · {r.backfill_side || "exterior"}
+                    {(ad?.retaining_wall_designs || []).map((r) => {
+                      const isSel =
+                        studioSelection?.type === "retaining_wall" &&
+                        studioSelection.id === r.wall_id;
+                      const selectRw = () => {
+                        setStudioSelection({ type: "retaining_wall", id: r.wall_id });
+                        setActiveTab("util3d");
+                      };
+                      return (
+                        <tr
+                          key={r.wall_id}
+                          className={isSel ? "selected" : ""}
+                          style={{ cursor: "pointer" }}
+                          onClick={selectRw}
+                        >
+                          <td>
+                            <b>{r.wall_id}</b>
+                            {r.floor_level && (
+                              <div style={{ fontSize: "10px", opacity: 0.75 }}>
+                                {r.floor_level} · {r.backfill_side || "exterior"}
+                              </div>
+                            )}
+                          </td>
+                          <td>{r.retained_height_m.toFixed(2)} × {r.total_length_m.toFixed(1)}</td>
+                          <td>{r.ka.toFixed(2)} / {r.k0.toFixed(2)} / {r.k_ae_seismic.toFixed(2)}</td>
+                          <td>{r.stem_mu_knm_per_m.toFixed(1)}</td>
+                          <td>{r.fs_overturning.toFixed(2)} / {r.fs_sliding.toFixed(2)}</td>
+                          <td>{r.max_toe_bearing_kpa.toFixed(1)}</td>
+                          <td><b>{r.stem_vertical_bars}</b></td>
+                          <td>{r.base_heel_toe_bars}</td>
+                          <td>
+                            <span className={`design-status-pill ${r.status === "PASS" ? "pass" : "fail"}`}>
+                              {r.status}
+                            </span>
+                          </td>
+                          <td>
+                            <div style={{ display: "inline-flex", gap: 4 }}>
+                              <button
+                                type="button"
+                                className="secondary mini"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  selectRw();
+                                }}
+                              >
+                                Preview
+                              </button>
+                              <button
+                                type="button"
+                                className="secondary mini"
+                                disabled={busy}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  deleteSecondary(
+                                    `retaining-walls/${encodeURIComponent(r.wall_id)}`,
+                                    `Removed wall ${r.wall_id}.`
+                                  );
+                                }}
+                              >
+                                Delete
+                              </button>
                             </div>
-                          )}
-                        </td>
-                        <td>{r.retained_height_m.toFixed(2)} × {r.total_length_m.toFixed(1)}</td>
-                        <td>{r.ka.toFixed(2)} / {r.k0.toFixed(2)} / {r.k_ae_seismic.toFixed(2)}</td>
-                        <td>{r.stem_mu_knm_per_m.toFixed(1)}</td>
-                        <td>{r.fs_overturning.toFixed(2)} / {r.fs_sliding.toFixed(2)}</td>
-                        <td>{r.max_toe_bearing_kpa.toFixed(1)}</td>
-                        <td><b>{r.stem_vertical_bars}</b></td>
-                        <td>{r.base_heel_toe_bars}</td>
-                        <td>
-                          <span className={`design-status-pill ${r.status === "PASS" ? "pass" : "fail"}`}>
-                            {r.status}
-                          </span>
-                        </td>
-                        <td>
-                          <button
-                            className="secondary mini"
-                            disabled={busy}
-                            onClick={() => deleteSecondary(`retaining-walls/${encodeURIComponent(r.wall_id)}`, `Removed wall ${r.wall_id}.`)}
-                          >
-                            Delete
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>

@@ -525,6 +525,31 @@ export default function MemberSizing({ project, onClose, onUpdated }) {
     }
   }
 
+  async function handleDeleteRetainingWall(wallId) {
+    if (!wallId) return;
+    setBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      const updatedAd = await apiJson(
+        `/api/projects/${pid}/design/retaining-walls/${encodeURIComponent(wallId)}`,
+        { method: "DELETE" }
+      );
+      setFullProject((prev) => (prev ? { ...prev, analysis_design: updatedAd } : prev));
+      setRwDrafts((prev) => {
+        const next = { ...prev };
+        delete next[wallId];
+        return next;
+      });
+      setNotice(`Deleted retaining wall ${wallId}.`);
+      if (onUpdated) await onUpdated();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function handleApprove() {
     setBusy(true);
     setError("");
@@ -1661,16 +1686,26 @@ export default function MemberSizing({ project, onClose, onUpdated }) {
                               )}
                             </td>
                             <td>
-                              {dirty && (
+                              <div style={{ display: "inline-flex", gap: 4 }}>
+                                {dirty && (
+                                  <button
+                                    type="button"
+                                    className="mini-btn on-approve"
+                                    disabled={busy}
+                                    onClick={() => handleSaveRetainingWall(rw)}
+                                  >
+                                    Save
+                                  </button>
+                                )}
                                 <button
                                   type="button"
-                                  className="mini-btn on-approve"
+                                  className="mini-btn on-reject"
                                   disabled={busy}
-                                  onClick={() => handleSaveRetainingWall(rw)}
+                                  onClick={() => handleDeleteRetainingWall(rw.wall_id)}
                                 >
-                                  Save
+                                  Delete
                                 </button>
-                              )}
+                              </div>
                             </td>
                           </tr>
                         );

@@ -170,6 +170,13 @@ export default function Member3DDetailViewer({
     if (entity.type === "combined_footing") {
       return `Combined Footing ${data.combined_id} · ${data.length_l_m.toFixed(2)}x${data.width_b_m.toFixed(2)}m x ${data.thickness_mm.toFixed(0)}mm · Top ${data.top_long_bars} / Bot ${data.bot_long_bars}`;
     }
+    if (entity.type === "slab") {
+      const act = data.slab_action === "one_way" ? "1-Way" : "2-Way";
+      return `Slab ${data.panel_id} (${data.floor_level}, ${act}) · ${Number(data.lx_m || 3).toFixed(2)}x${Number(data.ly_m || 4).toFixed(2)}m x ${Number(data.thickness_mm || 125).toFixed(0)}mm · Short(+) ${data.short_span_pos} / Long(+) ${data.long_span_pos}`;
+    }
+    if (entity.type === "retaining_wall") {
+      return `Retaining Wall ${data.wall_id} · H=${Number(data.retained_height_m || 2.8).toFixed(2)}m, B=${Number(data.base_width_m || 1.8).toFixed(2)}m, ts=${Number(data.stem_thickness_mm || 250).toFixed(0)}mm · ${data.stem_vertical_bars} / Base ${data.base_heel_toe_bars}`;
+    }
     return "";
   }, [entity, data]);
 
@@ -376,6 +383,111 @@ export default function Member3DDetailViewer({
 
       // Footing concrete pad
       drawBox3D(ctx, -hx, hx, yBot, yTop, -hz, hz, proj, concreteOpacity, "rgba(232,121,249,0.65)");
+    } else if (entity.type === "slab") {
+      const lx = Math.max(1.0, Math.min(8.0, Number(data.lx_m) || 3.5));
+      const ly = Math.max(1.0, Math.min(8.0, Number(data.ly_m) || 4.5));
+      const T = Math.max(0.10, (Number(data.thickness_mm) || 125) / 1000.0);
+      const isOneWay = data.slab_action === "one_way";
+      const cov = 0.025;
+      const scale = (Math.min(w, h) * 0.66 * zoom) / Math.max(lx, ly, 2.5);
+      const proj = (pt) => projectPt(pt, yaw, pitch, scale, cx, cy + 6);
+
+      const hx = lx * 0.5;
+      const hz = ly * 0.5;
+      const yBot = -T * 0.5;
+      const yTop = T * 0.5;
+      const yBarBot = yBot + cov;
+      const yBarTop = yTop - cov;
+
+      const sShort = parseRebarCallout(data.short_span_pos, { spacingMm: 150 });
+      const sLong = parseRebarCallout(data.long_span_pos, { spacingMm: isOneWay ? 250 : 175 });
+      const nShort = Math.max(5, Math.min(12, Math.round(ly / Math.max(0.15, sShort.spacingMm / 1000.0))));
+      const nLong = Math.max(4, Math.min(10, Math.round(lx / Math.max(0.18, sLong.spacingMm / 1000.0))));
+
+      // Bottom short-span main bars (along X)
+      for (let i = 0; i < nShort; i++) {
+        const z = -(hz - cov) + (i / Math.max(nShort - 1, 1)) * (2 * (hz - cov));
+        drawSeg3D(ctx, { x: -hx + cov, y: yBarBot, z }, { x: hx - cov, y: yBarBot, z }, proj, "#4ade80", 1.7);
+      }
+      // Bottom long-span / distribution bars (along Z)
+      for (let i = 0; i < nLong; i++) {
+        const x = -(hx - cov) + (i / Math.max(nLong - 1, 1)) * (2 * (hx - cov));
+        drawSeg3D(
+          ctx,
+          { x, y: yBarBot + 0.014, z: -hz + cov },
+          { x, y: yBarBot + 0.014, z: hz - cov },
+          proj,
+          "#38bdf8",
+          isOneWay ? 1.2 : 1.6
+        );
+      }
+      // Top negative-moment strips at supports (L/4 overhang into span)
+      const cutX = lx * 0.26;
+      for (let i = 0; i < Math.min(nShort, 8); i++) {
+        const z = -(hz - cov) + (i / Math.max(Math.min(nShort, 8) - 1, 1)) * (2 * (hz - cov));
+        drawSeg3D(ctx, { x: -hx + cov, y: yBarTop, z }, { x: -hx + cutX, y: yBarTop, z }, proj, "#facc15", 1.5);
+        drawSeg3D(ctx, { x: hx - cutX, y: yBarTop, z }, { x: hx - cov, y: yBarTop, z }, proj, "#facc15", 1.5);
+      }
+      if (!isOneWay) {
+        const cutZ = ly * 0.25;
+        for (let i = 0; i < Math.min(nLong, 7); i++) {
+          const x = -(hx - cov) + (i / Math.max(Math.min(nLong, 7) - 1, 1)) * (2 * (hx - cov));
+          drawSeg3D(ctx, { x, y: yBarTop - 0.012, z: -hz + cov }, { x, y: yBarTop - 0.012, z: -hz + cutZ }, proj, "#facc15", 1.4);
+          drawSeg3D(ctx, { x, y: yBarTop - 0.012, z: hz - cutZ }, { x, y: yBarTop - 0.012, z: hz - cov }, proj, "#facc15", 1.4);
+        }
+      }
+
+      // Concrete slab prism
+      drawBox3D(ctx, -hx, hx, yBot, yTop, -hz, hz, proj, concreteOpacity, "rgba(56,189,248,0.65)");
+    } else if (entity.type === "retaining_wall") {
+      const H = Math.max(1.0, Math.min(8.0, Number(data.retained_height_m) || 2.8));
+      const B = Math.max(0.8, Math.min(6.0, Number(data.base_width_m) || Math.max(1.2, 0.6 * H)));
+      const toe = Math.min(B * 0.6, Math.max(0.2, Number(data.toe_width_m) || 0.25 * B));
+      const tStem = Math.max(0.15, (Number(data.stem_thickness_mm) || 250) / 1000.0);
+      const tBase = Math.max(0.20, (Number(data.base_thickness_mm) || 300) / 1000.0);
+      const Lseg = Math.max(1.8, Math.min(4.0, Number(data.total_length_m) || 3.0));
+      const cov = 0.05;
+      const totalH = H + tBase;
+      const scale = (Math.min(w, h) * 0.64 * zoom) / Math.max(Lseg, B, totalH);
+      const proj = (pt) => projectPt(pt, yaw, pitch, scale, cx, cy + 8);
+
+      const hx = Lseg * 0.5;
+      const hz = B * 0.5;
+      const yBaseBot = -totalH * 0.5;
+      const yBaseTop = yBaseBot + tBase;
+      const yStemTop = yBaseTop + H;
+      const zStemMin = -hz + toe;
+      const zStemMax = Math.min(hz - 0.05, zStemMin + tStem);
+
+      const sVert = parseRebarCallout(data.stem_vertical_bars, { spacingMm: 150 });
+      const nVert = Math.max(6, Math.min(12, Math.round(Lseg / Math.max(0.15, sVert.spacingMm / 1000.0))));
+      const nHoriz = Math.max(5, Math.min(10, Math.round(H / 0.25)));
+
+      // Stem vertical main bars (backfill tension face + front face) with base hooks
+      for (let i = 0; i < nVert; i++) {
+        const x = -(hx - cov) + (i / Math.max(nVert - 1, 1)) * (2 * (hx - cov));
+        drawSeg3D(ctx, { x, y: yBaseBot + cov, z: zStemMax - cov * 0.5 }, { x, y: yStemTop - cov, z: zStemMax - cov * 0.5 }, proj, "#4ade80", 1.8);
+        drawSeg3D(ctx, { x, y: yBaseBot + cov, z: zStemMin + cov * 0.5 }, { x, y: yStemTop - cov, z: zStemMin + cov * 0.5 }, proj, "#38bdf8", 1.3);
+      }
+      // Stem horizontal distribution bars
+      for (let i = 0; i < nHoriz; i++) {
+        const y = yBaseTop + cov + (i / Math.max(nHoriz - 1, 1)) * Math.max(0.1, H - 2 * cov);
+        drawSeg3D(ctx, { x: -hx + cov, y, z: zStemMax - cov * 0.5 }, { x: hx - cov, y, z: zStemMax - cov * 0.5 }, proj, "#38bdf8", 1.2);
+      }
+      // Base slab heel/toe transverse & longitudinal mat
+      for (let i = 0; i < Math.min(nVert, 9); i++) {
+        const x = -(hx - cov) + (i / Math.max(Math.min(nVert, 9) - 1, 1)) * (2 * (hx - cov));
+        drawSeg3D(ctx, { x, y: yBaseTop - cov, z: -hz + cov }, { x, y: yBaseTop - cov, z: hz - cov }, proj, "#facc15", 1.5);
+        drawSeg3D(ctx, { x, y: yBaseBot + cov, z: -hz + cov }, { x, y: yBaseBot + cov, z: hz - cov }, proj, "#4ade80", 1.4);
+      }
+      for (let i = 0; i < 5; i++) {
+        const z = -(hz - cov) + (i / 4) * (2 * (hz - cov));
+        drawSeg3D(ctx, { x: -hx + cov, y: yBaseBot + cov + 0.02, z }, { x: hx - cov, y: yBaseBot + cov + 0.02, z }, proj, "#38bdf8", 1.2);
+      }
+
+      // Base & stem concrete volumes
+      drawBox3D(ctx, -hx, hx, yBaseBot, yBaseTop, -hz, hz, proj, concreteOpacity, "rgba(203,213,225,0.70)");
+      drawBox3D(ctx, -hx, hx, yBaseTop, yStemTop, zStemMin, zStemMax, proj, concreteOpacity, "rgba(203,213,225,0.75)");
     }
 
     // HUD caption bar at bottom of canvas (included in PNG snapshot!)
@@ -403,6 +515,10 @@ export default function Member3DDetailViewer({
         ? `3D Rebar Cage — Column M${data.member_id} (${data.section_id})`
         : entity.type === "combined_footing"
         ? `3D Rebar Cage — Combined Footing ${data.combined_id}`
+        : entity.type === "slab"
+        ? `3D Rebar Cage — Slab ${data.panel_id} (${data.floor_level})`
+        : entity.type === "retaining_wall"
+        ? `3D Rebar Cage — Retaining Wall ${data.wall_id}`
         : `3D Rebar Cage — Footing ${data.footing_tag} (N${data.node_id})`;
     onPinSnapshot(title, summaryCaption, dataUrl);
   }
