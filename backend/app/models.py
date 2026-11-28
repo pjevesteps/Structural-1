@@ -79,7 +79,15 @@ class AnalyticalMember(BaseModel):
     member_id: int = Field(ge=1)
     start_node: int = Field(ge=1)
     end_node: int = Field(ge=1)
-    member_type: Literal["column", "primary_beam", "secondary_beam", "tie_beam", "trimmer_beam"]
+    member_type: Literal[
+        "column",
+        "primary_beam",
+        "secondary_beam",
+        "tie_beam",
+        "trimmer_beam",
+        "cantilever_beam",
+        "edge_beam",
+    ]
     floor_level: str
     grid_ref: str = ""
     length_m: float = Field(ge=0.0)
@@ -135,7 +143,14 @@ class ManualBeamOverride(BaseModel):
     floor_level: str
     start_xyz_m: list[float] = Field(min_length=3, max_length=3)
     end_xyz_m: list[float] = Field(min_length=3, max_length=3)
-    member_type: Literal["primary_beam", "secondary_beam", "tie_beam", "trimmer_beam"] = "primary_beam"
+    member_type: Literal[
+        "primary_beam",
+        "secondary_beam",
+        "tie_beam",
+        "trimmer_beam",
+        "cantilever_beam",
+        "edge_beam",
+    ] = "primary_beam"
     grid_ref: str = "MANUAL"
 
 

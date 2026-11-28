@@ -2679,3 +2679,175 @@ def test_p3_diagonal_beam_detection_manual_and_module03_transfer(isolated_env):
         if m["member_type"] == "primary_beam" and m["length_m"] == pytest.approx(7.5, abs=0.25)
     ]
     assert len(diag_members) >= 1, f"Expected transferred diagonal beam in Module 03 members: {sm['members']}"
+
+
+def test_cantilever_and_edge_beam_module02_to_module03_synthesis_and_validation(isolated_env):
+    """
+    Verify Cantilever Beam & Edge Beam end-to-end:
+    1. Module 02 accepts cantilever_beam and edge_beam via POST /candidates/beams.
+    2. Pre-flight diagnostics does NOT flag an anchored cantilever_beam as disconnected_beam,
+       but DOES flag a cantilever_beam where NEITHER endpoint is near a column/grid.
+    3. Transfer writes cantilever_beam and edge_beam ManualBeamOverride entries with preserved member_type.
+    4. Module 03 generate_structural_model() synthesizes free-end cantilever tip nodes (reusing corner tips
+       without duplicates), connects the overhang edge_beam between synthesized tips, keeps synthesized tips
+       from forming unintended interior slab panels, and passes validate_structural_model() with 0 errors.
+    """
+    client, _ = isolated_env
+    pid = "TEST-CANTILEVER-EDGE"
+    assert client.post("/api/projects", json=_make_sample_project(pid)).status_code == 200
+
+    d = pymupdf.open()
+    pg = d.new_page(width=600, height=450)
+    pg.insert_text((30, 30), "SECOND FLOOR PLAN", fontsize=12)
+    pdf_bytes = d.tobytes()
+    d.close()
+
+    up = client.post(
+        f"/api/projects/{pid}/pdf-imports",
+        files={"file": ("cantilever_plan.pdf", pdf_bytes, "application/pdf")},
+    )
+    assert up.status_code == 200, up.text
+    doc_id = up.json()["doc_id"]
+
+    # Calibrate at 50 px/m (300 px = 6.0 m), origin at (100, 350)
+    assert (
+        client.post(
+            f"/api/projects/{pid}/pdf-imports/{doc_id}/pages/1/calibrate",
+            json={
+                "p1": {"x_px": 100.0, "y_px": 350.0},
+                "p2": {"x_px": 400.0, "y_px": 350.0},
+                "known_distance": 6.0,
+                "unit": "m",
+                "confirmed": True,
+            },
+        ).status_code
+        == 200
+    )
+
+    # 2x2 grid: A=100 (0m), B=400 (6m), 1=350 (0m), 2=150 (4m) + 4 columns
+    for axis, label, coord_px in [("x", "A", 100.0), ("x", "B", 400.0), ("y", "1", 350.0), ("y", "2", 150.0)]:
+        assert (
+            client.post(
+                f"/api/projects/{pid}/pdf-imports/{doc_id}/candidates/grids",
+                json={"page_number": 1, "axis": axis, "label": label, "coord_px": coord_px, "status": "approved"},
+            ).status_code
+            == 200
+        )
+    for cid, gx, gy, gref in [
+        ("C1", 100.0, 350.0, "A-1"),
+        ("C2", 400.0, 350.0, "B-1"),
+        ("C3", 100.0, 150.0, "A-2"),
+        ("C4", 400.0, 150.0, "B-2"),
+    ]:
+        assert (
+            client.post(
+                f"/api/projects/{pid}/pdf-imports/{doc_id}/candidates/columns",
+                json={
+                    "page_number": 1,
+                    "column_id": cid,
+                    "grid": gref,
+                    "x_px": gx,
+                    "y_px": gy,
+                    "status": "approved",
+                },
+            ).status_code
+            == 200
+        )
+
+    # Add two 1.5 m (+75 px) cantilever beams projecting east from B-1 (400, 350) -> (475, 350) and B-2 (400, 150) -> (475, 150)
+    for x1, y1, x2, y2, mtype in [
+        (400.0, 350.0, 475.0, 350.0, "cantilever_beam"),
+        (400.0, 150.0, 475.0, 150.0, "cantilever_beam"),
+    ]:
+        r = client.post(
+            f"/api/projects/{pid}/pdf-imports/{doc_id}/candidates/beams",
+            json={
+                "page_number": 1,
+                "x1_px": x1,
+                "y1_px": y1,
+                "x2_px": x2,
+                "y2_px": y2,
+                "member_type": mtype,
+                "status": "approved",
+            },
+        )
+        assert r.status_code == 200, r.text
+
+    # Pre-flight diagnostics MUST NOT flag anchored cantilever beams as disconnected_beam
+    diag1 = client.get(f"/api/projects/{pid}/pdf-imports/{doc_id}/pages/1/diagnostics")
+    assert diag1.status_code == 200, diag1.text
+    codes1 = {iss["code"] for iss in diag1.json()["issues"]}
+    assert "disconnected_beam" not in codes1
+
+    # Add a truly unanchored cantilever (neither end near any column/grid) -> MUST be flagged
+    bad_cant = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/candidates/beams",
+        json={
+            "page_number": 1,
+            "x1_px": 240.0,
+            "y1_px": 250.0,
+            "x2_px": 300.0,
+            "y2_px": 250.0,
+            "member_type": "cantilever_beam",
+            "status": "pending",
+        },
+    )
+    assert bad_cant.status_code == 200
+    bad_id = bad_cant.json()["beam_candidates"][-1]["id"]
+    diag2 = client.get(f"/api/projects/{pid}/pdf-imports/{doc_id}/pages/1/diagnostics")
+    assert "disconnected_beam" in {iss["code"] for iss in diag2.json()["issues"]}
+    # Delete the unanchored test cantilever
+    assert client.delete(f"/api/projects/{pid}/pdf-imports/{doc_id}/elements/{bad_id}").status_code == 200
+
+    # Add an edge_beam connecting the two cantilever tips (475, 350) -> (475, 150)
+    edge_res = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/candidates/beams",
+        json={
+            "page_number": 1,
+            "x1_px": 475.0,
+            "y1_px": 350.0,
+            "x2_px": 475.0,
+            "y2_px": 150.0,
+            "member_type": "edge_beam",
+            "status": "approved",
+        },
+    )
+    assert edge_res.status_code == 200, edge_res.text
+
+    # Transfer to project -> preserves cantilever_beam and edge_beam member_type in manual_beams
+    tr = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/transfer",
+        json={"page_number": 1, "merge_mode": "replace_geometry"},
+    )
+    assert tr.status_code == 200, tr.text
+    mbs = tr.json()["project"]["structural_model"]["manual_beams"]
+    assert any(mb["member_type"] == "cantilever_beam" for mb in mbs)
+    assert any(mb["member_type"] == "edge_beam" for mb in mbs)
+
+    # Generate Module 03 3D structural model -> synthesizes tip nodes at x=7.5 m, connects edge_beam, 0 errors
+    gen = client.post(f"/api/projects/{pid}/geometry/generate", json={})
+    assert gen.status_code == 200, gen.text
+    sm = gen.json()
+
+    cant_members = [m for m in sm["members"] if m["member_type"] == "cantilever_beam"]
+    edge_members = [m for m in sm["members"] if m["member_type"] == "edge_beam"]
+    assert len(cant_members) >= 2
+    assert len(edge_members) >= 1
+    assert all(m["length_m"] == pytest.approx(1.5, abs=0.05) for m in cant_members)
+    assert all(m["length_m"] == pytest.approx(4.0, abs=0.05) for m in edge_members)
+
+    # Synthesized tip nodes at x = 7.5 m exist without duplicates, and validation has 0 errors
+    tip_nodes = [n for n in sm["nodes"] if abs(n["x_m"] - 7.5) < 0.05]
+    assert len(tip_nodes) >= 2
+    errors = [iss for iss in sm["validation_issues"] if iss["severity"] == "error"]
+    assert errors == [], f"Unexpected validation errors: {errors}"
+
+    # Synthesized cantilever tips MUST NOT create unintended interior slab panels (only the 1 main 6x4m bay per elevated floor)
+    panels = sm["slab_panels"]
+    assert all(p["lx_m"] == pytest.approx(6.0, abs=0.1) for p in panels)
+
+    # Regenerating again must remain idempotent (no duplicate tip nodes)
+    gen2 = client.post(f"/api/projects/{pid}/geometry/generate", json={})
+    assert gen2.status_code == 200
+    assert len(gen2.json()["nodes"]) == len(sm["nodes"])
+    assert len(gen2.json()["members"]) == len(sm["members"])

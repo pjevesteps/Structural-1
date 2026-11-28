@@ -2768,7 +2768,11 @@ def get_preflight_diagnostics(
                 continue
             d1 = min(math.hypot(bm.x1_px - ax, bm.y1_px - ay) for ax, ay in anchor_pts)
             d2 = min(math.hypot(bm.x2_px - ax, bm.y2_px - ay) for ax, ay in anchor_pts)
-            if d1 > beam_tol_px or d2 > beam_tol_px:
+            if bm.member_type == "cantilever_beam":
+                # Cantilever beams only require one anchored support end; flag only if NEITHER end is anchored
+                if d1 > beam_tol_px and d2 > beam_tol_px:
+                    disconnected_ids.append(bm.id)
+            elif d1 > beam_tol_px or d2 > beam_tol_px:
                 disconnected_ids.append(bm.id)
         if disconnected_ids:
             issues.append(

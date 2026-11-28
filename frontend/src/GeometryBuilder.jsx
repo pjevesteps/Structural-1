@@ -6,6 +6,8 @@ const MEMBER_COLORS = {
   secondary_beam: "#f59e0b",
   tie_beam: "#f59e0b",
   trimmer_beam: "#fb923c",
+  cantilever_beam: "#ec4899",
+  edge_beam: "#2dd4bf",
 };
 
 const OPENING_COLORS = {
@@ -45,6 +47,7 @@ function project3D(pt, center, yaw, pitch, scale, width, height) {
 export default function GeometryBuilder({ project, onClose, onUpdated }) {
   const pid = encodeURIComponent(project.project_id);
   const canvasRef = useRef(null);
+  const svg2dRef = useRef(null);
   const orbitRef = useRef({ dragging: false, lastX: 0, lastY: 0 });
 
   const [fullProject, setFullProject] = useState(null);
@@ -69,6 +72,8 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
   const [addBeamType, setAddBeamType] = useState("primary_beam");
   const [replicateAllFloors, setReplicateAllFloors] = useState(false);
   const [beamStartNodeId, setBeamStartNodeId] = useState(null);
+  const [cantileverLenM, setCantileverLenM] = useState("1.5");
+  const [cantileverDir, setCantileverDir] = useState("+X");
   const [selectedEntity, setSelectedEntity] = useState(null);
   const [selectedIssueIdx, setSelectedIssueIdx] = useState(null);
 
@@ -409,26 +414,35 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
     }
   }
 
-  async function handleAddBeam(startNid, endNid) {
+  async function handleAddBeam(startNid, endNid, endXyzM = null) {
     setBusy(true);
     setError("");
     const prevCount = (model.members || []).length;
     try {
+      const payload = {
+        start_node: startNid,
+        member_type: addBeamType,
+        floor_level: activeFloor,
+        replicate_all_floors: replicateAllFloors,
+      };
+      if (endNid !== null && endNid !== undefined) {
+        payload.end_node = endNid;
+      } else if (Array.isArray(endXyzM) && endXyzM.length === 3) {
+        payload.end_xyz_m = endXyzM;
+      }
       const updated = await apiJson(`/api/projects/${pid}/geometry/members`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          start_node: startNid,
-          end_node: endNid,
-          member_type: addBeamType,
-          floor_level: activeFloor,
-          replicate_all_floors: replicateAllFloors,
-        }),
+        body: JSON.stringify(payload),
       });
       const addedCount = Math.max(1, (updated.members || []).length - prevCount);
       await applyModelUpdate(
         updated,
-        replicateAllFloors && addedCount > 1
+        endXyzM
+          ? `Added ${addBeamType} from N${startNid} to (${endXyzM[0].toFixed(2)}, ${endXyzM[2].toFixed(2)}) m${
+              replicateAllFloors && addedCount > 1 ? ` across ${addedCount} floor(s)` : ""
+            }.`
+          : replicateAllFloors && addedCount > 1
           ? `Added ${addBeamType} N${startNid}→N${endNid} and replicated across ${addedCount} matching floor(s).`
           : `Added ${addBeamType} from N${startNid} to N${endNid}.`
       );
@@ -672,9 +686,13 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
             ? "#f59e0b"
             : member.is_pedestal
               ? "#6366f1"
-              : member.manual_override
-                ? "#c084fc"
-                : MEMBER_COLORS[member.member_type] || "#45c9a8";
+              : member.member_type === "cantilever_beam"
+                ? MEMBER_COLORS.cantilever_beam
+                : member.member_type === "edge_beam"
+                  ? MEMBER_COLORS.edge_beam
+                  : member.manual_override
+                    ? "#c084fc"
+                    : MEMBER_COLORS[member.member_type] || "#45c9a8";
       ctx.lineWidth = isDupMem
         ? 5.0
         : isPrimMem || isWarnMem
@@ -869,7 +887,59 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
     };
   }
 
-  function handleNode2DClick(node) {
+  function fromSvg2D(e) {
+    const svg = svg2dRef.current;
+    if (!svg) return null;
+    const rect = svg.getBoundingClientRect();
+    if (!rect.width || !rect.height) return null;
+    const W = 640;
+    const H = 440;
+    const sx = ((e.clientX - rect.left) / rect.width) * W;
+    const sy = ((e.clientY - rect.top) / rect.height) * H;
+    const { minX, maxX, minZ, maxZ } = floorData.bounds;
+    const spanX = Math.max(maxX - minX, 1);
+    const spanZ = Math.max(maxZ - minZ, 1);
+    const scale = Math.min((W - 60) / spanX, (H - 60) / spanZ);
+    const ox = (W - spanX * scale) * 0.5;
+    const oy = (H - spanZ * scale) * 0.5;
+    return {
+      x_m: Number((minX + (sx - ox) / scale).toFixed(3)),
+      z_m: Number((minZ + (H - sy - oy) / scale).toFixed(3)),
+    };
+  }
+
+  function handleSvg2DClick(e) {
+    if (busy) return;
+    if (editorMode !== "add_beam" || addBeamType !== "cantilever_beam" || beamStartNodeId === null) {
+      return;
+    }
+    const startNode = nodeMap.get(beamStartNodeId);
+    if (!startNode) return;
+    const pt = fromSvg2D(e);
+    if (!pt) return;
+    handleAddBeam(beamStartNodeId, null, [pt.x_m, startNode.y_m, pt.z_m]);
+  }
+
+  function handlePlaceDirectionalCantilever() {
+    if (busy || beamStartNodeId === null) return;
+    const startNode = nodeMap.get(beamStartNodeId);
+    if (!startNode) return;
+    const len = parseFloat(cantileverLenM);
+    if (!Number.isFinite(len) || len < 0.05 || len > 6.0) {
+      setError("Enter a cantilever overhang length between 0.05 m and 6.0 m.");
+      return;
+    }
+    let tx = startNode.x_m;
+    let tz = startNode.z_m;
+    if (cantileverDir === "+X") tx += len;
+    else if (cantileverDir === "-X") tx -= len;
+    else if (cantileverDir === "+Z") tz += len;
+    else if (cantileverDir === "-Z") tz -= len;
+    handleAddBeam(beamStartNodeId, null, [Number(tx.toFixed(4)), startNode.y_m, Number(tz.toFixed(4))]);
+  }
+
+  function handleNode2DClick(node, e) {
+    if (e) e.stopPropagation();
     if (busy) return;
     if (editorMode === "toggle_support") {
       // When footing pedestals exist below grade, toggle support on the underlying footing node
@@ -1103,6 +1173,12 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
                   <i style={{ background: "#f59e0b" }} /> Tie / Secondary Beams
                 </span>
                 <span>
+                  <i style={{ background: "#ec4899" }} /> Cantilever Beams
+                </span>
+                <span>
+                  <i style={{ background: "#2dd4bf" }} /> Edge Beams
+                </span>
+                <span>
                   <i style={{ background: "#c084fc" }} /> Manual / Diagonal Beams
                 </span>
                 {((parseFloat(footingDepth) || 0) > 0 ||
@@ -1203,6 +1279,8 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
                       <option value="secondary_beam">Secondary Beam</option>
                       <option value="trimmer_beam">Trimmer Beam</option>
                       <option value="tie_beam">Tie Beam</option>
+                      <option value="cantilever_beam">Cantilever Beam</option>
+                      <option value="edge_beam">Edge Beam</option>
                     </select>
                   </label>
                   <label className="pdf-check-chip">
@@ -1213,15 +1291,63 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
                     />
                     <span>Replicate to matching floors</span>
                   </label>
+                  {addBeamType === "cantilever_beam" && beamStartNodeId !== null && (
+                    <>
+                      <label className="pdf-field-chip">
+                        <span>Dir</span>
+                        <select
+                          className="pdf-select"
+                          aria-label="Cantilever direction"
+                          value={cantileverDir}
+                          onChange={(e) => setCantileverDir(e.target.value)}
+                        >
+                          <option value="+X">+X</option>
+                          <option value="-X">-X</option>
+                          <option value="+Z">+Z</option>
+                          <option value="-Z">-Z</option>
+                        </select>
+                      </label>
+                      <label className="pdf-field-chip">
+                        <span>Overhang (m)</span>
+                        <input
+                          type="number"
+                          step="0.1"
+                          min="0.1"
+                          max="6.0"
+                          aria-label="Cantilever overhang length"
+                          value={cantileverLenM}
+                          onChange={(e) => setCantileverLenM(e.target.value)}
+                          style={{ width: 64 }}
+                        />
+                      </label>
+                      <button
+                        type="button"
+                        className="mini-btn on-approve"
+                        disabled={busy}
+                        onClick={handlePlaceDirectionalCantilever}
+                      >
+                        Place Cantilever
+                      </button>
+                    </>
+                  )}
                   <small className="pdf-hint">
                     {beamStartNodeId
-                      ? `Selected start N${beamStartNodeId} — click target node.`
-                      : "Click start node, then click end node."}
+                      ? addBeamType === "cantilever_beam"
+                        ? `Support N${beamStartNodeId} selected — click overhang tip on 2D plan or use Place Cantilever.`
+                        : `Selected start N${beamStartNodeId} — click target node.`
+                      : addBeamType === "cantilever_beam"
+                        ? "Click support node, then click overhang tip on 2D plan (or enter length)."
+                        : "Click start node, then click end node."}
                   </small>
                 </div>
               )}
 
-              <svg className="geom-svg-2d" viewBox="0 0 640 440">
+              <svg
+                ref={svg2dRef}
+                className="geom-svg-2d"
+                viewBox="0 0 640 440"
+                onClick={handleSvg2DClick}
+              >
                 {/* Grid lines */}
                 {(fullProject?.grids?.x_grids || []).map((g) => {
                   const p1 = toSvg2D(g.coord_m, floorData.bounds.minZ);
@@ -1317,9 +1443,14 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
                   if (!na || !nb) return null;
                   const pa = toSvg2D(na.x_m, na.z_m);
                   const pb = toSvg2D(nb.x_m, nb.z_m);
-                  const col = m.manual_override
-                    ? "#c084fc"
-                    : MEMBER_COLORS[m.member_type] || "#45c9a8";
+                  const col =
+                    m.member_type === "cantilever_beam"
+                      ? MEMBER_COLORS.cantilever_beam
+                      : m.member_type === "edge_beam"
+                        ? MEMBER_COLORS.edge_beam
+                        : m.manual_override
+                          ? "#c084fc"
+                          : MEMBER_COLORS[m.member_type] || "#45c9a8";
                   const isSel = selectedEntity?.type === "member" && selectedEntity.data.member_id === m.member_id;
                   const isDupMem = issueHighlight.duplicateMembers.has(m.member_id);
                   const isPrimMem = issueHighlight.primaryMembers.has(m.member_id);
@@ -1390,7 +1521,7 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
                     <g
                       key={n.node_id}
                       className="geom-clickable"
-                      onClick={() => handleNode2DClick(n)}
+                      onClick={(ev) => handleNode2DClick(n, ev)}
                     >
                       {hiCol && (
                         <circle

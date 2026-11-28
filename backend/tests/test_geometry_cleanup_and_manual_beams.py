@@ -426,3 +426,67 @@ def test_single_upper_floor_column_import_still_generates_gf_tie_beams_and_pedes
     assert len(gf_tie_beams) == 4
 
 
+def test_geometry_add_cantilever_via_end_xyz_and_edge_beam_survives_regeneration(isolated_env):
+    """
+    Verify POST /geometry/members supports creating a cantilever_beam from an existing start_node
+    to a free-end tip coordinate end_xyz_m (synthesizing the tip node cleanly), adding an edge_beam
+    between two cantilever tips, and retaining both across regenerate + validate.
+    """
+    client = isolated_env
+    pid = "TEST-CANTILEVER-API"
+    storage.save_project(ProjectState.model_validate(_make_2x2_project(pid)))
+
+    gen = client.post(f"/api/projects/{pid}/geometry/generate", json={})
+    assert gen.status_code == 200, gen.text
+    sm0 = gen.json()
+    top_nodes = [n for n in sm0["nodes"] if n["floor_level"] == "2F"]
+    n_b1 = next(n for n in top_nodes if abs(n["x_m"] - 5.0) < 0.01 and abs(n["z_m"] - 0.0) < 0.01)
+    n_b2 = next(n for n in top_nodes if abs(n["x_m"] - 5.0) < 0.01 and abs(n["z_m"] - 4.0) < 0.01)
+
+    # Create two 1.5 m cantilevers projecting to x = 6.5 m
+    c1 = client.post(
+        f"/api/projects/{pid}/geometry/members",
+        json={
+            "start_node": n_b1["node_id"],
+            "end_xyz_m": [6.5, 3.0, 0.0],
+            "member_type": "cantilever_beam",
+            "floor_level": "2F",
+        },
+    )
+    assert c1.status_code == 200, c1.text
+    c2 = client.post(
+        f"/api/projects/{pid}/geometry/members",
+        json={
+            "start_node": n_b2["node_id"],
+            "end_xyz_m": [6.5, 3.0, 4.0],
+            "member_type": "cantilever_beam",
+            "floor_level": "2F",
+        },
+    )
+    assert c2.status_code == 200, c2.text
+    sm_after_cant = c2.json()
+    tip1 = next(n for n in sm_after_cant["nodes"] if abs(n["x_m"] - 6.5) < 0.01 and abs(n["z_m"] - 0.0) < 0.01)
+    tip2 = next(n for n in sm_after_cant["nodes"] if abs(n["x_m"] - 6.5) < 0.01 and abs(n["z_m"] - 4.0) < 0.01)
+
+    # Connect the two cantilever tips with an edge_beam
+    eb = client.post(
+        f"/api/projects/{pid}/geometry/members",
+        json={
+            "start_node": tip1["node_id"],
+            "end_node": tip2["node_id"],
+            "member_type": "edge_beam",
+            "floor_level": "2F",
+        },
+    )
+    assert eb.status_code == 200, eb.text
+
+    # Regenerate -> both cantilevers and the tip-to-tip edge_beam survive with 0 validation errors
+    regen = client.post(f"/api/projects/{pid}/geometry/generate", json={})
+    assert regen.status_code == 200, regen.text
+    sm_regen = regen.json()
+    assert len([m for m in sm_regen["members"] if m["member_type"] == "cantilever_beam"]) == 2
+    assert len([m for m in sm_regen["members"] if m["member_type"] == "edge_beam"]) == 1
+    assert [i for i in sm_regen["validation_issues"] if i["severity"] == "error"] == []
+
+
+

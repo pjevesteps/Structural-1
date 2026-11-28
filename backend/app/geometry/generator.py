@@ -563,30 +563,54 @@ def generate_structural_model(
                 )
             )
 
-    # 3b. Replay saved coordinate-anchored manual & diagonal beams so regenerations never wipe user overrides
+    # 3b. Replay saved coordinate-anchored manual, diagonal, cantilever & edge beams
+    # Process cantilever_beam overrides first so any synthesized overhang corner tip nodes exist
+    # before edge_beam overrides connecting those tips are replayed.
     replay_xz_tol = max(tol, 0.25)
     replay_y_tol = 0.10
-    for mb in saved_manual_beams:
+    max_cantilever_m = 6.0
+    synthesized_tip_node_ids: set[int] = set()
+    ordered_manual_beams = sorted(
+        saved_manual_beams,
+        key=lambda mb: 0 if mb.member_type == "cantilever_beam" else 1,
+    )
+
+    def _find_matching_node(px: float, py: float, pz: float) -> AnalyticalNode | None:
+        return min(
+            (
+                n
+                for n in nodes
+                if hypot(n.x_m - px, n.z_m - pz) <= replay_xz_tol and abs(n.y_m - py) <= replay_y_tol
+            ),
+            key=lambda n: hypot(n.x_m - px, n.z_m - pz) + abs(n.y_m - py),
+            default=None,
+        )
+
+    for mb in ordered_manual_beams:
         sx, sy, sz = mb.start_xyz_m
         ex, ey, ez = mb.end_xyz_m
-        na = min(
-            (
-                n
-                for n in nodes
-                if hypot(n.x_m - sx, n.z_m - sz) <= replay_xz_tol and abs(n.y_m - sy) <= replay_y_tol
-            ),
-            key=lambda n: hypot(n.x_m - sx, n.z_m - sz) + abs(n.y_m - sy),
-            default=None,
-        )
-        nb = min(
-            (
-                n
-                for n in nodes
-                if hypot(n.x_m - ex, n.z_m - ez) <= replay_xz_tol and abs(n.y_m - ey) <= replay_y_tol
-            ),
-            key=lambda n: hypot(n.x_m - ex, n.z_m - ez) + abs(n.y_m - ey),
-            default=None,
-        )
+        na = _find_matching_node(sx, sy, sz)
+        nb = _find_matching_node(ex, ey, ez)
+
+        # Synthesize free-end cantilever tip node when exactly one endpoint matches an existing node
+        if (na is None) ^ (nb is None):
+            anchor = na if na is not None else nb
+            assert anchor is not None
+            tip_x, tip_y, tip_z = (ex, ey, ez) if na is not None else (sx, sy, sz)
+            overhang_m = hypot(tip_x - anchor.x_m, tip_z - anchor.z_m)
+            if 0.05 <= overhang_m <= max_cantilever_m and (
+                mb.member_type == "cantilever_beam" or abs(tip_y - anchor.y_m) <= replay_y_tol
+            ):
+                prev_count = len(nodes)
+                tip_nid = get_or_create_node(tip_x, anchor.y_m, tip_z, anchor.floor_level, "")
+                tip_node = next(n for n in nodes if n.node_id == tip_nid)
+                if len(nodes) > prev_count:
+                    synthesized_tip_node_ids.add(tip_nid)
+                if na is None:
+                    na = tip_node
+                else:
+                    nb = tip_node
+
         if na is None or nb is None or na.node_id == nb.node_id:
             continue
         pair = (min(na.node_id, nb.node_id), max(na.node_id, nb.node_id))
@@ -601,7 +625,12 @@ def generate_structural_model(
         fl_id = na.floor_level or mb.floor_level
         gref = mb.grid_ref or f"{na.grid_ref}-{nb.grid_ref}".strip("-") or "MANUAL"
         seen_member_pairs.add(pair)
-        if na.floor_level == nb.floor_level and fl_id in level_beam_edges:
+        if (
+            na.floor_level == nb.floor_level
+            and fl_id in level_beam_edges
+            and na.node_id not in synthesized_tip_node_ids
+            and nb.node_id not in synthesized_tip_node_ids
+        ):
             level_beam_edges[fl_id].add(pair)
         members.append(
             AnalyticalMember(
@@ -624,7 +653,9 @@ def generate_structural_model(
                 continue
             if not opts.include_roof_slab and _is_roof_framing_level_id(lv.id):
                 continue
-            lv_nodes = [n for n in nodes if n.floor_level == lv.id]
+            lv_nodes = [
+                n for n in nodes if n.floor_level == lv.id and n.node_id not in synthesized_tip_node_ids
+            ]
             beam_edges = level_beam_edges.get(lv.id, set())
             if len(lv_nodes) < 4 or len(beam_edges) < 4:
                 continue

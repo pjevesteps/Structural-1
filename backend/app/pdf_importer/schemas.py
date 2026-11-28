@@ -18,7 +18,14 @@ SheetType = Literal[
 OpeningCategory = Literal["stairwell", "airwell", "shaft_other"]
 RegionType = Literal["plan", "elevation"]
 CadLayerCategory = Literal["structural", "grid", "opening", "architectural", "annotation", "other"]
-BeamMemberType = Literal["primary_beam", "secondary_beam", "tie_beam", "trimmer_beam"]
+BeamMemberType = Literal[
+    "primary_beam",
+    "secondary_beam",
+    "tie_beam",
+    "trimmer_beam",
+    "cantilever_beam",
+    "edge_beam",
+]
 DetectionMethod = Literal["auto", "vector", "raster", "vlm"]
 CandidateSource = Literal["vector", "raster", "manual", "vlm", "cad"]
 ColumnFillMode = Literal["shaded_or_hatched", "gray_shaded_only", "any_filled"]

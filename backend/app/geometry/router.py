@@ -26,7 +26,16 @@ class AddMemberRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     start_node: int | None = Field(default=None, ge=1)
     end_node: int | None = Field(default=None, ge=1)
-    member_type: Literal["column", "primary_beam", "secondary_beam", "tie_beam", "trimmer_beam"] = "primary_beam"
+    end_xyz_m: list[float] | None = Field(default=None, min_length=3, max_length=3)
+    member_type: Literal[
+        "column",
+        "primary_beam",
+        "secondary_beam",
+        "tie_beam",
+        "trimmer_beam",
+        "cantilever_beam",
+        "edge_beam",
+    ] = "primary_beam"
     floor_level: str = ""
     grid_ref: str = ""
     replicate_all_floors: bool = False
@@ -199,10 +208,50 @@ def add_member(project_id: str, payload: AddMemberRequest):
     if end_nid is None and payload.split_end_member_id is not None:
         end_nid = _split_member_for_node(model, payload.split_end_member_id, payload.split_end_ratio)
 
+    # Support cantilever / free-end beam creation from start_node to end_xyz_m
+    if start_nid is not None and end_nid is None and payload.end_xyz_m is not None:
+        anchor = next((n for n in model.nodes if n.node_id == start_nid), None)
+        if anchor is None:
+            raise HTTPException(status_code=404, detail="Start node not found in structural model.")
+        tx, ty, tz = payload.end_xyz_m
+        overhang = hypot(tx - anchor.x_m, tz - anchor.z_m)
+        if overhang < 0.05 or overhang > 6.0:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cantilever overhang length ({overhang:.2f} m) must be between 0.05 m and 6.0 m.",
+            )
+        snap_tol = max(model.options.snap_tolerance_m, 0.05)
+        existing_tip = next(
+            (
+                n
+                for n in model.nodes
+                if n.floor_level == anchor.floor_level
+                and hypot(n.x_m - tx, n.z_m - tz) <= snap_tol
+            ),
+            None,
+        )
+        if existing_tip is not None:
+            end_nid = existing_tip.node_id
+        else:
+            new_nid = max((n.node_id for n in model.nodes), default=0) + 1
+            model.nodes.append(
+                AnalyticalNode(
+                    node_id=new_nid,
+                    x_m=round(tx, 4),
+                    y_m=round(anchor.y_m, 4),
+                    z_m=round(tz, 4),
+                    floor_level=anchor.floor_level,
+                    grid_ref="",
+                    is_support=False,
+                    support_type="NONE",
+                )
+            )
+            end_nid = new_nid
+
     if start_nid is None or end_nid is None:
         raise HTTPException(
             status_code=400,
-            detail="Provide start_node and end_node (or split_start_member_id / split_end_member_id).",
+            detail="Provide start_node and end_node (or end_xyz_m / split_start_member_id / split_end_member_id).",
         )
     if start_nid == end_nid:
         raise HTTPException(status_code=400, detail="Start and end nodes must differ.")
@@ -270,6 +319,22 @@ def add_member(project_id: str, payload: AddMemberRequest):
                 key=lambda n: hypot(n.x_m - nb.x_m, n.z_m - nb.z_m),
                 default=None,
             )
+            if oa is not None and ob is None and (
+                payload.member_type == "cantilever_beam" or payload.end_xyz_m is not None
+            ):
+                new_nid = max((n.node_id for n in model.nodes), default=0) + 1
+                ob = AnalyticalNode(
+                    node_id=new_nid,
+                    x_m=round(oa.x_m + (nb.x_m - na.x_m), 4),
+                    y_m=round(oa.y_m, 4),
+                    z_m=round(oa.z_m + (nb.z_m - na.z_m), 4),
+                    floor_level=other_floor,
+                    grid_ref="",
+                    is_support=False,
+                    support_type="NONE",
+                )
+                model.nodes.append(ob)
+                floor_nodes.append(ob)
             if oa is None or ob is None or oa.node_id == ob.node_id:
                 continue
             opair = (min(oa.node_id, ob.node_id), max(oa.node_id, ob.node_id))

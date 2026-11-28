@@ -181,8 +181,10 @@ def auto_size_members(
         b = _round_up(req_b, inc)
         return b, h
 
-    # 2a. Primary beams -> B1, B2, ... (sorted descending by depth, then width)
-    primary_beams = [m for m in model.members if m.member_type == "primary_beam"]
+    # 2a. Primary, cantilever & edge beams -> B1, B2, ... (sorted descending by depth, then width)
+    primary_beams = [
+        m for m in model.members if m.member_type in ("primary_beam", "cantilever_beam", "edge_beam")
+    ]
     if primary_beams:
         min_b_primary = 250.0 if opts.seismic_smrf_zone4 else 200.0
         beam_dim_map = {m.member_id: calc_beam_dims(m.length_m, 350.0, min_b_primary) for m in primary_beams}

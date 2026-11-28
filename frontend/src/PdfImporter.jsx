@@ -32,6 +32,8 @@ const BEAM_MEMBER_TYPES = [
   { value: "secondary_beam", label: "Secondary Beam" },
   { value: "tie_beam", label: "Tie Beam" },
   { value: "trimmer_beam", label: "Trimmer Beam" },
+  { value: "cantilever_beam", label: "Cantilever Beam" },
+  { value: "edge_beam", label: "Edge Beam" },
 ];
 
 function openingColor(category) {
@@ -576,9 +578,13 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
     };
   }
 
-  // Compute nearest grid intersection (or column center for diagonal beam drawing) within 18 screen-px (unless Shift is held)
+  // Compute nearest grid intersection (or column center for beam drawing) within 18 screen-px (unless Shift is held)
+  // For cantilever_beam second click, allow free placement at the overhang tip without forcing a snap.
   const snappedIntersection = useMemo(() => {
     if (!hoverPt || shiftPressed) return null;
+    if (mode === "place_beam" && newBeamType === "cantilever_beam" && beamStartPt) {
+      return null;
+    }
     if (
       mode !== "place_column" &&
       mode !== "place_beam" &&
@@ -610,7 +616,7 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
       }
     }
     return best;
-  }, [hoverPt, shiftPressed, mode, gridIntersections, pageCols]);
+  }, [hoverPt, shiftPressed, mode, gridIntersections, pageCols, newBeamType, beamStartPt]);
 
   // Live cursor readout in plan meters (if calibrated or master grid scale exists)
   const hoverMeters = useMemo(() => {
@@ -2388,8 +2394,12 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
                       )}
                       <small className="pdf-hint">
                         {beamStartPt
-                          ? "Start point set — click a second column or grid intersection to complete diagonal beam."
-                          : "Click 2 points to draw a diagonal / skewed beam. Snaps to columns & grid intersections (hold Shift for freehand)."}
+                          ? newBeamType === "cantilever_beam"
+                            ? "Start anchored — click freely at the overhang tip to place cantilever beam."
+                            : "Start point set — click a second column or grid intersection to complete beam."
+                          : newBeamType === "cantilever_beam"
+                          ? "Click a column/grid intersection as the cantilever support, then click freely at the overhang tip."
+                          : "Click 2 points to draw a diagonal, edge, or cantilever beam. Snaps to columns & grid intersections (hold Shift for freehand)."}
                       </small>
                     </div>
                   )}

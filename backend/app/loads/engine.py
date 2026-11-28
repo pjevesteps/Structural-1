@@ -239,7 +239,7 @@ def seed_default_floor_loads(project: ProjectState) -> list[FloorGravityLoad]:
     primary_beam_levels = {
         m.floor_level
         for m in model.members
-        if m.member_type in ("primary_beam", "secondary_beam", "trimmer_beam")
+        if m.member_type in ("primary_beam", "secondary_beam", "trimmer_beam", "cantilever_beam", "edge_beam")
     }
 
     seeded: list[FloorGravityLoad] = []
