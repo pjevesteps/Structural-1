@@ -787,6 +787,7 @@ class AnalysisDesignState(BaseModel):
     source_filename: str = ""
     params: DesignParameters = Field(default_factory=DesignParameters)
     story_drifts: list[StoryDriftResult] = Field(default_factory=list)
+    nodal_displacements_mm: dict[str, dict[str, list[float]]] = Field(default_factory=dict)
     support_reactions: list[SupportReactionEnvelope] = Field(default_factory=list)
     beam_designs: list[BeamDesignResult] = Field(default_factory=list)
     column_designs: list[ColumnDesignResult] = Field(default_factory=list)

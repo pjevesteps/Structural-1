@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from .. import storage
 from ..models import (
     AnalysisDesignState,
+    DesignCheckIssue,
     DesignParameters,
     MemberOverrideRequest,
     PinDesignSnapshotRequest,
@@ -124,6 +125,39 @@ def approve_design(project_id: str):
         raise HTTPException(
             status_code=400,
             detail=f"Cannot approve design while failing checks remain: {detail}",
+        )
+
+    # Refresh non-blocking advisory warnings for slabs and retaining walls
+    ad.validation_issues = [
+        iss
+        for iss in ad.validation_issues
+        if iss.code not in ("SLAB_FAIL", "RETAINING_WALL_FAIL")
+    ]
+    fail_slabs = [s for s in ad.slab_designs if s.status != "PASS"]
+    if fail_slabs:
+        ad.validation_issues.append(
+            DesignCheckIssue(
+                severity="warning",
+                code="SLAB_FAIL",
+                message=(
+                    f"{len(fail_slabs)} slab panel(s) did not pass NSCP 2015 thickness/flexure checks "
+                    f"({', '.join(s.panel_id for s in fail_slabs[:5])}). "
+                    "Increase slab thickness in Module 04 or run Auto-Resolve."
+                ),
+            )
+        )
+    fail_rws = [rw for rw in ad.retaining_wall_designs if rw.status != "PASS"]
+    if fail_rws:
+        ad.validation_issues.append(
+            DesignCheckIssue(
+                severity="warning",
+                code="RETAINING_WALL_FAIL",
+                message=(
+                    f"{len(fail_rws)} retaining wall(s) did not pass stability/strength checks "
+                    f"({', '.join(rw.wall_id for rw in fail_rws[:5])}). "
+                    "Increase base width/stem thickness or run Auto-Resolve."
+                ),
+            )
         )
 
     ad.engineer_approved = True

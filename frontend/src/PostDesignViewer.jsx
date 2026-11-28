@@ -618,13 +618,30 @@ export default function PostDesignViewer({
 
     const projNodes = {};
     const projDeflNodes = {};
+    const nodalCaseKey = deflectCase.endsWith("Z") ? "EZ+" : "EX+";
+    const nodalCaseMap = ad?.nodal_displacements_mm?.[nodalCaseKey] || null;
+    const scaleW = deflectCase.startsWith("Wind") ? 0.55 : 1.0;
     for (const n of sm.nodes) {
       projNodes[n.node_id] = proj({ x: n.x_m, y: n.y_m, z: n.z_m });
-      const d = dispByElev[n.y_m.toFixed(2)] || { dx: 0, dz: 0 };
+      let dx = 0;
+      let dy = 0;
+      let dz = 0;
+      if (showDeflected) {
+        const vec = nodalCaseMap?.[String(n.node_id)];
+        if (Array.isArray(vec) && vec.length >= 3) {
+          dx = (Number(vec[0] || 0) / 1000.0) * scaleW;
+          dy = (Number(vec[1] || 0) / 1000.0) * scaleW;
+          dz = (Number(vec[2] || 0) / 1000.0) * scaleW;
+        } else {
+          const d = dispByElev[n.y_m.toFixed(2)] || { dx: 0, dz: 0 };
+          dx = d.dx;
+          dz = d.dz;
+        }
+      }
       projDeflNodes[n.node_id] = proj({
-        x: n.x_m + (showDeflected ? d.dx * deflectAmp : 0),
-        y: n.y_m,
-        z: n.z_m + (showDeflected ? d.dz * deflectAmp : 0),
+        x: n.x_m + dx * deflectAmp,
+        y: n.y_m + dy * deflectAmp,
+        z: n.z_m + dz * deflectAmp,
       });
     }
 

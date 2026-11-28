@@ -606,7 +606,16 @@ export default function DesignReview({ project, onClose, onUpdated }) {
         method: "POST",
       });
       setFullProject((prev) => (prev ? { ...prev, analysis_design: updated } : prev));
-      setNotice("Engineer approval recorded for Module 06 Analysis & RC Design.");
+      const failSlabs = (updated?.slab_designs || []).filter((s) => s.status === "FAIL").length;
+      const failRws = (updated?.retaining_wall_designs || []).filter((r) => r.status === "FAIL").length;
+      const warnParts = [];
+      if (failSlabs > 0) warnParts.push(`${failSlabs} failing slab(s)`);
+      if (failRws > 0) warnParts.push(`${failRws} failing retaining wall(s)`);
+      setNotice(
+        warnParts.length
+          ? `Engineer approval recorded with advisory warning: ${warnParts.join(" and ")} remain — review or run Auto-Resolve.`
+          : "Engineer approval recorded for Module 06 Analysis & RC Design."
+      );
       if (onUpdated) await onUpdated();
     } catch (err) {
       setError(err.message);
@@ -779,6 +788,9 @@ export default function DesignReview({ project, onClose, onUpdated }) {
                 footing / {h.fail_drifts} drift
                 {typeof h.fail_retaining_walls === "number"
                   ? ` / ${h.fail_retaining_walls} retaining wall`
+                  : ""}
+                {typeof h.fail_slabs === "number" && h.fail_slabs > 0
+                  ? ` / ${h.fail_slabs} slab`
                   : ""}{" "}
                 failures (max drift ratio {h.max_drift_ratio})
                 {h.actions?.length ? ` — ${h.actions.join("; ")}` : ""}

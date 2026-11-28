@@ -20,6 +20,7 @@ class AutoResolveRequest(BaseModel):
     upsize_columns: bool = True
     upsize_footings: bool = True
     upsize_retaining_walls: bool = True
+    upsize_slabs: bool = True
     control_story_drift: bool = True
     respect_locked_sections: bool = True
     enforce_scwb: bool = False
@@ -90,6 +91,11 @@ def run_auto_resolve(
             if (req.upsize_retaining_walls and ad_state.retaining_wall_inputs)
             else []
         )
+        fail_slabs = (
+            [s for s in ad_state.slab_designs if s.status != "PASS"]
+            if req.upsize_slabs
+            else []
+        )
 
         extra_beam_secs: set[str] = set()
         extra_col_secs: set[str] = set()
@@ -108,6 +114,7 @@ def run_auto_resolve(
             + len(fail_ftgs)
             + len(fail_drifts)
             + len(fail_rws)
+            + len(fail_slabs)
             + extra_fail_cnt
         )
         max_b_dcr = max((b.governing_dcr for b in ad_state.beam_designs), default=0.0)
@@ -124,6 +131,7 @@ def run_auto_resolve(
             "fail_footings": len(fail_ftgs),
             "fail_drifts": len(fail_drifts),
             "fail_retaining_walls": len(fail_rws),
+            "fail_slabs": len(fail_slabs),
             "extra_failures": extra_fail_cnt,
             "max_beam_dcr": round(max_b_dcr, 3),
             "max_col_dcr": round(max_c_dcr, 3),
@@ -205,6 +213,25 @@ def run_auto_resolve(
                     f"Upsized column {sid}: {old_w:.0f}x{old_h:.0f} -> {sec.width_mm:.0f}x{sec.depth_mm:.0f} mm"
                 )
                 resized_frame = True
+
+        if req.upsize_slabs and fail_slabs:
+            sa_by_key = {
+                (sa.floor_level, sa.panel_id): sa for sa in project.member_sizing.slab_assignments
+            }
+            sa_by_pid = {sa.panel_id: sa for sa in project.member_sizing.slab_assignments}
+            for sl in fail_slabs:
+                sa = sa_by_key.get((sl.floor_level, sl.panel_id)) or sa_by_pid.get(sl.panel_id)
+                if sa is None:
+                    continue
+                if req.respect_locked_sections and sa.manual_override:
+                    continue
+                old_t = sa.thickness_mm
+                sa.thickness_mm = min(350.0, sa.thickness_mm + 25.0)
+                if sa.thickness_mm != old_t:
+                    iter_entry["actions"].append(
+                        f"Thickened slab {sa.panel_id} ({sa.floor_level}): {old_t:.0f} -> {sa.thickness_mm:.0f} mm"
+                    )
+                    resized_frame = True
 
         resized_rw = False
         if req.upsize_retaining_walls and fail_rws:

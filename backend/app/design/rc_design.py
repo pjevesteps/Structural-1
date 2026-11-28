@@ -1110,12 +1110,46 @@ def _build_state_from_results(
             )
         )
 
+    fail_slab_ids = [f"{s.panel_id} ({s.floor_level})" for s in slabs if s.status == "FAIL"]
+    if fail_slab_ids:
+        issues.append(
+            DesignCheckIssue(
+                severity="warning",
+                code="SLAB_FAIL",
+                message=(
+                    f"{len(fail_slab_ids)} slab panel(s) failed thickness/flexure check "
+                    f"({', '.join(fail_slab_ids[:5])}). Run Auto-Resolve or thicken slab(s) in Module 04."
+                ),
+            )
+        )
+
+    fail_rw_ids = [r.wall_id for r in rw_designs if r.status == "FAIL"]
+    if fail_rw_ids:
+        issues.append(
+            DesignCheckIssue(
+                severity="warning",
+                code="RETAINING_WALL_FAIL",
+                message=(
+                    f"{len(fail_rw_ids)} retaining wall(s) failed stability/structural check "
+                    f"({', '.join(fail_rw_ids[:5])}). Run Auto-Resolve or adjust dimensions in Tab 8."
+                ),
+            )
+        )
+
+    nodal_disps: dict[str, dict[str, list[float]]] = {}
+    for case_key, node_map in (results.seismic_displacements_mm or {}).items():
+        nodal_disps[str(case_key)] = {
+            str(nid): [round(float(dx), 3), round(float(dy), 3), round(float(dz), 3)]
+            for nid, (dx, dy, dz) in node_map.items()
+        }
+
     return AnalysisDesignState(
         generated_at=_utc_now(),
         source=source,
         source_filename=source_filename,
         params=params,
         story_drifts=drifts,
+        nodal_displacements_mm=nodal_disps,
         support_reactions=results.support_reactions,
         beam_designs=beams,
         column_designs=columns,

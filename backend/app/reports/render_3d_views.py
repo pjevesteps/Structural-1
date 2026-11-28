@@ -455,24 +455,71 @@ def render_3d_displaced_shape_png(project: ProjectState) -> bytes:
             disp_map[f"{ye:.2f}"] = (0.012 * frac, 0.004 * frac, 0.0, "PASS")
         max_disp_mm = 12.0
 
+    # Check for persisted per-node displacements (EX+ / EZ+) before falling back to story_drifts
+    nodal_disps = ad.nodal_displacements_mm or {}
+    ex_nodes = nodal_disps.get("EX+") or {}
+    ez_nodes = nodal_disps.get("EZ+") or {}
+    use_per_node = bool(ex_nodes or ez_nodes)
+    nodal_peak_mm = 0.0
+    if use_per_node:
+        for cmap in (ex_nodes, ez_nodes):
+            for vec in cmap.values():
+                if isinstance(vec, (list, tuple)) and len(vec) >= 3:
+                    nodal_peak_mm = max(
+                        nodal_peak_mm,
+                        abs(_safe_float(vec[0])),
+                        abs(_safe_float(vec[1])),
+                        abs(_safe_float(vec[2])),
+                    )
+        if nodal_peak_mm > 1e-4:
+            max_disp_mm = max(max_disp_mm, nodal_peak_mm)
+            nominal_mode = False
+        else:
+            use_per_node = False
+
     # Auto amplification so deflected shape is clearly visible (~12% of building span)
     target_shift_m = bldg_span * 0.12
     peak_disp_m = max(max_disp_mm / 1000.0, 1e-4)
     amp = max(5.0, min(250.0, target_shift_m / peak_disp_m))
 
-    def node_disp(n) -> tuple[float, float, float, str]:
+    def node_disp(n) -> tuple[float, float, float, float, str]:
         ny = _safe_float(n.y_m)
         key = f"{ny:.2f}"
+        # Story drift status & ratio lookup
+        st_dr, st_status = 0.0, "PASS"
         if key in disp_map:
-            return disp_map[key]
-        # Nearest elevation match within 0.25 m
-        best_val = (0.0, 0.0, 0.0, "PASS")
+            _, _, st_dr, st_status = disp_map[key]
+        else:
+            best_diff = 0.25
+            for k_str, val in disp_map.items():
+                diff = abs(float(k_str) - ny)
+                if diff < best_diff:
+                    best_diff = diff
+                    st_dr, st_status = val[2], val[3]
+
+        if use_per_node:
+            nid_str = str(n.node_id)
+            vx = ex_nodes.get(nid_str)
+            vz = ez_nodes.get(nid_str)
+            dx_m = _safe_float(vx[0]) / 1000.0 if (vx and len(vx) >= 3) else 0.0
+            dy_m = _safe_float(vx[1]) / 1000.0 if (vx and len(vx) >= 3) else (
+                _safe_float(vz[1]) / 1000.0 if (vz and len(vz) >= 3) else 0.0
+            )
+            dz_m = _safe_float(vz[2]) / 1000.0 if (vz and len(vz) >= 3) else (
+                _safe_float(vx[2]) / 1000.0 if (vx and len(vx) >= 3) else 0.0
+            )
+            return dx_m, dy_m, dz_m, st_dr, st_status
+
+        if key in disp_map:
+            val = disp_map[key]
+            return val[0], 0.0, val[1], val[2], val[3]
+        best_val = (0.0, 0.0, 0.0, 0.0, "PASS")
         best_diff = 0.25
         for k_str, val in disp_map.items():
             diff = abs(float(k_str) - ny)
             if diff < best_diff:
                 best_diff = diff
-                best_val = val
+                best_val = (val[0], 0.0, val[1], val[2], val[3])
         return best_val
 
     # 1. Ghosted dashed undeformed wireframe
@@ -490,10 +537,10 @@ def render_3d_displaced_shape_png(project: ProjectState) -> bytes:
         na, nb = node_by_id.get(m.start_node), node_by_id.get(m.end_node)
         if na is None or nb is None:
             continue
-        dxa, dza, dra, sta = node_disp(na)
-        dxb, dzb, drb, stb = node_disp(nb)
-        pa = proj(_safe_float(na.x_m) + dxa * amp, _safe_float(na.y_m), _safe_float(na.z_m) + dza * amp)
-        pb = proj(_safe_float(nb.x_m) + dxb * amp, _safe_float(nb.y_m), _safe_float(nb.z_m) + dzb * amp)
+        dxa, dya, dza, dra, sta = node_disp(na)
+        dxb, dyb, dzb, drb, stb = node_disp(nb)
+        pa = proj(_safe_float(na.x_m) + dxa * amp, _safe_float(na.y_m) + dya * amp, _safe_float(na.z_m) + dza * amp)
+        pb = proj(_safe_float(nb.x_m) + dxb * amp, _safe_float(nb.y_m) + dyb * amp, _safe_float(nb.z_m) + dzb * amp)
         st = "FAIL" if (sta == "FAIL" or stb == "FAIL") else "PASS"
         dr = max(dra, drb)
         if st == "FAIL":

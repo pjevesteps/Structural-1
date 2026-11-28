@@ -303,3 +303,109 @@ def test_auto_resolve_converges_failing_retaining_wall_to_pass(tmp_path, monkeyp
     assert saved.analysis_design.retaining_wall_inputs[0].base_width_m > 1.2
     assert saved.analysis_design.retaining_wall_designs[0].status == "PASS"
     assert saved.analysis_design.retaining_wall_inputs[0].start_xyz_m == [0.0, 0.0, 0.0]
+
+
+def test_nodal_displacements_persisted_and_3d_displaced_report_figure():
+    from backend.app.reports.render_3d_views import render_3d_displaced_shape_png
+
+    p = _make_frame("NODAL-3D")
+    nd = p.analysis_design.nodal_displacements_mm
+    assert "EX+" in nd and "EZ+" in nd
+    assert len(nd["EX+"]) == len(p.structural_model.nodes)
+    for nid, vec in nd["EX+"].items():
+        assert isinstance(nid, str)
+        assert isinstance(vec, list) and len(vec) == 3
+        assert all(isinstance(v, float) for v in vec)
+
+    # Render with true per-node displacements
+    png_nodal = render_3d_displaced_shape_png(p)
+    assert png_nodal[:8] == b"\x89PNG\r\n\x1a\n"
+    assert len(png_nodal) > 5_000
+
+    # Render with legacy empty nodal_displacements_mm fallback
+    p.analysis_design.nodal_displacements_mm = {}
+    png_fallback = render_3d_displaced_shape_png(p)
+    assert png_fallback[:8] == b"\x89PNG\r\n\x1a\n"
+    assert len(png_fallback) > 5_000
+
+
+def test_auto_resolve_thickens_failing_slab_to_pass(tmp_path, monkeypatch):
+    monkeypatch.setattr(storage, "DATA_DIR", tmp_path)
+    p = _make_frame("SLAB-AUTORESOLVE")
+    assert len(p.member_sizing.slab_assignments) >= 1
+
+    # Force first slab to an undersized 75 mm thickness (below t_min_mm)
+    target_sa = p.member_sizing.slab_assignments[0]
+    target_sa.thickness_mm = 75.0
+    target_sa.manual_override = False
+    p.load_generation = generate_loads(p)
+    ad, _ = run_analysis_and_design(p)
+    p.analysis_design = ad
+    assert any(s.status != "PASS" for s in p.analysis_design.slab_designs)
+    storage.save_project(p)
+
+    # upsize_slabs=False should leave slab thickness untouched
+    p_disabled = storage.load_project(p.project_info.project_id)
+    res_disabled = run_auto_resolve(
+        p_disabled,
+        AutoResolveRequest(max_iterations=2, upsize_slabs=False),
+    )
+    assert p_disabled.member_sizing.slab_assignments[0].thickness_mm == 75.0
+    assert res_disabled.history[0]["fail_slabs"] == 0
+
+    # HTTP Auto-Resolve with default upsize_slabs=True thickens in +25 mm steps until PASS
+    client = TestClient(app)
+    resp = client.post(
+        f"/api/projects/{p.project_info.project_id}/design/auto-resolve",
+        json={"max_iterations": 8, "upsize_slabs": True},
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["converged"] is True
+    assert data["history"][0]["fail_slabs"] >= 1
+    assert any("Thickened slab" in a for h in data["history"] for a in h["actions"])
+    assert all(s["status"] == "PASS" for s in data["analysis_design"]["slab_designs"])
+
+    saved = storage.load_project(p.project_info.project_id)
+    new_t = saved.member_sizing.slab_assignments[0].thickness_mm
+    assert new_t > 75.0 and (new_t - 75.0) % 25.0 == 0.0
+
+
+def test_approval_emits_slab_and_retaining_wall_warning_issues(tmp_path, monkeypatch):
+    monkeypatch.setattr(storage, "DATA_DIR", tmp_path)
+    p = _make_frame("APPROVE-WARN")
+    # Ensure primary frame passes first
+    res = run_auto_resolve(p, AutoResolveRequest(max_iterations=6))
+    assert res.converged is True
+
+    # Introduce a failing slab and a failing retaining wall
+    p.member_sizing.slab_assignments[0].thickness_mm = 75.0
+    p.member_sizing.slab_assignments[0].manual_override = False
+    failing_rw = RetainingWallInput(
+        wall_id="RW-WARN",
+        retained_height_m=4.5,
+        base_width_m=1.0,
+        is_restrained_top=False,
+    )
+    rw_des = design_retaining_wall(p, failing_rw)
+    assert rw_des.status == "FAIL"
+    p.analysis_design.retaining_wall_inputs = [failing_rw]
+    p.analysis_design.retaining_wall_designs = [rw_des]
+
+    # Re-run analysis so slab_designs reflects the 75 mm failing slab and warning issues are emitted
+    p.load_generation = generate_loads(p)
+    ad, _ = run_analysis_and_design(p)
+    p.analysis_design = ad
+    issue_codes = {iss.code: iss.severity for iss in ad.validation_issues}
+    assert issue_codes.get("SLAB_FAIL") == "warning"
+    assert issue_codes.get("RETAINING_WALL_FAIL") == "warning"
+
+    storage.save_project(p)
+    client = TestClient(app)
+    resp = client.post(f"/api/projects/{p.project_info.project_id}/design/approve")
+    assert resp.status_code == 200, resp.text
+    approved = resp.json()
+    assert approved["engineer_approved"] is True
+    approved_codes = {iss["code"]: iss["severity"] for iss in approved["validation_issues"]}
+    assert approved_codes.get("SLAB_FAIL") == "warning"
+    assert approved_codes.get("RETAINING_WALL_FAIL") == "warning"
