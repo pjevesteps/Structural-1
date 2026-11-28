@@ -372,6 +372,15 @@ def design_roof_truss(project: ProjectState, inp: RoofTrussInput) -> RoofTrussDe
     total_web_m = (n_panels - 1) * (web_len_mm / 1000.0) * 1.15
     est_steel_kg = 1.10 * (total_top_m * top_wt + total_bot_m * bot_wt + total_web_m * web_wt)
 
+    # Unfactored per-support reactions (each of 2 supports carries half the truss span)
+    # and equivalent uniform bearing line loads along supporting ROOF beams.
+    r_dl_kn = round(0.5 * dl_kpa * spacing * span, 3)
+    r_lr_kn = round(0.5 * lr_kpa * spacing * span, 3)
+    r_wl_down_kn = round(0.5 * (0.6 * qz_kpa) * spacing * span, 3)
+    r_wl_uplift_kn = round(0.5 * (0.9 * qz_kpa) * spacing * span, 3)
+    w_dl_kn_m = round(r_dl_kn / max(spacing, 0.1), 3)
+    w_lr_kn_m = round(r_lr_kn / max(spacing, 0.1), 3)
+
     max_chord_dcr = max(top_dcr, bot_dcr)
     status = "PASS" if (max_chord_dcr <= 1.0 and web_dcr <= 1.0) else "FAIL"
 
@@ -388,5 +397,13 @@ def design_roof_truss(project: ProjectState, inp: RoofTrussInput) -> RoofTrussDe
         max_chord_dcr=max_chord_dcr,
         max_web_dcr=web_dcr,
         estimated_steel_kg=round(est_steel_kg, 1),
+        r_dl_kn=r_dl_kn,
+        r_lr_kn=r_lr_kn,
+        r_wl_down_kn=r_wl_down_kn,
+        r_wl_uplift_kn=r_wl_uplift_kn,
+        w_dl_kn_m=w_dl_kn_m,
+        w_lr_kn_m=w_lr_kn_m,
+        target_floor_level=(inp.target_floor_level or "ROOF").strip() or "ROOF",
+        transferred_to_roof_beams=bool(inp.transfer_to_roof_beams),
         status=status,
     )

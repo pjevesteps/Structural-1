@@ -74,6 +74,9 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
   const [beamStartNodeId, setBeamStartNodeId] = useState(null);
   const [cantileverLenM, setCantileverLenM] = useState("1.5");
   const [cantileverDir, setCantileverDir] = useState("+X");
+  const [rwStartNodeId, setRwStartNodeId] = useState(null);
+  const [rwHeightM, setRwHeightM] = useState("2.8");
+  const [rwBackfillSide, setRwBackfillSide] = useState("exterior");
   const [selectedEntity, setSelectedEntity] = useState(null);
   const [selectedIssueIdx, setSelectedIssueIdx] = useState(null);
 
@@ -82,11 +85,33 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
   const [pitch, setPitch] = useState(0.46);
   const [zoom3d, setZoom3d] = useState(1.0);
 
+  function formatApiError(body, status) {
+    const d = body?.detail;
+    if (typeof d === "string" && d.trim()) return d;
+    if (Array.isArray(d) && d.length > 0) {
+      return d
+        .map((item) => {
+          if (typeof item === "string") return item;
+          if (item && typeof item === "object") {
+            const loc = Array.isArray(item.loc)
+              ? item.loc.filter((part) => part !== "body").join(".")
+              : "";
+            const msg = item.msg || JSON.stringify(item);
+            return loc ? `${loc}: ${msg}` : msg;
+          }
+          return String(item);
+        })
+        .join(" · ");
+    }
+    if (d && typeof d === "object") return d.msg || JSON.stringify(d);
+    return `Request failed (${status})`;
+  }
+
   async function apiJson(url, options) {
     const res = await fetch(url, options);
     const body = await res.json().catch(() => ({}));
     if (!res.ok) {
-      throw new Error(body.detail || `Request failed (${res.status})`);
+      throw new Error(formatApiError(body, res.status));
     }
     return body;
   }
@@ -428,7 +453,11 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
       if (endNid !== null && endNid !== undefined) {
         payload.end_node = endNid;
       } else if (Array.isArray(endXyzM) && endXyzM.length === 3) {
-        payload.end_xyz_m = endXyzM;
+        const coords = endXyzM.map((v) => Number(v));
+        if (coords.some((v) => !Number.isFinite(v))) {
+          throw new Error("Invalid cantilever tip coordinates.");
+        }
+        payload.end_xyz_m = coords;
       }
       const updated = await apiJson(`/api/projects/${pid}/geometry/members`, {
         method: "POST",
@@ -650,6 +679,34 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
       ctx.stroke();
     }
 
+    // Draw spatially placed retaining walls (exact X, Y-up, Z coordinates)
+    const retainingWalls =
+      fullProject?.analysis_design?.retaining_wall_designs ||
+      fullProject?.analysis_design?.retaining_wall_inputs ||
+      [];
+    for (const rw of retainingWalls) {
+      if (!Array.isArray(rw.start_xyz_m) || !Array.isArray(rw.end_xyz_m)) continue;
+      if (storyFilter !== "ALL" && rw.floor_level && rw.floor_level !== storyFilter) continue;
+      const [sx, sy, sz] = rw.start_xyz_m;
+      const [ex, ey, ez] = rw.end_xyz_m;
+      const hRw = Number(rw.retained_height_m || 2.8);
+      const c1 = project3D({ x: sx, y: sy, z: sz }, center, yaw, pitch, scale, w, h);
+      const c2 = project3D({ x: ex, y: ey, z: ez }, center, yaw, pitch, scale, w, h);
+      const c3 = project3D({ x: ex, y: ey + hRw, z: ez }, center, yaw, pitch, scale, w, h);
+      const c4 = project3D({ x: sx, y: sy + hRw, z: sz }, center, yaw, pitch, scale, w, h);
+      ctx.beginPath();
+      ctx.moveTo(c1.sx, c1.sy);
+      ctx.lineTo(c2.sx, c2.sy);
+      ctx.lineTo(c3.sx, c3.sy);
+      ctx.lineTo(c4.sx, c4.sy);
+      ctx.closePath();
+      ctx.fillStyle = "rgba(148, 163, 184, 0.25)";
+      ctx.fill();
+      ctx.strokeStyle = "#cbd5e1";
+      ctx.lineWidth = 1.6;
+      ctx.stroke();
+    }
+
     // Project & depth-sort members (never filter out manual/diagonal beams by member_type or story filter)
     const projectedMembers = [];
     const visibleManualNodeIds = new Set();
@@ -790,7 +847,7 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
       ctx.textAlign = "left";
       ctx.fillText(ax.label, ex + 3, ey + 3);
     }
-  }, [model, fullProject?.openings, sortedLevels, nodeMap, yaw, pitch, zoom3d, storyFilter, viewLayout, issueHighlight]);
+  }, [model, fullProject?.openings, fullProject?.analysis_design?.retaining_wall_designs, sortedLevels, nodeMap, yaw, pitch, zoom3d, storyFilter, viewLayout, issueHighlight]);
 
   // Map grade-level node_id -> buried footing support node when footing_depth_m > 0
   const pedestalSupportByGradeNodeId = useMemo(() => {
@@ -890,12 +947,24 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
   function fromSvg2D(e) {
     const svg = svg2dRef.current;
     if (!svg) return null;
-    const rect = svg.getBoundingClientRect();
-    if (!rect.width || !rect.height) return null;
     const W = 640;
     const H = 440;
-    const sx = ((e.clientX - rect.left) / rect.width) * W;
-    const sy = ((e.clientY - rect.top) / rect.height) * H;
+    let sx;
+    let sy;
+    const ctm = typeof svg.getScreenCTM === "function" ? svg.getScreenCTM() : null;
+    if (ctm && typeof svg.createSVGPoint === "function") {
+      const pt = svg.createSVGPoint();
+      pt.x = e.clientX;
+      pt.y = e.clientY;
+      const svgPt = pt.matrixTransform(ctm.inverse());
+      sx = svgPt.x;
+      sy = svgPt.y;
+    } else {
+      const rect = svg.getBoundingClientRect();
+      if (!rect.width || !rect.height) return null;
+      sx = ((e.clientX - rect.left) / rect.width) * W;
+      sy = ((e.clientY - rect.top) / rect.height) * H;
+    }
     const { minX, maxX, minZ, maxZ } = floorData.bounds;
     const spanX = Math.max(maxX - minX, 1);
     const spanZ = Math.max(maxZ - minZ, 1);
@@ -938,6 +1007,51 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
     handleAddBeam(beamStartNodeId, null, [Number(tx.toFixed(4)), startNode.y_m, Number(tz.toFixed(4))]);
   }
 
+  async function handlePlaceRetainingWall(startNid, endNid) {
+    const na = nodeMap.get(startNid);
+    const nb = nodeMap.get(endNid);
+    if (!na || !nb) return;
+    const hVal = Math.min(12.0, Math.max(0.5, parseFloat(rwHeightM) || 2.8));
+    const lenM = Math.hypot(nb.x_m - na.x_m, nb.z_m - na.z_m);
+    if (lenM < 0.5) {
+      setError("Retaining wall length must be at least 0.50 m.");
+      return;
+    }
+    const existing = fullProject?.analysis_design?.retaining_wall_inputs || [];
+    let idx = existing.length + 1;
+    const usedIds = new Set(existing.map((x) => x.wall_id));
+    while (usedIds.has(`RW-${idx}`)) idx += 1;
+    const wallId = `RW-${idx}`;
+
+    setBusy(true);
+    setError("");
+    try {
+      const updatedAd = await apiJson(`/api/projects/${pid}/design/retaining-walls`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          wall_id: wallId,
+          label: `Retaining Wall ${wallId} (${activeFloor || na.floor_level})`,
+          retained_height_m: hVal,
+          total_length_m: Number(lenM.toFixed(2)),
+          floor_level: activeFloor || na.floor_level,
+          start_xyz_m: [na.x_m, na.y_m, na.z_m],
+          end_xyz_m: [nb.x_m, nb.y_m, nb.z_m],
+          backfill_side: rwBackfillSide,
+        }),
+      });
+      setFullProject((prev) => (prev ? { ...prev, analysis_design: updatedAd } : prev));
+      setRwStartNodeId(null);
+      setNotice(
+        `Placed retaining wall ${wallId} on ${activeFloor || na.floor_level} (L=${lenM.toFixed(2)} m, H=${hVal.toFixed(2)} m) — synced with Tab 8 & 3D view.`
+      );
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function handleNode2DClick(node, e) {
     if (e) e.stopPropagation();
     if (busy) return;
@@ -947,10 +1061,25 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
       handleToggleSupport(supportTarget);
       return;
     }
+    if (editorMode === "add_retwall") {
+      if (rwStartNodeId === null) {
+        setRwStartNodeId(node.node_id);
+        setNotice(`Retaining wall start: N${node.node_id}. Click end node on ${activeFloor}.`);
+      } else if (rwStartNodeId === node.node_id) {
+        setRwStartNodeId(null);
+      } else {
+        handlePlaceRetainingWall(rwStartNodeId, node.node_id);
+      }
+      return;
+    }
     if (editorMode === "add_beam") {
       if (beamStartNodeId === null) {
         setBeamStartNodeId(node.node_id);
-        setNotice(`Beam start: N${node.node_id}. Click destination node on ${activeFloor}.`);
+        setNotice(
+          addBeamType === "cantilever_beam"
+            ? `Support node N${node.node_id} selected — click overhang tip on ${activeFloor} 2D plan (or use Place Cantilever).`
+            : `Beam start: N${node.node_id}. Click destination node on ${activeFloor}.`
+        );
       } else if (beamStartNodeId === node.node_id) {
         setBeamStartNodeId(null);
       } else {
@@ -963,6 +1092,9 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
 
   function handleBeam2DClick(member) {
     if (busy) return;
+    if (editorMode === "add_beam" && addBeamType === "cantilever_beam" && beamStartNodeId !== null) {
+      return;
+    }
     if (editorMode === "delete_member") {
       handleDeleteMember(member.member_id);
       return;
@@ -1246,9 +1378,21 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
                     onClick={() => {
                       setEditorMode("toggle_support");
                       setBeamStartNodeId(null);
+                      setRwStartNodeId(null);
                     }}
                   >
                     Toggle Support
+                  </button>
+                  <button
+                    className={`mini-btn ${editorMode === "add_retwall" ? "on-approve" : ""}`}
+                    onClick={() => {
+                      setEditorMode("add_retwall");
+                      setBeamStartNodeId(null);
+                      setRwStartNodeId(null);
+                    }}
+                    title="Place a spatial retaining wall along two nodes on this floor (syncs with Tab 8 & 3D view)"
+                  >
+                    Add Retaining Wall
                   </button>
                   {sortedLevels.length > 0 &&
                     (/ROOF|^RB$|^RD$|^RF$/i.test(activeFloor || "") ||
@@ -1342,6 +1486,40 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
                 </div>
               )}
 
+              {editorMode === "add_retwall" && (
+                <div className="geom-subbar">
+                  <label className="pdf-field-chip">
+                    <span>Height H (m)</span>
+                    <input
+                      type="number"
+                      step="0.1"
+                      min="0.5"
+                      max="12.0"
+                      value={rwHeightM}
+                      onChange={(e) => setRwHeightM(e.target.value)}
+                      style={{ width: 64 }}
+                    />
+                  </label>
+                  <label className="pdf-field-chip">
+                    <span>Backfill Side</span>
+                    <select
+                      className="pdf-select"
+                      value={rwBackfillSide}
+                      onChange={(e) => setRwBackfillSide(e.target.value)}
+                    >
+                      <option value="exterior">Exterior</option>
+                      <option value="left">Left</option>
+                      <option value="right">Right</option>
+                    </select>
+                  </label>
+                  <small className="pdf-hint">
+                    {rwStartNodeId
+                      ? `Start N${rwStartNodeId} selected — click end node on ${activeFloor} to place & design wall.`
+                      : "Click start node, then end node on 2D plan to place a retaining wall."}
+                  </small>
+                </div>
+              )}
+
               <svg
                 ref={svg2dRef}
                 className="geom-svg-2d"
@@ -1412,6 +1590,57 @@ export default function GeometryBuilder({ project, onClose, onUpdated }) {
                     </g>
                   );
                 })}
+
+                {/* Spatially Placed Retaining Walls on Active Floor */}
+                {(
+                  fullProject?.analysis_design?.retaining_wall_designs ||
+                  fullProject?.analysis_design?.retaining_wall_inputs ||
+                  []
+                )
+                  .filter(
+                    (rw) =>
+                      Array.isArray(rw.start_xyz_m) &&
+                      Array.isArray(rw.end_xyz_m) &&
+                      (!rw.floor_level ||
+                        rw.floor_level.trim().toUpperCase() === (activeFloor || "").trim().toUpperCase())
+                  )
+                  .map((rw) => {
+                    const p1 = toSvg2D(rw.start_xyz_m[0], rw.start_xyz_m[2]);
+                    const p2 = toSvg2D(rw.end_xyz_m[0], rw.end_xyz_m[2]);
+                    return (
+                      <g key={`rw-2d-${rw.wall_id}`}>
+                        <line
+                          x1={p1.x}
+                          y1={p1.y}
+                          x2={p2.x}
+                          y2={p2.y}
+                          stroke="#94a3b8"
+                          strokeWidth="7"
+                          strokeOpacity={0.55}
+                          strokeLinecap="round"
+                        />
+                        <line
+                          x1={p1.x}
+                          y1={p1.y}
+                          x2={p2.x}
+                          y2={p2.y}
+                          stroke="#e2e8f0"
+                          strokeWidth="1.6"
+                          strokeDasharray="6 3"
+                        />
+                        <text
+                          x={(p1.x + p2.x) * 0.5}
+                          y={(p1.y + p2.y) * 0.5 - 8}
+                          textAnchor="middle"
+                          fill="#e2e8f0"
+                          fontSize="9.5"
+                          fontWeight="800"
+                        >
+                          {rw.wall_id} (H={Number(rw.retained_height_m || 0).toFixed(1)}m)
+                        </text>
+                      </g>
+                    );
+                  })}
 
                 {/* Openings */}
                 {floorData.openings.map((op) => {

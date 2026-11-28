@@ -1697,7 +1697,14 @@ export default function DesignReview({ project, onClose, onUpdated }) {
                   <tbody>
                     {(ad?.retaining_wall_designs || []).map((r) => (
                       <tr key={r.wall_id}>
-                        <td><b>{r.wall_id}</b></td>
+                        <td>
+                          <b>{r.wall_id}</b>
+                          {r.floor_level && (
+                            <div style={{ fontSize: "10px", opacity: 0.75 }}>
+                              {r.floor_level} · {r.backfill_side || "exterior"}
+                            </div>
+                          )}
+                        </td>
                         <td>{r.retained_height_m.toFixed(2)} × {r.total_length_m.toFixed(1)}</td>
                         <td>{r.ka.toFixed(2)} / {r.k0.toFixed(2)} / {r.k_ae_seismic.toFixed(2)}</td>
                         <td>{r.stem_mu_knm_per_m.toFixed(1)}</td>
@@ -1762,6 +1769,22 @@ export default function DesignReview({ project, onClose, onUpdated }) {
                       <option value="Fink">Fink</option>
                     </select>
                   </label>
+                  <label className="design-param-field">
+                    <span>Target Level</span>
+                    <input
+                      value={trussForm.target_floor_level ?? "ROOF"}
+                      onChange={(e) => setTrussForm({ ...trussForm, target_floor_level: e.target.value })}
+                      style={{ width: 72 }}
+                    />
+                  </label>
+                  <label className="pdf-check">
+                    <input
+                      type="checkbox"
+                      checked={trussForm.transfer_to_roof_beams ?? true}
+                      onChange={(e) => setTrussForm({ ...trussForm, transfer_to_roof_beams: e.target.checked })}
+                    />
+                    Transfer Reactions to ROOF Beams
+                  </label>
                   <button
                     disabled={busy}
                     onClick={() => postSecondary("roof-trusses", trussForm, `Designed steel roof truss ${trussForm.truss_id}.`)}
@@ -1779,6 +1802,7 @@ export default function DesignReview({ project, onClose, onUpdated }) {
                         <th>Bottom Chord</th>
                         <th>Webs</th>
                         <th>Chord / Web DCR</th>
+                        <th>Reactions (DL/LR)</th>
                         <th>Est. Steel (kg)</th>
                         <th>Status</th>
                         <th>Action</th>
@@ -1793,6 +1817,14 @@ export default function DesignReview({ project, onClose, onUpdated }) {
                           <td>{t.bottom_chord_section}</td>
                           <td>{t.web_section}</td>
                           <td>{t.max_chord_dcr.toFixed(2)} / {t.max_web_dcr.toFixed(2)}</td>
+                          <td>
+                            {Number(t.r_dl_kn || 0).toFixed(1)} / {Number(t.r_lr_kn || 0).toFixed(1)} kN
+                            {t.transferred_to_roof_beams && (
+                              <div style={{ fontSize: "10px", opacity: 0.75 }}>
+                                → {t.target_floor_level || "ROOF"} ({Number(t.w_dl_kn_m || 0).toFixed(2)} kN/m)
+                              </div>
+                            )}
+                          </td>
                           <td>{t.estimated_steel_kg.toFixed(1)}</td>
                           <td>
                             <span className={`design-status-pill ${t.status === "PASS" ? "pass" : "fail"}`}>

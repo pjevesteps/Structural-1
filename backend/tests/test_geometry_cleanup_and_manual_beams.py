@@ -488,5 +488,142 @@ def test_geometry_add_cantilever_via_end_xyz_and_edge_beam_survives_regeneration
     assert len([m for m in sm_regen["members"] if m["member_type"] == "edge_beam"]) == 1
     assert [i for i in sm_regen["validation_issues"] if i["severity"] == "error"] == []
 
+    # Verify explicit end_node=None with replicate_all_floors=True also succeeds without 422
+    n_a1 = next(n for n in sm_regen["nodes"] if n["floor_level"] == "2F" and abs(n["x_m"]) < 0.01 and abs(n["z_m"]) < 0.01)
+    c_rep = client.post(
+        f"/api/projects/{pid}/geometry/members",
+        json={
+            "start_node": n_a1["node_id"],
+            "end_node": None,
+            "end_xyz_m": [-1.2, 3.0, 0.0],
+            "member_type": "cantilever_beam",
+            "floor_level": "2F",
+            "replicate_all_floors": True,
+        },
+    )
+    assert c_rep.status_code == 200, c_rep.text
+    sm_rep = c_rep.json()
+    assert any(
+        m["member_type"] == "cantilever_beam" and m["length_m"] == pytest.approx(1.2, abs=0.05)
+        for m in sm_rep["members"]
+    )
+    assert [i for i in sm_rep["validation_issues"] if i["severity"] == "error"] == []
+
+
+def test_spatial_retaining_wall_and_decoupled_roof_truss_reaction_transfer(isolated_env):
+    """
+    Verify:
+    1. Spatial RetainingWallInput (floor_level, start_xyz_m, end_xyz_m, backfill_side) derives
+       total_length_m from spatial endpoints and propagates spatial fields onto RetainingWallDesign.
+    2. design_roof_truss() computes unfactored support reactions (r_dl_kn, r_lr_kn, r_wl_down_kn,
+       r_wl_uplift_kn) and line loads (w_dl_kn_m, w_lr_kn_m) without adding truss stiffness
+       members to the 3D RC frame.
+    3. loads/engine.py generate_loads() transfers truss DL & LR onto ROOF beams and adds truss DL
+       to ROOF seismic weight when include_roof_slab=False, is idempotent on re-run, and skips
+       transfer when include_roof_slab=True (no double-counting with RC roof slabs).
+    """
+    client = isolated_env
+    pid = "TEST-RW-TRUSS-01"
+    payload = _make_2x2_project(pid)
+    payload["levels"] = [
+        {"id": "GF", "elevation_m": 0.0},
+        {"id": "2F", "elevation_m": 3.0},
+        {"id": "ROOF", "elevation_m": 6.0},
+    ]
+    storage.save_project(ProjectState.model_validate(payload))
+
+    # Generate 3D frame (default include_roof_slab=False) and auto-size
+    gen = client.post(f"/api/projects/{pid}/geometry/generate", json={"include_roof_slab": False})
+    assert gen.status_code == 200, gen.text
+    orig_member_count = len(gen.json()["members"])
+    assert client.post(f"/api/projects/{pid}/sizing/auto-size", json={}).status_code == 200
+
+    # 1. Place spatial retaining wall on GF from (0, 0, 0) -> (5, 0, 0)
+    rw_res = client.post(
+        f"/api/projects/{pid}/design/retaining-walls",
+        json={
+            "wall_id": "RW-SOUTH",
+            "label": "South Perimeter Wall",
+            "retained_height_m": 2.6,
+            "total_length_m": 99.0,  # should be derived as 5.0 m from start_xyz_m -> end_xyz_m
+            "floor_level": "GF",
+            "start_xyz_m": [0.0, 0.0, 0.0],
+            "end_xyz_m": [5.0, 0.0, 0.0],
+            "backfill_side": "exterior",
+        },
+    )
+    assert rw_res.status_code == 200, rw_res.text
+    rw_designs = rw_res.json()["retaining_wall_designs"]
+    assert len(rw_designs) == 1
+    rw = rw_designs[0]
+    assert rw["total_length_m"] == pytest.approx(5.0, abs=0.01)
+    assert rw["floor_level"] == "GF"
+    assert rw["start_xyz_m"] == [0.0, 0.0, 0.0]
+    assert rw["end_xyz_m"] == [5.0, 0.0, 0.0]
+    assert rw["backfill_side"] == "exterior"
+
+    # 2. Baseline loads BEFORE roof truss
+    lg_base = client.post(f"/api/projects/{pid}/loads/generate", json={})
+    assert lg_base.status_code == 200, lg_base.text
+    roof_wt_before = next(
+        s["weight_kn"] for s in lg_base.json()["seismic_summary"]["stories"] if s["floor_level"] == "ROOF"
+    )
+    assert not any(bl["source"].startswith("roof_truss_") for bl in lg_base.json()["beam_loads"])
+
+    # 3. Design standalone roof truss targeting ROOF beams -> computes reactions, does NOT alter RC members
+    tr_res = client.post(
+        f"/api/projects/{pid}/design/roof-trusses",
+        json={
+            "truss_id": "TR-MAIN",
+            "span_m": 8.0,
+            "truss_spacing_m": 2.5,
+            "pitch_deg": 20.0,
+            "truss_type": "Pratt",
+            "target_floor_level": "ROOF",
+            "transfer_to_roof_beams": True,
+        },
+    )
+    assert tr_res.status_code == 200, tr_res.text
+    tr = tr_res.json()["roof_truss_designs"][0]
+    assert tr["r_dl_kn"] > 0.0
+    assert tr["r_lr_kn"] > 0.0
+    assert tr["r_wl_down_kn"] > 0.0
+    assert tr["r_wl_uplift_kn"] > 0.0
+    assert tr["w_dl_kn_m"] == pytest.approx(tr["r_dl_kn"] / 2.5, abs=0.01)
+    assert tr["w_lr_kn_m"] == pytest.approx(tr["r_lr_kn"] / 2.5, abs=0.01)
+    assert tr["transferred_to_roof_beams"] is True
+
+    # 3D RC frame member count must remain completely decoupled (unchanged)
+    proj_check = storage.load_project(pid)
+    assert len(proj_check.structural_model.members) == orig_member_count
+
+    # 4. Generate loads -> transfers truss DL & LR onto ROOF beams and increases ROOF seismic weight
+    lg1 = client.post(f"/api/projects/{pid}/loads/generate", json={})
+    assert lg1.status_code == 200, lg1.text
+    truss_loads_1 = [bl for bl in lg1.json()["beam_loads"] if bl["source"].startswith("roof_truss_")]
+    assert len(truss_loads_1) > 0
+    assert any(bl["load_case"] == "DL" for bl in truss_loads_1)
+    assert any(bl["load_case"] == "LR" for bl in truss_loads_1)
+    roof_wt_after = next(
+        s["weight_kn"] for s in lg1.json()["seismic_summary"]["stories"] if s["floor_level"] == "ROOF"
+    )
+    assert roof_wt_after > roof_wt_before
+
+    # Idempotency check: re-running loads/generate yields identical count of truss beam loads
+    lg2 = client.post(f"/api/projects/{pid}/loads/generate", json={})
+    assert lg2.status_code == 200
+    truss_loads_2 = [bl for bl in lg2.json()["beam_loads"] if bl["source"].startswith("roof_truss_")]
+    assert len(truss_loads_2) == len(truss_loads_1)
+
+    # 5. No double-counting: if include_roof_slab=True creates ROOF slab panels, truss loads are skipped
+    gen_slab = client.post(f"/api/projects/{pid}/geometry/generate", json={"include_roof_slab": True})
+    assert gen_slab.status_code == 200
+    assert client.post(f"/api/projects/{pid}/sizing/auto-size", json={}).status_code == 200
+    lg_slab = client.post(f"/api/projects/{pid}/loads/generate", json={})
+    assert lg_slab.status_code == 200
+    assert not any(bl["source"].startswith("roof_truss_") for bl in lg_slab.json()["beam_loads"])
+
+
+
 
 

@@ -412,22 +412,40 @@ export default function PostDesignViewer({
 
     const hits = [];
 
-    // 1. Retaining walls (if configured) along min-Z perimeter
-    if ((ad?.retaining_wall_designs || []).length > 0) {
-      const rw = ad.retaining_wall_designs[0];
+    // 1. Retaining walls (render all spatially placed walls using exact X, Y-up, Z coordinates;
+    // preserve legacy min-Z perimeter fallback for non-spatial retaining walls)
+    const rwList = ad?.retaining_wall_designs || [];
+    let drewFallbackRw = false;
+    for (const rw of rwList) {
       const hRw = rw.retained_height_m || 2.8;
-      const c1 = proj({ x: minX, y: minY, z: minZ - 0.15 });
-      const c2 = proj({ x: maxX, y: minY, z: minZ - 0.15 });
-      const c3 = proj({ x: maxX, y: minY + hRw, z: minZ - 0.15 });
-      const c4 = proj({ x: minX, y: minY + hRw, z: minZ - 0.15 });
+      let c1, c2, c3, c4;
+      if (Array.isArray(rw.start_xyz_m) && Array.isArray(rw.end_xyz_m)) {
+        const [sx, sy, sz] = rw.start_xyz_m;
+        const [ex, ey, ez] = rw.end_xyz_m;
+        c1 = proj({ x: sx, y: sy, z: sz });
+        c2 = proj({ x: ex, y: ey, z: ez });
+        c3 = proj({ x: ex, y: ey + hRw, z: ez });
+        c4 = proj({ x: sx, y: sy + hRw, z: sz });
+      } else if (!drewFallbackRw) {
+        drewFallbackRw = true;
+        c1 = proj({ x: minX, y: minY, z: minZ - 0.15 });
+        c2 = proj({ x: maxX, y: minY, z: minZ - 0.15 });
+        c3 = proj({ x: maxX, y: minY + hRw, z: minZ - 0.15 });
+        c4 = proj({ x: minX, y: minY + hRw, z: minZ - 0.15 });
+      } else {
+        continue;
+      }
       ctx.beginPath();
       ctx.moveTo(c1.sx, c1.sy); ctx.lineTo(c2.sx, c2.sy);
       ctx.lineTo(c3.sx, c3.sy); ctx.lineTo(c4.sx, c4.sy); ctx.closePath();
-      ctx.fillStyle = "rgba(100, 116, 139, 0.22)";
+      ctx.fillStyle = "rgba(148, 163, 184, 0.24)";
       ctx.fill();
-      ctx.strokeStyle = "#94a3b8";
-      ctx.lineWidth = 1.4;
+      ctx.strokeStyle = "#cbd5e1";
+      ctx.lineWidth = 1.5;
       ctx.stroke();
+      ctx.fillStyle = "#e2e8f0";
+      ctx.font = "bold 10px ui-monospace, SFMono-Regular, monospace";
+      ctx.fillText(rw.wall_id, (c1.sx + c2.sx) * 0.5, (c3.sy + c4.sy) * 0.5 - 4);
     }
 
     // 2. Scaled 3D footing pads at actual y_m

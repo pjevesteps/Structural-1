@@ -160,9 +160,18 @@ class StrapFootingRequest(BaseModel):
 def upsert_retaining_wall(project_id: str, payload: RetainingWallInput):
     project = _load_or_404(project_id)
     ad = project.analysis_design
+    normalized = payload.model_copy(deep=True)
+    if normalized.start_xyz_m is not None and normalized.end_xyz_m is not None:
+        from math import hypot as _hypot
+        spatial_len = _hypot(
+            normalized.end_xyz_m[0] - normalized.start_xyz_m[0],
+            normalized.end_xyz_m[2] - normalized.start_xyz_m[2],
+        )
+        if spatial_len >= 0.5:
+            normalized.total_length_m = round(spatial_len, 2)
     ad.retaining_wall_inputs = [
-        x for x in ad.retaining_wall_inputs if x.wall_id != payload.wall_id
-    ] + [payload]
+        x for x in ad.retaining_wall_inputs if x.wall_id != normalized.wall_id
+    ] + [normalized]
     ad.retaining_wall_designs = [design_retaining_wall(project, rw) for rw in ad.retaining_wall_inputs]
     storage.save_project(project)
     return ad

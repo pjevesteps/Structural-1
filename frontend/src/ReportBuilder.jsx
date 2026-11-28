@@ -53,6 +53,36 @@ function fmtPhp(val) {
   return `₱${fmtNum(val, 2)}`;
 }
 
+const PLACEHOLDER_SIG_VALS = new Set(["", "tbd", "n/a", "na", "-"]);
+
+function pickSignatoryField(projectVal, profileVal) {
+  const proj = String(projectVal ?? "").trim();
+  if (!PLACEHOLDER_SIG_VALS.has(proj.toLowerCase())) {
+    return proj;
+  }
+  const prof = String(profileVal ?? "").trim();
+  return prof || proj;
+}
+
+function mergeSignatoryWithProfile(projectSig, profile, projectLocation) {
+  const base = { ...DEFAULT_SIGNATORY, ...(projectSig || {}) };
+  const prof = profile || {};
+  const merged = {
+    ...base,
+    engineer_name: pickSignatoryField(base.engineer_name, prof.full_name),
+    prc_license_no: pickSignatoryField(base.prc_license_no, prof.prc_license_no),
+    prc_validity: pickSignatoryField(base.prc_validity, prof.prc_validity),
+    ptr_no: pickSignatoryField(base.ptr_no, prof.ptr_no),
+    ptr_date: pickSignatoryField(base.ptr_date, prof.ptr_date_issued),
+    ptr_place: pickSignatoryField(base.ptr_place, prof.ptr_place_issued),
+    tin: pickSignatoryField(base.tin, prof.tin),
+  };
+  if (!String(merged.project_address || "").trim() && projectLocation) {
+    merged.project_address = projectLocation;
+  }
+  return merged;
+}
+
 export default function ReportBuilder({ project, onClose, onUpdated }) {
   const pid = encodeURIComponent(project.project_id);
 
@@ -88,34 +118,21 @@ export default function ReportBuilder({ project, onClose, onUpdated }) {
     setBusy(true);
     setError("");
     try {
-      const [p, presetRes, statusRes] = await Promise.all([
+      const [p, presetRes, statusRes, profileRes] = await Promise.all([
         apiJson(`/api/projects/${pid}`),
         apiJson("/api/reports/cost-presets").catch(() => ({ presets: [] })),
         apiJson(`/api/projects/${pid}/reports/status`).catch(() => null),
+        apiJson("/api/profile", { credentials: "include" }).catch(() => null),
       ]);
       setFullProject(p);
       setRegionalPresets(presetRes.presets || []);
       if (statusRes) setDeliverables(statusRes);
-      if (p.reporting?.signatory) {
-        const sig = { ...DEFAULT_SIGNATORY, ...p.reporting.signatory };
-        if (!sig.project_address && p.project_info?.location) {
-          sig.project_address = p.project_info.location;
-        }
-        setSignatory((prev) => {
-          const merged = { ...sig };
-          for (const key of Object.keys(merged)) {
-            if (prev[key] && prev[key] !== DEFAULT_SIGNATORY[key]) {
-              merged[key] = prev[key];
-            }
-          }
-          return merged;
-        });
-      } else if (p.project_info?.location) {
-        setSignatory((prev) => ({
-          ...prev,
-          project_address: prev.project_address || p.project_info.location,
-        }));
-      }
+      const mergedSig = mergeSignatoryWithProfile(
+        p.reporting?.signatory,
+        profileRes,
+        p.project_info?.location || ""
+      );
+      setSignatory(mergedSig);
       if (p.reporting?.bom_params) {
         setBomParams({ ...DEFAULT_BOM_PARAMS, ...p.reporting.bom_params });
       }

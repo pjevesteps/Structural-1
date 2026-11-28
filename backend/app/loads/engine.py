@@ -959,6 +959,71 @@ def generate_loads(
                         + fl_cfg.interior_wall_line_kn_m * m.length_m
                     )
 
+    # --- 1b. Decoupled Roof Truss Reaction Load Transfer onto ROOF Beams ---
+    # Transfers unfactored truss bearing line loads (DL & LR) onto supporting ROOF beams
+    # without coupling truss stiffness into the 3D RC frame DSM solver.
+    # Skipped if non-void RC slab panels already cover that roof level (avoids double-counting).
+    truss_dl_by_level: dict[str, float] = {}
+    slab_covered_levels = {
+        p.floor_level for p in model.slab_panels if p.slab_action != "void" and p.net_area_sqm > 1e-4
+    }
+    truss_input_by_id = {t.truss_id: t for t in project.analysis_design.roof_truss_inputs}
+    level_by_upper = {lv.id.strip().upper(): lv.id for lv in levels}
+    top_level_id = levels[-1].id if levels else ""
+
+    for tr in project.analysis_design.roof_truss_designs:
+        tr_in = truss_input_by_id.get(tr.truss_id)
+        should_transfer = tr_in.transfer_to_roof_beams if tr_in is not None else tr.transferred_to_roof_beams
+        if not should_transfer:
+            continue
+        raw_target = (tr_in.target_floor_level if tr_in is not None else tr.target_floor_level) or "ROOF"
+        target_lvl = level_by_upper.get(raw_target.strip().upper())
+        if target_lvl is None and raw_target.strip().upper() in {"ROOF", "RB", "RF", "ROOF BEAM"} and top_level_id:
+            target_lvl = top_level_id
+        if not target_lvl or target_lvl in slab_covered_levels:
+            continue
+
+        lvl_support_beams = [
+            m
+            for m in beams_by_level.get(target_lvl, [])
+            if m.member_type in ("primary_beam", "edge_beam")
+        ]
+        if not lvl_support_beams:
+            continue
+        perim_ids = _identify_perimeter_beams(lvl_support_beams, node_by_id)
+        target_beams = [m for m in lvl_support_beams if m.member_id in perim_ids] or lvl_support_beams
+
+        w_dl = max(0.0, float(tr.w_dl_kn_m or 0.0))
+        w_lr = max(0.0, float(tr.w_lr_kn_m or 0.0))
+        for m in target_beams:
+            if w_dl > 1e-6:
+                beam_loads.append(
+                    BeamDistributedLoad(
+                        member_id=m.member_id,
+                        load_case="DL",
+                        load_shape="UNI",
+                        w1_kn_m=round(-w_dl, 4),
+                        w2_kn_m=0.0,
+                        d1_m=0.0,
+                        d2_m=0.0,
+                        source=f"roof_truss_dl:{tr.truss_id}",
+                    )
+                )
+                truss_dl_by_level[target_lvl] = truss_dl_by_level.get(target_lvl, 0.0) + w_dl * m.length_m
+            if w_lr > 1e-6:
+                beam_loads.append(
+                    BeamDistributedLoad(
+                        member_id=m.member_id,
+                        load_case="LR",
+                        load_shape="UNI",
+                        w1_kn_m=round(-w_lr, 4),
+                        w2_kn_m=0.0,
+                        d1_m=0.0,
+                        d2_m=0.0,
+                        source=f"roof_truss_lr:{tr.truss_id}",
+                    )
+                )
+
     # --- 2. Story Seismic Weights ---
     # Identify elevated framing levels above base_elev
     elevated_levels = [lv for lv in levels if lv.elevation_m > base_elev + 1e-4]
@@ -1003,6 +1068,7 @@ def generate_loads(
             + slab_dl_by_level.get(lv.id, 0.0)
             + slab_sdl_by_level.get(lv.id, 0.0)
             + wall_dl_by_level.get(lv.id, 0.0)
+            + truss_dl_by_level.get(lv.id, 0.0)
             + seis_params.live_load_seismic_fraction * slab_ll_by_level.get(lv.id, 0.0)
         )
         story_weights.append((lv.id, lv.elevation_m, round(w_i, 3)))

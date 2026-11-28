@@ -224,11 +224,24 @@ def design_retaining_wall(
         and stem_flex_ok
     )
 
+    effective_len_m = inp.total_length_m
+    if inp.start_xyz_m is not None and inp.end_xyz_m is not None:
+        spatial_len = math.hypot(
+            inp.end_xyz_m[0] - inp.start_xyz_m[0],
+            inp.end_xyz_m[2] - inp.start_xyz_m[2],
+        )
+        if spatial_len >= 0.5:
+            effective_len_m = round(spatial_len, 2)
+
     return RetainingWallDesign(
         wall_id=inp.wall_id,
         label=inp.label,
         retained_height_m=round(h_stem, 3),
-        total_length_m=round(inp.total_length_m, 2),
+        total_length_m=round(effective_len_m, 2),
+        floor_level=inp.floor_level,
+        start_xyz_m=list(inp.start_xyz_m) if inp.start_xyz_m is not None else None,
+        end_xyz_m=list(inp.end_xyz_m) if inp.end_xyz_m is not None else None,
+        backfill_side=inp.backfill_side,
         ka=round(ka, 3),
         k0=round(k0, 3),
         k_ae_seismic=round(k_ae, 3),

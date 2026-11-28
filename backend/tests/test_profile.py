@@ -221,3 +221,12 @@ def test_exports_auto_populate_from_saved_engineer_profile(tmp_path, monkeypatch
     assert "Engr. Niño Peñaflor, RCE" in docx_text
     assert "0199887" in docx_text
     assert "Peñaflor Structural" in docx_text
+
+    # Module 08 readiness warnings should NOT complain about blank engineer_name / prc_license_no
+    # when the saved EngineerProfile supplies them!
+    r_status = client.get(f"/api/projects/{pid}/reports/status")
+    assert r_status.status_code == 200, r_status.text
+    warns = r_status.json().get("readiness_warnings", [])
+    assert not any("engineer name is blank" in w.lower() for w in warns), warns
+    assert not any("prc license number is blank" in w.lower() for w in warns), warns
+

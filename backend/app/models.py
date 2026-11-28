@@ -572,6 +572,10 @@ class RetainingWallInput(BaseModel):
     water_table_height_m: float = Field(default=0.0, ge=0.0, le=12.0)
     allowable_bearing_kpa: float = Field(default=150.0, gt=20.0, le=1000.0)
     is_restrained_top: bool = True
+    floor_level: str = ""
+    start_xyz_m: list[float] | None = Field(default=None, min_length=3, max_length=3)
+    end_xyz_m: list[float] | None = Field(default=None, min_length=3, max_length=3)
+    backfill_side: Literal["left", "right", "exterior"] = "exterior"
 
 
 class RetainingWallDesign(BaseModel):
@@ -580,6 +584,10 @@ class RetainingWallDesign(BaseModel):
     label: str = ""
     retained_height_m: float
     total_length_m: float
+    floor_level: str = ""
+    start_xyz_m: list[float] | None = Field(default=None, min_length=3, max_length=3)
+    end_xyz_m: list[float] | None = Field(default=None, min_length=3, max_length=3)
+    backfill_side: Literal["left", "right", "exterior"] = "exterior"
     ka: float
     k0: float
     k_ae_seismic: float
@@ -662,6 +670,8 @@ class RoofTrussInput(BaseModel):
     pitch_deg: float = Field(default=18.0, ge=5.0, le=45.0)
     truss_type: Literal["Pratt", "Howe", "Fink"] = "Pratt"
     steel_fy_mpa: float = Field(default=248.0, ge=200.0, le=500.0)
+    target_floor_level: str = "ROOF"
+    transfer_to_roof_beams: bool = True
 
 
 class RoofTrussDesign(BaseModel):
@@ -678,6 +688,14 @@ class RoofTrussDesign(BaseModel):
     max_chord_dcr: float
     max_web_dcr: float
     estimated_steel_kg: float
+    r_dl_kn: float = 0.0
+    r_lr_kn: float = 0.0
+    r_wl_down_kn: float = 0.0
+    r_wl_uplift_kn: float = 0.0
+    w_dl_kn_m: float = 0.0
+    w_lr_kn_m: float = 0.0
+    target_floor_level: str = "ROOF"
+    transferred_to_roof_beams: bool = False
     status: Literal["PASS", "FAIL"]
 
 

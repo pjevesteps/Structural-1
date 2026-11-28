@@ -107,8 +107,8 @@ def get_reports_status(project_id: str):
     project = _load_or_404(project_id)
     profile = load_engineer_profile()
     status = get_deliverables_status(project, profile=profile)
-    status["readiness_warnings"] = project.reporting.readiness_warnings or compute_readiness_warnings(
-        project, project.reporting.signatory
+    status["readiness_warnings"] = compute_readiness_warnings(
+        project, project.reporting.signatory, profile=profile
     )
     return status
 
@@ -132,13 +132,13 @@ def generate_structural_report(project_id: str, payload: GenerateStructuralRepor
         if req.options is not None
         else project.reporting.options.model_copy(deep=True)
     )
+    profile = load_engineer_profile()
     project.reporting.signatory = active_sig
     project.reporting.options = active_opts
-    project.reporting.readiness_warnings = compute_readiness_warnings(project, active_sig)
+    project.reporting.readiness_warnings = compute_readiness_warnings(project, active_sig, profile=profile)
     if project.reporting.generated_at is None:
         project.reporting.generated_at = _utc_now()
 
-    profile = load_engineer_profile()
     try:
         _build_and_store_structural_report(project, profile)
     except ValueError as exc:
@@ -229,14 +229,14 @@ def generate_bom_only(project_id: str, payload: GenerateBomRequest | None = None
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
+    profile = load_engineer_profile()
     project.reporting.signatory = active_sig
     project.reporting.bom_params = active_bom_params
     project.reporting.bom = bom
-    project.reporting.readiness_warnings = compute_readiness_warnings(project, active_sig)
+    project.reporting.readiness_warnings = compute_readiness_warnings(project, active_sig, profile=profile)
     if project.reporting.generated_at is None:
         project.reporting.generated_at = _utc_now()
 
-    profile = load_engineer_profile()
     csv_text = export_bom_csv(project)
     persist_bom_artifact(project, csv_text, profile=profile)
     storage.save_project(project)

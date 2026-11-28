@@ -18,6 +18,7 @@ from ..models import (
     ReportGenerationOptions,
     ReportState,
 )
+from ..profile import EngineerProfile, load_engineer_profile, resolve_signatory
 
 REGIONAL_COST_PRESETS: dict[str, dict] = {
     "car_baguio": {
@@ -640,10 +641,15 @@ def compute_bom_summary(
 def compute_readiness_warnings(
     project: ProjectState,
     signatory: EngineerSignatory,
+    profile: EngineerProfile | None = None,
 ) -> list[str]:
     """Return non-blocking OBO / NBCP permit readiness warnings."""
     warnings: list[str] = []
     ad = project.analysis_design
+    resolved_sig = resolve_signatory(
+        signatory,
+        profile if profile is not None else load_engineer_profile(),
+    )
 
     fail_beams = sum(1 for b in ad.beam_designs if b.status == "FAIL")
     fail_cols = sum(1 for c in ad.column_designs if c.status == "FAIL")
@@ -667,9 +673,9 @@ def compute_readiness_warnings(
             f"{fail_drifts} story level(s) exceed NSCP 2015 inelastic drift limits."
         )
 
-    if not signatory.engineer_name.strip():
+    if not resolved_sig["engineer_name"].strip():
         warnings.append("Signatory engineer name is blank — required for OBO permit sign & seal.")
-    if not signatory.prc_license_no.strip():
+    if not resolved_sig["prc_license_no"].strip():
         warnings.append("Engineer PRC license number is blank — required for NBCP Sec. 302-5.")
 
     elevated_storeys = max(0, len(project.levels) - 1)
