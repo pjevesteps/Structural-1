@@ -9,6 +9,7 @@ const METHODS = [
 ];
 const SHEET_TYPE_OPTIONS = [
   { value: "floor_plan", label: "Floor Plan" },
+  { value: "structural_plan", label: "Structural Plan" },
   { value: "roof_plan", label: "Roof Plan" },
   { value: "elevation", label: "Elevation" },
   { value: "section", label: "Section" },
@@ -52,6 +53,12 @@ function sheetBadgeInfo(page) {
   if (st === "floor_plan") {
     return {
       label: page.viewport_count > 1 ? `FLOOR PLAN (${page.viewport_count})` : "FLOOR PLAN",
+      cls: "sheet-floor",
+    };
+  }
+  if (st === "structural_plan") {
+    return {
+      label: page.viewport_count > 1 ? `STRUCTURAL PLAN (${page.viewport_count})` : "STRUCTURAL PLAN",
       cls: "sheet-floor",
     };
   }
@@ -1064,7 +1071,9 @@ export default function PdfImporter({ project, onClose, onTransferred }) {
         body: fd,
       });
       setDoc(uploaded);
-      const firstFloor = uploaded.pages.find((p) => p.sheet_type === "floor_plan");
+      const firstFloor = uploaded.pages.find(
+        (p) => p.sheet_type === "floor_plan" || p.sheet_type === "structural_plan"
+      );
       setPageNum(firstFloor ? firstFloor.page_number : 1);
       setMode("inspect");
       setNotice(

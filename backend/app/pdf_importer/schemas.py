@@ -9,6 +9,7 @@ SheetType = Literal[
     "cover_toc",
     "lot_site",
     "floor_plan",
+    "structural_plan",
     "roof_plan",
     "elevation",
     "section",

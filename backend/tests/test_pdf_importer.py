@@ -2851,3 +2851,121 @@ def test_cantilever_and_edge_beam_module02_to_module03_synthesis_and_validation(
     assert gen2.status_code == 200
     assert len(gen2.json()["nodes"]) == len(sm["nodes"])
     assert len(gen2.json()["members"]) == len(sm["members"])
+
+
+def test_structural_plan_classification_region_autobuild_and_merge_column_dedup(isolated_env):
+    """
+    Verify:
+    1. classify_sheet_type_from_text() classifies FOUNDATION PLAN, SECOND FLOOR FRAMING PLAN,
+       STRUCTURAL FLOOR PLAN, ROOF BEAM PLAN -> 'structural_plan', while GROUND FLOOR PLAN ->
+       'floor_plan' and ROOF PLAN -> 'roof_plan'.
+    2. update_page() triggers build_floor_plan_regions() when a page is reclassified to 'structural_plan'.
+    3. transfer_approved(merge_mode='merge') deduplicates co-located columns (<= 0.10 m) with
+       different column_ids across sheets while keeping distinct (> 0.10 m) or non-overlapping-floor columns.
+    """
+    from backend.app.pdf_importer.inspector import classify_sheet_type_from_text
+
+    assert classify_sheet_type_from_text("FOUNDATION PLAN") == "structural_plan"
+    assert classify_sheet_type_from_text("SECOND FLOOR FRAMING PLAN") == "structural_plan"
+    assert classify_sheet_type_from_text("STRUCTURAL FLOOR PLAN") == "structural_plan"
+    assert classify_sheet_type_from_text("ROOF BEAM PLAN") == "structural_plan"
+    assert classify_sheet_type_from_text("GROUND FLOOR PLAN") == "floor_plan"
+    assert classify_sheet_type_from_text("ROOF PLAN") == "roof_plan"
+
+    client, _ = isolated_env
+    pid = "TEST-STRUCT-PLAN"
+    assert client.post("/api/projects", json=_make_sample_project(pid)).status_code == 200
+
+    # 2-page PDF: Page 1 is a Structural Plan ("FOUNDATION PLAN"), Page 2 is an unlabeled sheet ("SHEET S-2")
+    d = pymupdf.open()
+    p1 = d.new_page(width=600, height=450)
+    p1.insert_text((40, 35), "FOUNDATION PLAN", fontsize=12)
+    p2 = d.new_page(width=600, height=450)
+    p2.insert_text((40, 35), "SHEET S-2", fontsize=12)
+    pdf_bytes = d.tobytes()
+    d.close()
+
+    up = client.post(
+        f"/api/projects/{pid}/pdf-imports",
+        files={"file": ("struct_plans.pdf", pdf_bytes, "application/pdf")},
+    )
+    assert up.status_code == 200, up.text
+    st = up.json()
+    doc_id = st["doc_id"]
+
+    # Page 1 auto-classified as structural_plan and auto-created a PlanRegion
+    assert st["pages"][0]["sheet_type"] == "structural_plan"
+    assert any(r["page_number"] == 1 for r in st["regions"])
+
+    # Page 2 starts as unknown with 0 regions; reclassifying via PATCH /pages/2 -> structural_plan builds a region!
+    assert st["pages"][1]["sheet_type"] == "unknown"
+    assert not any(r["page_number"] == 2 for r in st["regions"])
+    upd = client.patch(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/pages/2",
+        json={"sheet_type": "structural_plan"},
+    )
+    assert upd.status_code == 200, upd.text
+    st2 = upd.json()
+    assert st2["pages"][1]["sheet_type"] == "structural_plan"
+    assert any(r["page_number"] == 2 for r in st2["regions"])
+
+    # Calibrate both pages identically at 50 px/m (origin 100, 350)
+    for pnum in (1, 2):
+        assert (
+            client.post(
+                f"/api/projects/{pid}/pdf-imports/{doc_id}/pages/{pnum}/calibrate",
+                json={
+                    "p1": {"x_px": 100.0, "y_px": 350.0},
+                    "p2": {"x_px": 400.0, "y_px": 350.0},
+                    "known_distance": 6.0,
+                    "unit": "m",
+                    "confirmed": True,
+                },
+            ).status_code
+            == 200
+        )
+
+    # Page 1: add column C1 at (0.0, 0.0) m -> (100, 350) px and transfer (replace_geometry)
+    assert (
+        client.post(
+            f"/api/projects/{pid}/pdf-imports/{doc_id}/candidates/columns",
+            json={"page_number": 1, "column_id": "C1", "grid": "A-1", "x_px": 100.0, "y_px": 350.0, "width_mm": 400.0, "depth_mm": 400.0, "status": "approved"},
+        ).status_code
+        == 200
+    )
+    tr1 = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/transfer",
+        json={"page_number": 1, "merge_mode": "replace_geometry"},
+    )
+    assert tr1.status_code == 200, tr1.text
+    assert len(tr1.json()["project"]["columns"]) == 1
+
+    # Page 2: add co-located column S_C1 at (0.04, 0.0) m -> (102, 350) px (within 0.10 m of C1, different column_id!)
+    # AND distinct column S_C2 at (6.0, 0.0) m -> (400, 350) px
+    assert (
+        client.post(
+            f"/api/projects/{pid}/pdf-imports/{doc_id}/candidates/columns",
+            json={"page_number": 2, "column_id": "S_C1", "grid": "A-1", "x_px": 102.0, "y_px": 350.0, "width_mm": 450.0, "depth_mm": 450.0, "status": "approved"},
+        ).status_code
+        == 200
+    )
+    assert (
+        client.post(
+            f"/api/projects/{pid}/pdf-imports/{doc_id}/candidates/columns",
+            json={"page_number": 2, "column_id": "S_C2", "grid": "B-1", "x_px": 400.0, "y_px": 350.0, "width_mm": 450.0, "depth_mm": 450.0, "status": "approved"},
+        ).status_code
+        == 200
+    )
+
+    tr2 = client.post(
+        f"/api/projects/{pid}/pdf-imports/{doc_id}/transfer",
+        json={"page_number": 2, "merge_mode": "merge"},
+    )
+    assert tr2.status_code == 200, tr2.text
+    cols_after = tr2.json()["project"]["columns"]
+    # Co-located S_C1 merged into C1 in place (updated to 450x450); distinct S_C2 added -> exactly 2 columns!
+    assert len(cols_after) == 2, f"Expected 2 deduplicated columns, got {cols_after}"
+    c1_after = next(c for c in cols_after if c["id"] == "C1")
+    assert c1_after["width_mm"] == 450.0
+    assert any(c["id"] == "S_C2" for c in cols_after)
+

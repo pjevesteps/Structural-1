@@ -694,7 +694,7 @@ def update_page(
     if req.sheet_title is not None:
         page.sheet_title = req.sheet_title.strip()
 
-    if page.sheet_type == "floor_plan" and not any(r.page_number == page_number for r in state.regions):
+    if page.sheet_type in ("floor_plan", "structural_plan") and not any(r.page_number == page_number for r in state.regions):
         pdf_path = _original_pdf_path(project_id, doc_id)
         png_path = _pages_dir(project_id, doc_id) / page.image_filename
         if pdf_path.exists():
@@ -2933,15 +2933,50 @@ def transfer_approved(
             y_map[g.label] = gl
             y_count += 1
 
+    def _column_floors_overlap(fl_a: str, fl_b: str) -> bool:
+        a = fl_a.strip().upper()
+        b = fl_b.strip().upper()
+        if not a or a == "ALL" or not b or b == "ALL":
+            return True
+        return a == b
+
     for c in approved_cols:
         assert c.x_m is not None and c.y_m is not None
         reg = _find_region(state, c.region_id)
-        col_map[c.column_id] = Column(
-            id=c.column_id,
+        inc_fl = reg.floor_level if (reg and reg.floor_level) else ""
+        inc_x = round(c.x_m, 4)
+        inc_y = round(c.y_m, 4)
+
+        target_key = c.column_id
+        if req.merge_mode == "merge" and target_key not in col_map:
+            colocated = next(
+                (
+                    existing
+                    for existing in col_map.values()
+                    if math.hypot(existing.x_m - inc_x, existing.y_m - inc_y) <= 0.10 + 1e-9
+                    and _column_floors_overlap(existing.floor_level, inc_fl)
+                ),
+                None,
+            )
+            if colocated is not None:
+                target_key = colocated.id
+                col_map[target_key] = Column(
+                    id=colocated.id,
+                    grid=c.grid or colocated.grid,
+                    floor_level=inc_fl or colocated.floor_level,
+                    x_m=inc_x,
+                    y_m=inc_y,
+                    width_mm=c.width_mm,
+                    depth_mm=c.depth_mm,
+                )
+                continue
+
+        col_map[target_key] = Column(
+            id=target_key,
             grid=c.grid,
-            floor_level=reg.floor_level if (reg and reg.floor_level) else "",
-            x_m=round(c.x_m, 4),
-            y_m=round(c.y_m, 4),
+            floor_level=inc_fl,
+            x_m=inc_x,
+            y_m=inc_y,
             width_mm=c.width_mm,
             depth_mm=c.depth_mm,
         )

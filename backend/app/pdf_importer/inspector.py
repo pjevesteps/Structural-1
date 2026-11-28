@@ -38,6 +38,12 @@ COMPOUND_KEYWORDS = (
     "SIXTHFLOORPLAN",
     "MEZZANINEFLOORPLAN",
     "TYPICALFLOORPLAN",
+    "STRUCTURALFLOORPLAN",
+    "STRUCTURALPLAN",
+    "FOUNDATIONPLAN",
+    "FRAMINGPLAN",
+    "BEAMPLAN",
+    "SLABPLAN",
     "ROOFDECKPLAN",
     "FLOORPLAN",
     "ROOFPLAN",
@@ -73,6 +79,12 @@ COMPOUND_REPLACEMENTS = {
     "SIXTHFLOORPLAN": "SIXTH FLOOR PLAN",
     "MEZZANINEFLOORPLAN": "MEZZANINE FLOOR PLAN",
     "TYPICALFLOORPLAN": "TYPICAL FLOOR PLAN",
+    "STRUCTURALFLOORPLAN": "STRUCTURAL FLOOR PLAN",
+    "STRUCTURALPLAN": "STRUCTURAL PLAN",
+    "FOUNDATIONPLAN": "FOUNDATION PLAN",
+    "FRAMINGPLAN": "FRAMING PLAN",
+    "BEAMPLAN": "BEAM PLAN",
+    "SLABPLAN": "SLAB PLAN",
     "ROOFDECKPLAN": "ROOF DECK PLAN",
     "FLOORPLAN": "FLOOR PLAN",
     "ROOFPLAN": "ROOF PLAN",
@@ -317,6 +329,15 @@ def classify_sheet_type_from_text(norm_upper_text: str) -> SheetType:
         return "cover_toc"
     if "LOT PLAN" in t or "SITE DEVELOPMENT" in t:
         return "lot_site"
+    if (
+        "STRUCTURAL PLAN" in t
+        or "STRUCTURAL FLOOR PLAN" in t
+        or "FRAMING PLAN" in t
+        or "FOUNDATION PLAN" in t
+        or "BEAM PLAN" in t
+        or "SLAB PLAN" in t
+    ):
+        return "structural_plan"
     if "FLOOR PLAN" in t or "ROOF DECK PLAN" in t:
         return "floor_plan"
     if "ROOF PLAN" in t and "ROOF DECK PLAN" not in t:
@@ -345,7 +366,7 @@ def _extract_sheet_title(blocks: list[dict], sheet_type: SheetType, full_norm: s
     matched_titles: list[str] = []
     seen: set[str] = set()
 
-    if sheet_type == "floor_plan":
+    if sheet_type in ("floor_plan", "structural_plan"):
         for blk in sorted(blocks, key=lambda x: (x["cx"], x["cy"])):
             for m in FLOOR_TITLE_RE.finditer(blk["norm"]):
                 title = re.sub(r"\s+", " ", m.group(1)).strip(" -:/|")
@@ -619,7 +640,7 @@ def inspect_and_render_pdf(
             sheet_title = _extract_sheet_title(blocks, sheet_type, full_norm)
 
             viewport_count = 1
-            if sheet_type == "floor_plan":
+            if sheet_type in ("floor_plan", "structural_plan"):
                 viewport_count, page_regions = build_floor_plan_regions(
                     page,
                     png_path,
