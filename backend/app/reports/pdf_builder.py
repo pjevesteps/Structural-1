@@ -26,6 +26,7 @@ from ..models import ProjectState
 from ..profile import EngineerProfile, resolve_signatory
 from ..staad import build_staad_text
 from .bom_engine import compute_bom_summary
+from .render_3d_views import render_3d_displaced_shape_png, render_3d_model_and_loads_png
 from .calc_sheets import (
     ENGINEERING_DISCLAIMER,
     build_governing_demand_rows,
@@ -587,8 +588,38 @@ def build_calculation_report_pdf(
                 )
             )
 
+    add_sub("4.3 3D Structural Model, Applied Loads & Displaced Shape")
+    for fig_title, fig_caption, fig_fn in (
+        (
+            "Figure 4.1 - 3D Structural Model & Applied Loads (Isometric View)",
+            "Isometric analytical wireframe showing columns, beams, slab panels, foundations, retaining walls, and representative NSCP 2015 gravity/lateral load vectors.",
+            render_3d_model_and_loads_png,
+        ),
+        (
+            "Figure 4.2 - 3D Displaced Shape & Story Drift Envelope (Isometric View)",
+            "Scaled lateral displaced shape overlaid on dashed undeformed reference geometry using NSCP 2015 Sec. 208.6.4 story drift envelopes.",
+            render_3d_displaced_shape_png,
+        ),
+    ):
+        try:
+            png_bytes = fig_fn(project)
+            if png_bytes:
+                story.append(Paragraph(_safe_pdf_text(f"<b>{fig_title}</b>"), st_body))
+                img = RLImage(io.BytesIO(png_bytes))
+                max_w = avail_w * 0.94
+                max_h = 102 * mm
+                iw, ih = float(img.imageWidth or 1.0), float(img.imageHeight or 1.0)
+                scale_img = min(max_w / max(iw, 1.0), max_h / max(ih, 1.0))
+                img.drawWidth = iw * scale_img
+                img.drawHeight = ih * scale_img
+                story.append(img)
+                story.append(Paragraph(_safe_pdf_text(fig_caption), st_note))
+                story.append(Spacer(1, 5))
+        except Exception:
+            pass
+
     if ad.pinned_design_views:
-        add_sub("4.3 Visual Design Verification & Utilization Maps")
+        add_sub("4.4 Visual Design Verification & Utilization Maps")
         for snap in ad.pinned_design_views:
             title_txt = snap.get("title") or "Pinned Design View"
             caption_txt = snap.get("caption") or ""

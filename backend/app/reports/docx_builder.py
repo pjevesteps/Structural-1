@@ -15,6 +15,7 @@ from ..models import ProjectState
 from ..profile import EngineerProfile, resolve_signatory
 from ..staad import build_staad_text
 from .bom_engine import compute_bom_summary
+from .render_3d_views import render_3d_displaced_shape_png, render_3d_model_and_loads_png
 from .calc_sheets import (
     ENGINEERING_DISCLAIMER,
     build_governing_demand_rows,
@@ -595,8 +596,41 @@ def build_calculation_report_docx(
                 italic=True,
             )
 
+    _add_subheading(doc, "4.3 3D Structural Model, Applied Loads & Displaced Shape")
+    for fig_title, fig_caption, fig_fn in (
+        (
+            "Figure 4.1 · 3D Structural Model & Applied Loads (Isometric View)",
+            "Isometric analytical wireframe showing columns, beams, slab panels, foundations, retaining walls, and representative NSCP 2015 gravity/lateral load vectors.",
+            render_3d_model_and_loads_png,
+        ),
+        (
+            "Figure 4.2 · 3D Displaced Shape & Story Drift Envelope (Isometric View)",
+            "Scaled lateral displaced shape overlaid on dashed undeformed reference geometry using NSCP 2015 Sec. 208.6.4 story drift envelopes.",
+            render_3d_displaced_shape_png,
+        ),
+    ):
+        try:
+            png_bytes = fig_fn(project)
+            if png_bytes:
+                p_ft = doc.add_paragraph()
+                p_ft.paragraph_format.space_before = Pt(4)
+                p_ft.paragraph_format.space_after = Pt(2)
+                rft = p_ft.add_run(fig_title)
+                rft.bold = True
+                rft.font.size = Pt(9.0)
+                rft.font.color.rgb = NAVY_RGB
+                doc.add_picture(io.BytesIO(png_bytes), width=Inches(6.2))
+                p_fc = doc.add_paragraph()
+                p_fc.paragraph_format.space_after = Pt(6)
+                rfc = p_fc.add_run(fig_caption)
+                rfc.italic = True
+                rfc.font.size = Pt(8.0)
+                rfc.font.color.rgb = MUTED_RGB
+        except Exception:
+            pass
+
     if ad.pinned_design_views:
-        _add_subheading(doc, "4.3 Visual Design Verification & Utilization Maps")
+        _add_subheading(doc, "4.4 Visual Design Verification & Utilization Maps")
         for snap in ad.pinned_design_views:
             title_txt = snap.get("title") or "Pinned Design View"
             caption_txt = snap.get("caption") or ""

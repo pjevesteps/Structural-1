@@ -98,6 +98,7 @@ export default function ReportBuilder({ project, onClose, onUpdated }) {
   const [pdfRefreshNonce, setPdfRefreshNonce] = useState(0);
 
   const [signatory, setSignatory] = useState(DEFAULT_SIGNATORY);
+  const [profilePrefilledCount, setProfilePrefilledCount] = useState(0);
   const [bomParams, setBomParams] = useState(DEFAULT_BOM_PARAMS);
   const [options, setOptions] = useState(DEFAULT_OPTIONS);
   const [regionalPresets, setRegionalPresets] = useState([]);
@@ -133,6 +134,20 @@ export default function ReportBuilder({ project, onClose, onUpdated }) {
         p.project_info?.location || ""
       );
       setSignatory(mergedSig);
+      const origSig = p.reporting?.signatory || {};
+      const prefilledFields = [
+        ["engineer_name", profileRes?.full_name],
+        ["prc_license_no", profileRes?.prc_license_no],
+        ["prc_validity", profileRes?.prc_validity],
+        ["ptr_no", profileRes?.ptr_no],
+        ["ptr_date", profileRes?.ptr_date_issued],
+        ["ptr_place", profileRes?.ptr_place_issued],
+        ["tin", profileRes?.tin],
+      ].filter(([k, pv]) => {
+        const orig = String(origSig[k] ?? "").trim().toLowerCase();
+        return PLACEHOLDER_SIG_VALS.has(orig) && String(pv ?? "").trim().length > 0;
+      }).length;
+      setProfilePrefilledCount(prefilledFields);
       if (p.reporting?.bom_params) {
         setBomParams({ ...DEFAULT_BOM_PARAMS, ...p.reporting.bom_params });
       }
@@ -719,6 +734,20 @@ export default function ReportBuilder({ project, onClose, onUpdated }) {
                   Save &amp; Compute BOM →
                 </button>
               </div>
+
+              {profilePrefilledCount > 0 && (
+                <div
+                  className="pdf-muted"
+                  style={{
+                    padding: "6px 14px",
+                    fontSize: 12,
+                    borderBottom: "1px solid rgba(148,163,184,0.18)",
+                  }}
+                >
+                  Pre-filled {profilePrefilledCount} blank signatory field(s) from your saved Engineer
+                  Profile. Edits below apply to this project only and do not overwrite your saved profile.
+                </div>
+              )}
 
               <div className="report-form-grid">
                 <label>
